@@ -208,7 +208,7 @@
         "Add a test that a revised context produces a new version rather than editing in place",
         "Record as untested and not to be inferred whether a late record inside the boundary still revises under a temporal filter"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D2 Context] View-layering boundary tests and materialization policy",
