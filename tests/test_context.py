@@ -16,6 +16,7 @@ import json
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import psycopg
 import pytest
@@ -183,6 +184,48 @@ HOST_CONTEXT_SHAPE = (
     ("packets_sent", "bigint"),
     ("packets_received", "bigint"),
     ("aggregation_version", "character varying"),
+)
+
+# The entity objects, as sql/migrations/0007_context_entities.sql declares them,
+# and the shape a reader of the row gets. Third copy of the deliberate friction
+# FLATTEN_SHAPES and HOST_CONTEXT_SHAPE already carry: adding a column to the
+# view means editing this tuple, and the engine is what the two are compared
+# against.
+ENTITY_OBSERVATIONS = "helena_signal_entity_observations"
+CONTEXT_ENTITIES = "helena_signal_context_entities"
+
+CONTEXT_ENTITIES_SHAPE = (
+    ("context_id", "character varying"),
+    ("tenant", "character varying"),
+    ("sensor", "character varying"),
+    ("host", "character varying"),
+    ("window_start", "timestamp with time zone"),
+    ("window_end", "timestamp with time zone"),
+    ("entity_type", "character varying"),
+    ("entity_value", "character varying"),
+    ("fingerprint_algorithm", "character varying"),
+    ("observed_as_flow_destination", "boolean"),
+    ("observed_in_dns_query", "boolean"),
+    ("observed_in_dns_response", "boolean"),
+    ("observed_in_tls", "boolean"),
+    ("observed_in_http", "boolean"),
+    ("observed_flow_count", "bigint"),
+    ("observed_bytes_sent", "bigint"),
+    ("observed_bytes_received", "bigint"),
+    ("observed_packets_sent", "bigint"),
+    ("observed_packets_received", "bigint"),
+    ("aggregation_version", "character varying"),
+)
+
+# The five layer flags, in the order they sit on the row. `_observations` names
+# one of these per extracted value, so what the view OR's together and what the
+# expectation below OR's together are the same vocabulary.
+ENTITY_FLAGS = (
+    "observed_as_flow_destination",
+    "observed_in_dns_query",
+    "observed_in_dns_response",
+    "observed_in_tls",
+    "observed_in_http",
 )
 
 WINDOW_SECONDS = 300
@@ -936,22 +979,33 @@ def test_the_flow_start_is_a_timestamp_a_window_can_be_taken_over(
 
 
 @pytest.mark.integration
-def test_the_host_context_is_a_materialized_view(migrated_engine: psycopg.Connection):
-    """The declaration in the migration file, checked against the engine.
+def test_every_signal_object_declares_what_it_is(migrated_engine: psycopg.Connection):
+    """The declarations in the migration files, checked against the engine.
 
     The flatten layer below is plain views because a materialized intermediate
     that only feeds an aggregate costs 42 % more disk for rows nothing reads
-    (`concept/03-architecture.md`). This is the aggregate, it is queried by host
-    and window on its own, and it is the row a finding will cite — so it is
-    materialized, and a plain view appearing here would be a citable row that
-    exists only as a query plan.
+    (`concept/03-architecture.md`), and the signal layer has objects on both
+    sides of that rule. The host context and the entity rows are aggregates
+    queried on their own — the rows a finding will cite and the rows the
+    enrichment tables are joined to — so they are materialized, and a plain view
+    there would be a citable row that exists only as a query plan. The entity
+    observations are the intermediate exactly: nothing reads a single one.
+
+    The query is by prefix rather than by name, so an object added to the layer
+    without a declaration fails here instead of going unnoticed.
     """
-    assert rows(
-        migrated_engine,
-        "SELECT table_name, table_type FROM information_schema.tables "
-        "WHERE table_schema = current_schema() "
-        "AND table_name LIKE 'helena_signal_%'",
-    ) == [(HOST_CONTEXT, "MATERIALIZED VIEW")]
+    assert dict(
+        rows(
+            migrated_engine,
+            "SELECT table_name, table_type FROM information_schema.tables "
+            "WHERE table_schema = current_schema() "
+            "AND table_name LIKE 'helena_signal_%'",
+        )
+    ) == {
+        HOST_CONTEXT: "MATERIALIZED VIEW",
+        ENTITY_OBSERVATIONS: "VIEW",
+        CONTEXT_ENTITIES: "MATERIALIZED VIEW",
+    }
 
 
 @pytest.mark.integration
@@ -1396,3 +1450,603 @@ def test_two_hosts_in_one_window_are_two_contexts(
         one(migrated_engine, f"SELECT count(DISTINCT context_id) FROM {HOST_CONTEXT}")
         == 2
     )
+
+
+# --- The signal layer: the entity rows beside a context ---------------------
+
+
+def _uri_host(uri: str) -> str | None:
+    """The host part of a URI, by an implementation that is not the view's.
+
+    `urlsplit().hostname` drops the scheme, the userinfo, the port, the path,
+    the query and the fragment — the whole of what `concept/instruction.md` §6
+    means by "the host part" — and it is the standard library rather than a
+    transcription of the SQL, so the two agreeing means something. It differs
+    from the view in one way: it lowercases. That difference is invisible on
+    this input — no DNS name, SNI or URI host in the sample carries an uppercase
+    character — and case folding is part of the normalization deferred to prd
+    task 15, so no test here introduces one.
+    """
+    return urlsplit(uri).hostname or None
+
+
+def _observations(record: dict) -> list[tuple[str, str, str | None, str]]:
+    """Every (entity type, value, fingerprint algorithm, flag) one record holds.
+
+    Written from `concept/05-threat-intelligence.md`'s table rather than from
+    the view: flow destinations and A/AAAA answers give addresses; DNS query
+    names, DNS response names, the TLS SNI and the host part of a URI give
+    domains; the client's JA3 and JA4 give fingerprints; a request URI gives a
+    url. `ja3s`/`ja4s` are the server's and are deliberately absent.
+    """
+    found = [("address", record["ip"]["dst"], None, "observed_as_flow_destination")]
+    dns = record.get("dns")
+    if dns is not None:
+        for query in dns["queries"]:
+            found.append(("domain", query["qn"], None, "observed_in_dns_query"))
+        for response in dns["responses"]:
+            found.append(("domain", response["qn"], None, "observed_in_dns_response"))
+            if response["rt"] in ("A", "AAAA"):
+                found.append(
+                    ("address", response["rv"], None, "observed_in_dns_response")
+                )
+    tls = record.get("tls")
+    if tls is not None:
+        found.append(("domain", tls["sni"], None, "observed_in_tls"))
+        found.append(("fingerprint", tls["ja3"], "ja3", "observed_in_tls"))
+        found.append(("fingerprint", tls["ja4"], "ja4", "observed_in_tls"))
+    for layer in ("http", "http2"):
+        observed = record.get(layer)
+        if observed is None:
+            continue
+        for request in observed["req"]:
+            found.append(("url", request["uri"], None, "observed_in_http"))
+            host = _uri_host(request["uri"])
+            if host is not None:
+                found.append(("domain", host, None, "observed_in_http"))
+    return found
+
+
+def _expected_entities(records: list[dict]) -> list[tuple]:
+    """The entity rows the records imply: key, flags, and the observed traffic.
+
+    The traffic is summed over the **distinct flows** in which the value was
+    observed, which is the definition in `concept/02-concepts-and-taxonomy.md` —
+    "the traffic of the flows in which the entity was observed" — and the reason
+    a name mentioned twice on one flow may not count that flow's octets twice.
+    """
+    entities: dict[tuple, tuple[set, dict]] = {}
+    for offset, record in enumerate(records):
+        window = datetime.fromtimestamp(
+            int(record["ts"] // WINDOW_SECONDS) * WINDOW_SECONDS, tz=timezone.utc
+        )
+        for kind, value, algorithm, flag in _observations(record):
+            flags, flows = entities.setdefault(
+                (window, kind, value, algorithm), (set(), {})
+            )
+            flags.add(flag)
+            flows[offset] = record["ip"]
+    shaped = [
+        (
+            window,
+            kind,
+            value,
+            algorithm,
+            tuple(flag in flags for flag in ENTITY_FLAGS),
+            len(flows),
+            sum(ip["bsent"] for ip in flows.values()),
+            sum(ip["brecv"] for ip in flows.values()),
+            sum(ip["psent"] for ip in flows.values()),
+            sum(ip["precv"] for ip in flows.values()),
+        )
+        for (window, kind, value, algorithm), (flags, flows) in entities.items()
+    ]
+    return sorted(shaped, key=_entity_order)
+
+
+def _entity_order(row: tuple) -> tuple:
+    # `fingerprint_algorithm` is NULL on every type but `fingerprint`, and None
+    # does not order against a string.
+    return (row[0], row[1], row[2], row[3] or "")
+
+
+def _entity_rows(connection: psycopg.Connection, **where: str) -> list[tuple]:
+    """Every entity row, in the shape `_expected_entities` produces."""
+    clause = "".join(f" AND {column} = %s" for column in where)
+    found = rows(
+        connection,
+        f"SELECT window_start, entity_type, entity_value, fingerprint_algorithm, "
+        f"{', '.join(ENTITY_FLAGS)}, observed_flow_count, observed_bytes_sent, "
+        f"observed_bytes_received, observed_packets_sent, observed_packets_received "
+        f"FROM {CONTEXT_ENTITIES} WHERE TRUE{clause}",
+        *where.values(),
+    )
+    end = 4 + len(ENTITY_FLAGS)
+    return sorted(
+        (row[0], row[1], row[2], row[3], tuple(row[4:end]), *row[end:])
+        for row in found
+    )
+
+
+@pytest.fixture
+def entities(contexts: psycopg.Connection) -> psycopg.Connection:
+    """The ten-record layer-coverage capture, read through the entity rows.
+
+    The same input as the host context, and for the same reason: it holds every
+    layer combination the sample contains, so every extraction branch has a real
+    record behind it, and it straddles a window boundary, so "one row per entity
+    per context" is exercised across two contexts rather than one.
+    """
+    return contexts
+
+
+@pytest.mark.integration
+def test_the_entity_row_has_the_shape_it_declares(
+    migrated_engine: psycopg.Connection,
+):
+    """Column names and types, in order, as the engine reports them."""
+    shape = tuple(
+        rows(
+            migrated_engine,
+            "SELECT column_name, data_type FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = %s "
+            "ORDER BY ordinal_position",
+            CONTEXT_ENTITIES,
+        )
+    )
+    assert shape == CONTEXT_ENTITIES_SHAPE
+
+
+@pytest.mark.integration
+def test_the_entity_row_carries_no_verdict(migrated_engine: psycopg.Connection):
+    """An entity row is a fact about what was observed, and nothing more.
+
+    The same rule the host context is held to: a fact and an inference are
+    separate rows, and enrichment evidence is appended beside an entity rather
+    than written onto it. A `classification` column here would be the place the
+    join's answer gets stamped onto the observation it was about.
+    """
+    forbidden = ("verdict", "classification", "confidence", "severity", "score")
+    columns = [name for name, _ in CONTEXT_ENTITIES_SHAPE]
+    assert [name for name in columns if any(word in name for word in forbidden)] == []
+    engine_columns = [
+        name
+        for (name,) in rows(
+            migrated_engine,
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = %s",
+            CONTEXT_ENTITIES,
+        )
+    ]
+    assert sorted(engine_columns) == sorted(columns)
+
+
+@pytest.mark.integration
+def test_one_row_per_entity_per_context(entities: psycopg.Connection):
+    """The grain `concept/03-architecture.md` requires, asserted two ways.
+
+    "Arrays inside a window cannot be joined to evidence", so the row is per
+    entity — and the same value observed in several flows, or in several layers
+    of one flow, is one row rather than several. The duplicate query is what
+    fails if the aggregation loses a group key; the comparison against the file
+    is what fails if it gains one.
+    """
+    duplicated = one(
+        entities,
+        f"SELECT count(*) FROM (SELECT context_id, entity_type, entity_value "
+        f"FROM {CONTEXT_ENTITIES} GROUP BY 1, 2, 3 HAVING count(*) > 1) d",
+    )
+    assert duplicated == 0
+
+    keys = [row[:4] for row in _entity_rows(entities)]
+    assert keys == [row[:4] for row in _expected_entities(layers_records())]
+    assert len(keys) == len(set(keys))
+
+
+@pytest.mark.integration
+def test_the_address_entities_are_the_destinations_and_the_a_answers(
+    entities: psycopg.Connection,
+):
+    """`concept/05-threat-intelligence.md`: flow destinations, A / AAAA answers.
+
+    Both sources in one assertion, against the values taken from the file. A
+    CNAME's target is a name and not an address, so it is not here; the SOA and
+    PTR records in the fixture are not either.
+    """
+    assert _entity_rows(entities, entity_type="address") == [
+        row for row in _expected_entities(layers_records()) if row[1] == "address"
+    ]
+    records = layers_records()
+    resolved = {
+        response["rv"]
+        for record in records
+        if "dns" in record
+        for response in record["dns"]["responses"]
+        if response["rt"] in ("A", "AAAA")
+    }
+    cname_targets = {
+        response["rv"]
+        for record in records
+        if "dns" in record
+        for response in record["dns"]["responses"]
+        if response["rt"] == "CNAME"
+    }
+    found = {
+        value
+        for (value,) in rows(
+            entities,
+            f"SELECT DISTINCT entity_value FROM {CONTEXT_ENTITIES} "
+            f"WHERE entity_type = 'address'",
+        )
+    }
+    assert resolved <= found
+    assert cname_targets and not (cname_targets & found)
+
+
+@pytest.mark.integration
+def test_an_address_seen_only_as_a_dns_answer_is_flagged_apart_from_a_destination(
+    entities: psycopg.Connection,
+):
+    """The flag `concept/02-concepts-and-taxonomy.md` asks for, by name.
+
+    The composition rule turns on this difference: a C2 hit on an address the
+    host exchanged bytes with supports `malicious.c2`, and the same hit on an
+    address the host only ever resolved does not. Both cases are in the fixture
+    — `40.126.32.138` was resolved and then connected to, and the other six
+    answers of that lookup were resolved and never contacted — so the flags are
+    read off real records rather than a constructed one.
+    """
+    found = dict(
+        rows(
+            entities,
+            f"SELECT entity_value, observed_as_flow_destination "
+            f"FROM {CONTEXT_ENTITIES} WHERE entity_type = 'address' "
+            f"AND observed_in_dns_response",
+        )
+    )
+    records = layers_records()
+    destinations = {record["ip"]["dst"] for record in records}
+    resolved = {
+        response["rv"]
+        for record in records
+        if "dns" in record
+        for response in record["dns"]["responses"]
+        if response["rt"] in ("A", "AAAA")
+    }
+    assert found == {value: value in destinations for value in resolved}
+    # Both halves are real, or the flag would be a column with one value.
+    assert True in found.values() and False in found.values()
+
+
+@pytest.mark.integration
+def test_the_domain_entities_record_which_layers_observed_them(
+    entities: psycopg.Connection,
+):
+    """The weaker substitute for the scope test, and what it can still say.
+
+    `concept/02-concepts-and-taxonomy.md` records the limitation: a name carries
+    the traffic of the flows that *mentioned* it, not of the connection to the
+    address it resolved to — "what the rendering can still say is which layers
+    observed the name: a name in TLS SNI was connected to, where a name seen
+    only in a DNS query may never have been". `login.live.com` is the first case
+    in the fixture (asked, answered, offered as an SNI and requested over HTTP)
+    and `prdv4a.aadg.msidentity.com` the second (a name in an answer chain and
+    nowhere else).
+    """
+    assert _entity_rows(entities, entity_type="domain") == [
+        row for row in _expected_entities(layers_records()) if row[1] == "domain"
+    ]
+    flags = dict(
+        rows(
+            entities,
+            f"SELECT entity_value, ARRAY[observed_in_dns_query, "
+            f"observed_in_dns_response, observed_in_tls, observed_in_http] "
+            f"FROM {CONTEXT_ENTITIES} WHERE entity_type = 'domain' "
+            f"AND entity_value IN (%s, %s)",
+            "login.live.com",
+            "prdv4a.aadg.msidentity.com",
+        )
+    )
+    assert flags == {
+        "login.live.com": [True, True, True, True],
+        "prdv4a.aadg.msidentity.com": [False, True, False, False],
+    }
+
+
+@pytest.mark.integration
+def test_the_fingerprints_are_the_clients_and_carry_their_algorithm(
+    entities: psycopg.Connection,
+):
+    """JA3 and JA4, client-side only, and which is which on the row.
+
+    `concept/05-threat-intelligence.md` says "TLS JA3 and JA4, client-side
+    only", so `ja3s` and `ja4s` — which fingerprint the server's selection —
+    produce no entity, and the fixture's server fingerprints are asserted absent
+    rather than assumed. `fingerprint_algorithm` is on the row because the two
+    are not enrichable alike: the catalogue holds one JA3 list and **no JA4
+    source at all**, so a JA4 with no source is `missing` where a JA3 no source
+    matched is `no_match`, and `concept/instruction.md` §2 forbids collapsing
+    those two.
+    """
+    assert _entity_rows(entities, entity_type="fingerprint") == [
+        row for row in _expected_entities(layers_records()) if row[1] == "fingerprint"
+    ]
+    records = [record for record in layers_records() if "tls" in record]
+    assert records
+    by_algorithm: dict[str, set[str]] = {"ja3": set(), "ja4": set()}
+    for record in records:
+        by_algorithm["ja3"].add(record["tls"]["ja3"])
+        by_algorithm["ja4"].add(record["tls"]["ja4"])
+    found: dict[str, set[str]] = {"ja3": set(), "ja4": set()}
+    for algorithm, value in rows(
+        entities,
+        f"SELECT fingerprint_algorithm, entity_value FROM {CONTEXT_ENTITIES} "
+        f"WHERE entity_type = 'fingerprint'",
+    ):
+        found[algorithm].add(value)
+    assert found == by_algorithm
+
+    server_side = {record["tls"]["ja3s"] for record in records} | {
+        record["tls"]["ja4s"] for record in records
+    }
+    every_value = {
+        value
+        for (value,) in rows(entities, f"SELECT entity_value FROM {CONTEXT_ENTITIES}")
+    }
+    assert server_side and not (server_side & every_value)
+
+
+@pytest.mark.integration
+def test_the_url_entities_are_the_request_uris_whole(entities: psycopg.Connection):
+    """The URI exactly as supplied, query string and all — and both versions.
+
+    `concept/05-threat-intelligence.md` takes url entities from "HTTP and
+    HTTP/2 URIs", and a URL feed matches at exact-URL scope, so truncating the
+    query would be truncating the join key. The fixture carries both versions:
+    `tcp.0` requested over HTTP/2 and `tcp.1` over HTTP/1.
+    """
+    assert _entity_rows(entities, entity_type="url") == [
+        row for row in _expected_entities(layers_records()) if row[1] == "url"
+    ]
+    supplied = {
+        request["uri"]
+        for record in layers_records()
+        for layer in ("http", "http2")
+        if layer in record
+        for request in record[layer]["req"]
+    }
+    found = {
+        value
+        for (value,) in rows(
+            entities,
+            f"SELECT entity_value FROM {CONTEXT_ENTITIES} WHERE entity_type = 'url'",
+        )
+    }
+    assert found == supplied
+    assert any("?" in uri for uri in found)
+    assert {uri.split(":", 1)[0] for uri in found} == {"http", "https"}
+
+
+@pytest.mark.integration
+def test_observation_scoped_traffic_is_the_traffic_of_the_flows_that_observed_it(
+    entities: psycopg.Connection,
+):
+    """Every column of every entity row, against the file it came from.
+
+    A whole-capture comparison rather than a spot check, for the reason the
+    flow-row test gives: a counter reading the wrong direction is invisible on a
+    row where the two happen to agree. The four counters stay bidirectional and
+    there is no total, so a swap cannot hide.
+    """
+    assert _entity_rows(entities) == _expected_entities(layers_records())
+
+
+@pytest.mark.integration
+def test_an_entity_observed_twice_on_one_flow_counts_that_flow_once(
+    entities: psycopg.Connection,
+):
+    """The inner aggregation, on the record that needs it.
+
+    `tcp.4` requests two different URLs from one host, so that host is observed
+    twice on one flow. Its octets are the flow's octets, not twice them — and
+    the two URLs are still two url rows, because they are two entities.
+    """
+    (record,) = [
+        record
+        for record in layers_records()
+        if record.get("id") == "tcp.4" and "http" in record
+    ]
+    uris = [request["uri"] for request in record["http"]["req"]]
+    assert len(uris) == 2 and len(set(uris)) == 2
+    hosts = {_uri_host(uri) for uri in uris}
+    assert len(hosts) == 1
+    (host,) = hosts
+
+    assert rows(
+        entities,
+        f"SELECT observed_flow_count, observed_bytes_sent, observed_bytes_received "
+        f"FROM {CONTEXT_ENTITIES} WHERE entity_type = 'domain' AND entity_value = %s",
+        host,
+    ) == [(1, record["ip"]["bsent"], record["ip"]["brecv"])]
+    assert (
+        one(
+            entities,
+            f"SELECT count(*) FROM {CONTEXT_ENTITIES} WHERE entity_type = 'url' "
+            f"AND entity_value IN (%s, %s)",
+            *uris,
+        )
+        == 2
+    )
+
+
+@pytest.mark.integration
+def test_every_entity_row_belongs_to_the_context_whose_window_it_shares(
+    entities: psycopg.Connection,
+):
+    """The join to the host context, and the second copy of the window interval.
+
+    `INTERVAL '5 minutes'` is written in 0006 and again in 0007 because `TUMBLE`
+    takes a named relation and the two views window different ones. Two copies
+    that can drift are what `concept/instruction.md` §2 forbids for a version
+    constant, so this is the assertion that fails when they do: every entity row
+    joins a context, no entity row is lost by the join, and the window ends
+    agree as well as the starts.
+    """
+    produced = one(entities, f"SELECT count(*) FROM {CONTEXT_ENTITIES}")
+    joined = one(
+        entities,
+        f"SELECT count(*) FROM {CONTEXT_ENTITIES} e JOIN {HOST_CONTEXT} h "
+        f"ON h.context_id = e.context_id WHERE e.window_start = h.window_start "
+        f"AND e.window_end = h.window_end AND e.tenant = h.tenant "
+        f"AND e.sensor = h.sensor AND e.host = h.host",
+    )
+    assert produced == joined > 0
+    assert (
+        one(entities, f"SELECT count(DISTINCT context_id) FROM {CONTEXT_ENTITIES}") == 2
+    )
+    for context_id, tenant, sensor, host, window_start, version in rows(
+        entities,
+        f"SELECT DISTINCT context_id, tenant, sensor, host, window_start, "
+        f"aggregation_version FROM {CONTEXT_ENTITIES}",
+    ):
+        assert context_id == _context_id(tenant, sensor, host, window_start, version)
+
+
+@pytest.mark.integration
+def test_every_entity_row_carries_the_context_aggregation_version(
+    entities: psycopg.Connection,
+):
+    """Read off the context row rather than stamped again.
+
+    The version literal and the id digest exist once, in 0006. An entity row
+    that carried its own copy could disagree with the context it hangs off, and
+    a citation would then resolve to two versions of one computation.
+    """
+    stamped = {
+        version
+        for (version,) in rows(
+            entities, f"SELECT DISTINCT aggregation_version FROM {CONTEXT_ENTITIES}"
+        )
+    }
+    assert stamped == {AGGREGATION_VERSION}
+    assert stamped == {
+        one(entities, f"SELECT aggregation_version FROM {AGGREGATION_VERSION_VIEW}")
+    }
+
+
+@pytest.mark.integration
+def test_two_tenants_ingesting_one_capture_keep_their_entities_apart(
+    migrated_engine: psycopg.Connection,
+):
+    """The tenant seam reaches the join target, not only the source table.
+
+    An entity row is what the enrichment join and the rendering read, so a row
+    that could not name its tenant would end the seam here — one tenant's
+    domains would appear in the other's context.
+    """
+    capture = layers_capture()
+    store_capture(migrated_engine, capture)
+    store_capture(migrated_engine, capture, HELENA_TENANT="other-tenant")
+
+    per_tenant = rows(
+        migrated_engine,
+        f"SELECT tenant, count(*) FROM {CONTEXT_ENTITIES} GROUP BY tenant "
+        f"ORDER BY tenant",
+    )
+    expected = len(_expected_entities(layers_records()))
+    assert per_tenant == [("other-tenant", expected), ("tenant-under-test", expected)]
+    distinct = f"SELECT count(DISTINCT context_id) FROM {CONTEXT_ENTITIES}"
+    assert one(migrated_engine, distinct) == 4
+
+
+@pytest.mark.integration
+def test_the_observation_rows_reconcile_with_what_the_records_hold(
+    entities: psycopg.Connection,
+):
+    """`concept/instruction.md` §7: produced-versus-materialised counts reconcile.
+
+    One observation row per extracted value per flow, counted from the JSON in
+    Python. It is the intermediate the entity rows are aggregated from, so a
+    branch that silently dropped rows — a join key that does not match, a filter
+    that fires on real data — shows up here as a number rather than as a missing
+    entity nobody was looking for.
+    """
+    records = layers_records()
+    assert one(entities, f"SELECT count(*) FROM {ENTITY_OBSERVATIONS}") == sum(
+        len(_observations(record)) for record in records
+    )
+
+
+@pytest.mark.integration
+def test_the_whole_sample_produces_the_entities_the_file_holds(
+    migrated_engine: psycopg.Connection,
+):
+    """All 62 records, every entity row, against the same rows built in Python.
+
+    The layer fixture is ten records chosen for coverage; this is the whole
+    sample, so a branch that only misbehaves on a record the fixture does not
+    contain — the twelve-record answer chain, the NXDOMAIN lookup, the flow with
+    no application layer — has nowhere to hide.
+    """
+    store_capture(migrated_engine, describe_capture(SAMPLE))
+    records = [json.loads(line) for line in SAMPLE.read_bytes().splitlines()]
+    assert len(records) == 62
+    assert _entity_rows(migrated_engine) == _expected_entities(records)
+    per_type = Counter(row[1] for row in _entity_rows(migrated_engine))
+    assert set(per_type) == {"address", "domain", "fingerprint", "url"}
+
+
+@pytest.mark.integration
+def test_the_uri_host_part_drops_the_scheme_userinfo_port_path_and_query(
+    migrated_engine: psycopg.Connection, tmp_path: Path
+):
+    """`concept/instruction.md` §6: a URI in a domain column is the trap.
+
+    No sampled URI carries userinfo, a port or a fragment, so those three steps
+    of the host expression are unexercised by every test above. The record here
+    is a real one whose request URI was replaced — a string the contract permits
+    — put through the real normalizer, which is the same technique the window
+    and transport branches are demonstrated with. The url entity keeps the URI
+    whole; only the domain entity is cut down.
+    """
+    record = dict(layers_records()[2])  # tcp.1, HTTP/1, one request
+    uri = "http://someone@files.example.test:8443/a/b?c=d#e"
+    request = {**record["http"]["req"][0], "uri": uri}
+    record["http"] = {**record["http"], "req": [request]}
+    path = tmp_path / "authority.jsonl"
+    path.write_bytes(json.dumps(record).encode() + b"\n")
+    store_capture(migrated_engine, describe_capture(path))
+
+    assert rows(
+        migrated_engine,
+        f"SELECT entity_type, entity_value FROM {CONTEXT_ENTITIES} "
+        f"WHERE entity_type IN ('domain', 'url') ORDER BY entity_type",
+    ) == [("domain", "files.example.test"), ("url", uri)]
+    assert _uri_host(uri) == "files.example.test"
+
+
+@pytest.mark.integration
+def test_a_relative_uri_is_a_url_entity_and_no_domain_entity(
+    migrated_engine: psycopg.Connection, tmp_path: Path
+):
+    """A URI with no authority has no host part, and none is invented.
+
+    All 36 sampled request URIs are absolute, but an HTTP/1 request line
+    routinely carries a path with the host in a header the input does not
+    supply. The url entity is still produced; the domain entity would have to be
+    guessed, so there is not one.
+    """
+    record = dict(layers_records()[2])  # tcp.1
+    uri = "/msdownload/update/v3/static/trustedr/en/disallowedcertstl.cab"
+    request = {**record["http"]["req"][0], "uri": uri}
+    record["http"] = {**record["http"], "req": [request]}
+    path = tmp_path / "relative.jsonl"
+    path.write_bytes(json.dumps(record).encode() + b"\n")
+    store_capture(migrated_engine, describe_capture(path))
+
+    assert rows(
+        migrated_engine,
+        f"SELECT entity_type, entity_value FROM {CONTEXT_ENTITIES} "
+        f"WHERE entity_type IN ('domain', 'url')",
+    ) == [("url", uri)]
+    assert _uri_host(uri) is None

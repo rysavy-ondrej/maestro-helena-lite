@@ -410,3 +410,52 @@ window coherence needs the evaluation corpus that does not exist**. No sampled
 flow crosses a boundary at all, so the suite demonstrates the rule with a real
 record whose duration is lengthened past one, and claims nothing about how often
 it matters.
+
+### The entity rows
+
+`sql/migrations/0007_context_entities.sql` creates the signal layer's second
+output: `helena_signal_context_entities`, **one row per entity per context**,
+hanging off the host context by its `context_id`. Entities are what enrichment
+is about and what it joins to (`concept/02-concepts-and-taxonomy.md`), and there
+are four types, taken from where `concept/05-threat-intelligence.md` says they
+come from:
+
+| Entity type | Extracted from |
+| --- | --- |
+| `address` | flow destinations, and the values of A / AAAA resource records |
+| `domain` | DNS query names, DNS response names, TLS SNI, and the **host part** of an HTTP or HTTP/2 URI |
+| `fingerprint` | the client's JA3 and JA4 — never the server's `ja3s`/`ja4s` |
+| `url` | HTTP and HTTP/2 request URIs, whole |
+
+The rows are per entity because **arrays inside a window cannot be joined to
+evidence** (`concept/03-architecture.md`), and each carries
+**observation-scoped traffic**: `observed_flow_count` and the four bidirectional
+counters, which are *the traffic of the flows in which the entity was observed*
+— not traffic to it. An address that only ever appeared as a DNS answer carries
+the octets of the lookups that mentioned it. A flow that observed one value
+twice contributes its octets once.
+
+Five flags say **which layer observed the value**:
+`observed_as_flow_destination`, `observed_in_dns_query`,
+`observed_in_dns_response`, `observed_in_tls` and `observed_in_http`. The first
+is the distinction the composition rule turns on — an address the host exchanged
+bytes with is not an address the host merely resolved, and in the sample 16 of
+the 30 resolved addresses are never contacted. The other four are the weaker
+substitute `concept/02-concepts-and-taxonomy.md` records for domains, where the
+scope test cannot work: a name in a TLS SNI was connected to, where a name seen
+only in a DNS query may never have been.
+
+Three things the migration file records rather than glosses. **JA4 has no public
+blocklist** — the rows exist and nothing enriches them, which is why
+`fingerprint_algorithm` is on the row: a JA4 with no source is `missing`, a JA3
+no source matched is `no_match`, and those may not be collapsed. **URL feeds
+have narrow reach on this input**, because TLS yields an SNI and not a URL — 36
+request URIs against 25 TLS handshakes in the sample. And **the value is the
+name as observed**: nothing is lowercased and no registrable domain is derived,
+which is the Public Suffix List question and is deferred.
+
+`helena_signal_entity_observations` sits underneath as a **plain view** — one
+row per (flow, entity) observation, the intermediate the entity rows are
+aggregated from, and the one place the window is taken. Nothing reads a single
+observation, so it is not materialized; the entity rows above it are, because
+they are the join target the enrichment tables and the rendering come to.

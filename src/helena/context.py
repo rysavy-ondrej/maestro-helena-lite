@@ -22,19 +22,21 @@ What exists so far:
 | --- | --- | --- |
 | flatten | `sql/migrations/0005_flatten_layer.sql` | eight plain views over `helena_normalized_events` |
 | signal | `sql/migrations/0006_host_context.sql` | `helena_signal_host_context`, a materialized view: one host context per host per 5-minute window |
-| signal | — | deferred: the entity rows (prd task 14) |
+| signal | `sql/migrations/0007_context_entities.sql` | `helena_signal_entity_observations`, a plain view, and `helena_signal_context_entities`, a materialized view: one row per entity per context, with the traffic of the flows that observed it |
 | analytical | — | deferred: the enriched-context view (D3) |
 
 The flatten layer's shape and the three choices behind it are in
 `docs/decisions/0015-the-flatten-layer.md`; the host context's window, host key,
 identity and version are argued in the head of its own migration, including the
 cost the window choice accepts and the one thing that cannot be measured without
-the evaluation corpus. `tests/test_context.py` is what exercises both, against a
-real engine over real records.
+the evaluation corpus. The entity rows' extraction rules, their
+observation-scoped traffic and the three coverage gaps they inherit are argued
+in the head of theirs. `tests/test_context.py` is what exercises all three,
+against a real engine over real records.
 
 Maturity: experimental — both layers exist and are exercised by execution over
 the sample capture and the layer-coverage fixture. Nothing outside the test
-suite reads a host context yet, no context has been cited, and window coherence
-is unmeasured. The entity rows and the analytical layer above are deferred and
-still say so.
+suite reads a host context or an entity row yet, no context has been cited, no
+entity has been enriched, and window coherence is unmeasured. The analytical
+layer above is deferred and still says so.
 """
