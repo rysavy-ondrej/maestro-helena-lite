@@ -145,7 +145,7 @@
         "Add an integration test that a capture replayed twice produces identical normalized rows",
         "Document replay as the procedure for backfilling a newly added view"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D2 Context] Flatten-layer views over normalized events",
