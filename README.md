@@ -48,7 +48,7 @@ src/helena/          one package, one module per architecture component
   migrations.py        applies sql/migrations/ and records what it applied
 sql/migrations/      the engine's schema: NNNN_name.sql, applied in order
 tests/               the one pytest suite, mirroring the package
-scripts/             dev-up / dev-down, the pin-and-endpoint check, migrate
+scripts/             dev-up / dev-down, the pin-and-endpoint check, migrate, replay
 docs/decisions/      why each dependency and each layout choice is here
 docs/versions.md     the pinned binaries and their checksums
 docs/runbook.md      running the engine and broker, and the libpython hazard
@@ -302,3 +302,25 @@ they are gone. The measurement behind that is in
 later, not instantly, while a topic nobody read keeps its records — so it is
 consume-once and not a retention window, and a retry written against "never
 re-readable" alone would double-ingest.
+
+### Replay
+
+    uv run scripts/replay_capture.py --captures <dir> <sha256> --ingest
+
+The retained capture is the durable record, and replay is a **producer**: it puts
+the capture's records back on the ingest topic in the wire form a sensor uses, and
+everything after that is the live path. `--rate` is a floor on records per second;
+`--ingest` also runs the ingestion side in this process — nothing else consumes
+the topic in this prototype — and prints the four counters at the end.
+
+Replaying a capture twice rewrites the same rows: every assigned field comes from
+the capture, the offset and the configured identity, and an INSERT onto an
+existing key is an upsert. Publishing twice without draining in between is the
+case that fails, and it says so rather than reporting the lost records it
+resembles.
+
+[`docs/runbook.md`](docs/runbook.md) §8 is the procedure, including what
+backfilling a newly added view actually requires — measured, and narrower than
+the concept note assumed: a view over `helena_normalized_events` backfills from
+the table, so what needs replaying is records that never reached the store, not
+views that were created late.

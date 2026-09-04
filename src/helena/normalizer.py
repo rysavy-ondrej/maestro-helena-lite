@@ -210,6 +210,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -227,6 +228,11 @@ from pydantic import (
     model_validator,
 )
 
+from helena.broker import (
+    DEFAULT_IDLE_TIMEOUT_SECONDS,
+    BrokerConsumer,
+    BrokerProducer,
+)
 from helena.config import (
     HELENA_INPUT_FORMAT,
     HELENA_SENSOR,
@@ -284,8 +290,10 @@ __all__ = [
     "TlsRecord",
     "UdpObservation",
     "adapter_for",
+    "consume_ingest_topic",
     "describe_capture",
     "ingest_counts",
+    "publish_capture",
     "read_capture",
     "scan_captures",
 ]
@@ -1789,6 +1797,15 @@ class IngestCounts(Observed):
     plausible-looking number in a report. What it catches is the failure mode the
     whole counter exists for: records that went missing between the topic and the
     store, which is exactly what a broker that is not a store makes possible.
+
+    **Consuming a record twice is checked before that, and reported as its own
+    failure**, because the two are indistinguishable by arithmetic alone: storing
+    an event a second time is an upsert that rewrites the row rather than adding
+    one (measured, task 04), so `normalized` does not grow and a double-consumed
+    run looks exactly like a run that lost records. Replay is what makes it
+    reachable — a capture published to the topic twice and drained once — and a
+    diagnosis pointing at loss would send an operator looking for a broker
+    problem that is not there.
     """
 
     records: NonNegativeInt
@@ -1805,6 +1822,13 @@ class IngestCounts(Observed):
                 f"{self.records}; the two counters are not about the same "
                 f"capture"
             )
+        if self.consumed > self.records:
+            raise ValueError(
+                f"{self.consumed} message(s) were consumed for a capture of "
+                f"{self.records} records, so at least one record was consumed "
+                f"more than once — the capture was probably published to the "
+                f"topic twice and drained once"
+            )
         accounted = self.normalized + self.quarantine.quarantined
         if accounted != self.consumed:
             raise ValueError(
@@ -1813,11 +1837,6 @@ class IngestCounts(Observed):
                 f"{self.quarantine.quarantined} quarantined = {accounted} are "
                 f"accounted for; the difference is records that reached neither "
                 f"store, and the broker keeps nothing to recover them from"
-            )
-        if self.consumed > self.records:
-            raise ValueError(
-                f"{self.consumed} message(s) were consumed for a capture of "
-                f"{self.records} records; the counter does not reconcile"
             )
         return self
 
@@ -1859,6 +1878,110 @@ def ingest_counts(
         normalized=events.normalized(capture),
         quarantine=quarantine.counts(capture),
     )
+
+
+# --- Replay: a retained capture, back through the live path -----------------
+#
+# `concept/07-principles.md`: *the durable record is the retained capture,
+# replayed through the same ingestion path as live traffic so replay exercises
+# the real pipeline rather than a parallel one.* And `concept/06-technology.md`
+# says what it is for: *the broker is consume-once, so a view added later starts
+# empty rather than backfilling; adding one to a running deployment requires
+# replay from the retained captures.*
+#
+# So replay is not a second reader of a capture. It is a **producer**: it puts
+# the capture's records on the ingest topic in the wire form
+# `docs/decisions/0014-the-ingest-topic-message.md` defines, and every step
+# after that is the code live traffic already goes through — the same adapter,
+# the same `_stamp`, the same two stores, the same counters. Neither function
+# below parses a record or stamps an identity, and that is the point: a replay
+# path that normalized anything itself would be the parallel pipeline the rule
+# exists to prevent, and it would be the one nobody notices has drifted.
+#
+# `scripts/replay_capture.py` is the command that runs them.
+
+
+def publish_capture(
+    capture: Capture,
+    producer: BrokerProducer,
+    topic: str,
+    *,
+    rate: float | None = None,
+) -> int:
+    """Publish every record of `capture` to `topic`. Returns records published.
+
+    The producer side of replay, and the only thing this project has that
+    produces to the ingest topic — in a deployment that is a sensor's job.
+
+    `rate` is records per second, paced against the wall clock: record *k* is
+    published no earlier than *k / rate* seconds after the first one, so the
+    whole run takes at least `(record_count - 1) / rate`. It is a floor rather
+    than a schedule — a broker that cannot keep up makes the run slower and
+    nothing here speeds it back up, because a pacer that caught up by publishing
+    a burst would replay at a rate nobody asked for. Left unset, the records go
+    as fast as the broker accepts them.
+
+    The topic is created first, because producing to a topic that does not exist
+    leaves the message queued with no error at all (measured, `docs/runbook.md`
+    §3), and flushed at the end, because nothing has reached the broker until it
+    is flushed and the return value would otherwise be a count of intentions.
+
+    Records are read from the file rather than from anything remembered: the
+    digest is re-checked by `read_capture`, so a capture that changed since it
+    was described is a `CaptureError` rather than a replay of different records
+    under the same reference.
+    """
+    if rate is not None and rate <= 0:
+        raise ValueError(
+            f"a replay rate of {rate} record(s) per second would publish "
+            f"nothing; leave the rate unset to publish as fast as the broker "
+            f"accepts"
+        )
+    producer.create_topic(topic)
+    started = time.monotonic()
+    published = 0
+    for offset, line in read_capture(capture):
+        if rate is not None:
+            delay = started + published / rate - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+        message = IngestMessage(
+            raw_record=RawRecordReference(
+                capture_sha256=capture.sha256, record_offset=offset
+            ),
+            payload=line,
+        )
+        producer.publish(topic, message.payload, message.headers())
+        published += 1
+    producer.flush()
+    return published
+
+
+def consume_ingest_topic(
+    consumer: BrokerConsumer,
+    topic: str,
+    *,
+    idle_timeout: float = DEFAULT_IDLE_TIMEOUT_SECONDS,
+) -> Iterator[IngestMessage]:
+    """Every message on `topic`, as an ingest message, until it goes quiet.
+
+    The consumer side of the wire, and the one place a wire message becomes an
+    ingest message. It is a function rather than three lines at each call site
+    for the reason the whole of this section exists: replay and live ingestion
+    have to decode the headers the same way or they are two pipelines, and the
+    second one is the one that is not tested.
+
+    It yields as it goes, so `Normalizer.ingest_messages` writes each record as
+    it arrives instead of after the topic is drained — the broker is not a store
+    and buffering a whole run in memory would make a crash lose every record
+    that had already been read.
+
+    A message that is not an ingest message raises `IngestMessageError` out of
+    here and stops the run. See that class for why that one is not survivable
+    the way a refused record is.
+    """
+    for message in consumer.consume(topic, idle_timeout=idle_timeout):
+        yield IngestMessage.from_headers(value=message.value, headers=message.headers)
 
 
 def _event_id(*, tenant: str, sensor: str, reference: RawRecordReference) -> str:
