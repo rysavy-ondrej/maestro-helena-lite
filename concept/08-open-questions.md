@@ -90,8 +90,8 @@ says holds everything.
 | The authorized source set is fixed; some feeds need an agreement or a licence | A second feed |
 | Model assignments are candidates; a plain tool loop is the analyst baseline | Settled by measurement, which needs the corpus |
 | **Settled 2026-09-04** — context identity is **stable across revisions** ([07 — Principles](07-principles.md)), so a revision edits the counters in place and the id does not change. What that means for a finding *already issued*, which may cite an id whose numbers have since changed, stays open | Findings outlive a retention boundary |
-| The retention horizon is unset; the prototype runs on bounded fixtures. Now empirical — a candidate can be observed in the rejection counter before it is committed to | Retention is built |
-| Untested, **and not to be inferred**: whether a late record inside the boundary still revises under a temporal filter | Retention is built |
+| The retention horizon is unset. **24 hours is now a candidate in the code, not a decision** — `sql/migrations/0009_retention_boundary.sql`, chosen to be observed in `helena_signal_retention_rejections` rather than committed to | The rejection rate has been watched on real traffic |
+| **Measured 2026-09-04 (task 16), no longer to be inferred either way**: a late record inside the boundary **does** still revise under a temporal filter. A second observation of a window that already had a retained context folded into it through the filter exactly as it folds into the aggregate, with the `context_id` unchanged. What is still untested is the boundary crossing itself — a record arriving for a window that has *just* left the horizon | A record is observed arriving across the horizon |
 | Unmeasured: how many entity rows a busy host produces. The fixture is one host for two minutes | With the rendering bounds |
 
 ## Known hazards, recorded rather than resolved

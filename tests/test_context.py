@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,6 +22,7 @@ from urllib.parse import urlsplit
 
 import psycopg
 import pytest
+from pydantic import ValidationError
 
 import helena.context
 from helena.config import Settings
@@ -31,6 +34,20 @@ from helena.normalizer import (
     Normalizer,
     describe_capture,
     scan_captures,
+)
+from helena.context import (
+    COMPLETENESS_VALUES,
+    FROZEN_CONTEXT_TABLE,
+    LIVE_HOST_CONTEXT_VIEW,
+    RETAINED_CONTEXT_ENTITIES_VIEW,
+    RETAINED_HOST_CONTEXT_VIEW,
+    RETENTION_HORIZON,
+    RETENTION_HORIZON_VIEW,
+    RETENTION_REJECTIONS_VIEW,
+    ContextOutsideRetention,
+    ContextStore,
+    FrozenContext,
+    RetentionRejections,
 )
 from helena.versions import AGGREGATION_VERSION, AGGREGATION_VERSION_VIEW
 
@@ -1005,6 +1022,17 @@ def test_every_signal_object_declares_what_it_is(migrated_engine: psycopg.Connec
         HOST_CONTEXT: "MATERIALIZED VIEW",
         ENTITY_OBSERVATIONS: "VIEW",
         CONTEXT_ENTITIES: "MATERIALIZED VIEW",
+        # The retention boundary of sql/migrations/0009_retention_boundary.sql.
+        # The two retained views are materialized because a temporal filter in a
+        # materialized view is what makes the engine drop the state when the
+        # horizon passes — a plain view there would hide rows while what is
+        # behind them grew forever. The live view and the rejection counter are
+        # plain because both read `now()` outside a WHERE clause, which a
+        # streaming query refuses outright.
+        RETAINED_HOST_CONTEXT_VIEW: "MATERIALIZED VIEW",
+        LIVE_HOST_CONTEXT_VIEW: "VIEW",
+        RETAINED_CONTEXT_ENTITIES_VIEW: "MATERIALIZED VIEW",
+        RETENTION_REJECTIONS_VIEW: "VIEW",
         # The registrable-domain derivation of
         # sql/migrations/0008_public_suffix_list.sql. The two candidate views
         # are intermediates — nothing reads a single candidate — and the
@@ -2060,3 +2088,693 @@ def test_a_relative_uri_is_a_url_entity_and_no_domain_entity(
         f"WHERE entity_type IN ('domain', 'url')",
     ) == [("url", uri)]
     assert _uri_host(uri) is None
+
+
+# --- The retention boundary, completeness, and the frozen copy --------------
+#
+# `sql/migrations/0009_retention_boundary.sql` argues the design; these are the
+# measurements. Every fixture in this repository is dated 2024-06-01, so a
+# horizon a prototype would set puts all of them outside the boundary — which is
+# useful (it is the "outside" case, from real records) but cannot show the inside
+# of the boundary at all. What shows that is the technique tasks 12–15 used for a
+# case the sample cannot reach: a real record put through the real normalizer
+# with one contract-permitted field changed, here `ts`.
+
+# The shape of the citable row, as sql/migrations/0009_retention_boundary.sql
+# declares it. `context_version` and `completeness` are what the live view adds
+# to a retained context, and they lead the row because they are what a citation
+# records.
+LIVE_HOST_CONTEXT_SHAPE = (
+    ("context_id", "character varying"),
+    ("context_version", "character varying"),
+    ("completeness", "character varying"),
+    ("tenant", "character varying"),
+    ("sensor", "character varying"),
+    ("host", "character varying"),
+    ("window_start", "timestamp with time zone"),
+    ("window_end", "timestamp with time zone"),
+    ("flow_count", "bigint"),
+    ("duration_seconds", "double precision"),
+    ("bytes_sent", "bigint"),
+    ("bytes_received", "bigint"),
+    ("packets_sent", "bigint"),
+    ("packets_received", "bigint"),
+    ("aggregation_version", "character varying"),
+)
+
+FROZEN_CONTEXT_SHAPE = (
+    ("tenant", "character varying"),
+    ("sensor", "character varying"),
+    ("context_id", "character varying"),
+    ("context_version", "character varying"),
+    ("completeness", "character varying"),
+    ("host", "character varying"),
+    ("window_start", "timestamp with time zone"),
+    ("window_end", "timestamp with time zone"),
+    ("flow_count", "bigint"),
+    ("duration_seconds", "double precision"),
+    ("bytes_sent", "bigint"),
+    ("bytes_received", "bigint"),
+    ("packets_sent", "bigint"),
+    ("packets_received", "bigint"),
+    ("aggregation_version", "character varying"),
+)
+
+RETENTION_REJECTIONS_SHAPE = (
+    ("tenant", "character varying"),
+    ("sensor", "character varying"),
+    ("retention_horizon", "interval"),
+    ("contexts", "bigint"),
+    ("contexts_outside_boundary", "bigint"),
+    ("records", "bigint"),
+    ("records_outside_boundary", "bigint"),
+)
+
+# The columns whose values the context version is a digest of, in order. The
+# second copy of the construction in the live view's SELECT list; the test below
+# recomputes the digest from them.
+VERSIONED_STATISTICS = (
+    "flow_count",
+    "duration_seconds",
+    "bytes_sent",
+    "bytes_received",
+    "packets_sent",
+    "packets_received",
+)
+
+
+def store_records(
+    connection: psycopg.Connection, path: Path, records: list[dict], **overrides: str
+) -> None:
+    """Write `records` as a capture and put them through the real ingest path.
+
+    The capture identity is the hash of the file, so two calls with different
+    records are two captures and a record ingested by the second is a second
+    observation rather than a replay of the first.
+    """
+    path.write_bytes(
+        b"".join(json.dumps(record).encode() + b"\n" for record in records)
+    )
+    store_capture(connection, describe_capture(path), **overrides)
+
+
+def restamped(record: dict, ts: float) -> dict:
+    """A real record with its start time moved. Nothing else is touched.
+
+    `ts` is a field of the input contract and the flatten layer reads it as the
+    flow's start, so moving it is a contract-permitted change to a real record —
+    the only way to reach the inside of a retention boundary from fixtures dated
+    2024-06-01.
+    """
+    return {**record, "ts": ts}
+
+
+def current_window() -> float:
+    """The start of the window `now` falls in, as epoch seconds."""
+    return float(int(time.time() // WINDOW_SECONDS) * WINDOW_SECONDS)
+
+
+def store(connection: psycopg.Connection, **overrides: str) -> ContextStore:
+    configured = settings(**overrides)
+    return ContextStore(connection=connection, identity=configured.identity)
+
+
+@pytest.fixture
+def bounded(migrated_engine: psycopg.Connection, tmp_path: Path) -> psycopg.Connection:
+    """Four contexts: two outside the boundary, one provisional, one open.
+
+    The ten-record layer capture supplies the two outside — its windows are
+    2024-06-01, which no horizon a prototype would set reaches. Two real records
+    re-stamped supply the two inside: one an hour ago, whose window has closed
+    but whose records are still retained, and one in the window `now` falls in,
+    which has not closed.
+    """
+    store_capture(migrated_engine, layers_capture())
+    window = current_window()
+    store_records(
+        migrated_engine,
+        tmp_path / "provisional.jsonl",
+        [restamped(layers_records()[0], window - 3600 + 1)],
+    )
+    store_records(
+        migrated_engine,
+        tmp_path / "open.jsonl",
+        [restamped(layers_records()[1], window + 1)],
+    )
+    return migrated_engine
+
+
+@pytest.mark.integration
+def test_the_retention_objects_declare_what_they_are(
+    migrated_engine: psycopg.Connection,
+):
+    """The two objects the signal-layer prefix test cannot see.
+
+    `helena_retention_horizon` is reference rather than signal — one constant,
+    one row — and `helena_frozen_context` is the one thing here that holds a row
+    the engine would otherwise take away, so it is a table. RisingWave reports a
+    table as `BASE TABLE`.
+    """
+    assert dict(
+        rows(
+            migrated_engine,
+            "SELECT table_name, table_type FROM information_schema.tables "
+            "WHERE table_schema = current_schema() AND table_name IN (%s, %s)",
+            RETENTION_HORIZON_VIEW,
+            FROZEN_CONTEXT_TABLE,
+        )
+    ) == {RETENTION_HORIZON_VIEW: "VIEW", FROZEN_CONTEXT_TABLE: "BASE TABLE"}
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("relation", "shape"),
+    (
+        (LIVE_HOST_CONTEXT_VIEW, LIVE_HOST_CONTEXT_SHAPE),
+        (FROZEN_CONTEXT_TABLE, FROZEN_CONTEXT_SHAPE),
+        (RETENTION_REJECTIONS_VIEW, RETENTION_REJECTIONS_SHAPE),
+    ),
+)
+def test_the_retention_objects_have_the_shape_they_declare(
+    migrated_engine: psycopg.Connection, relation: str, shape: tuple
+):
+    assert (
+        tuple(
+            rows(
+                migrated_engine,
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = %s "
+                "ORDER BY ordinal_position",
+                relation,
+            )
+        )
+        == shape
+    )
+
+
+@pytest.mark.integration
+def test_the_retained_views_carry_the_shape_of_what_they_bound(
+    migrated_engine: psycopg.Connection,
+):
+    """Retention is a filter, so a retained view is its source minus rows.
+
+    A retained view that dropped, renamed or reordered a column would be a
+    second definition of the context, and the boundary would have become a
+    transformation.
+    """
+    for relation, shape in (
+        (RETAINED_HOST_CONTEXT_VIEW, HOST_CONTEXT_SHAPE),
+        (RETAINED_CONTEXT_ENTITIES_VIEW, CONTEXT_ENTITIES_SHAPE),
+    ):
+        assert (
+            tuple(
+                rows(
+                    migrated_engine,
+                    "SELECT column_name, data_type FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() AND table_name = %s "
+                    "ORDER BY ordinal_position",
+                    relation,
+                )
+            )
+            == shape
+        ), relation
+
+
+@pytest.mark.integration
+def test_the_horizon_has_one_value_in_three_places(
+    migrated_engine: psycopg.Connection,
+):
+    """One parameter, and the copies it is forced to have are asserted equal.
+
+    A streaming query cannot read `helena_retention_horizon` — a CROSS JOIN to a
+    one-row view is refused as a streaming nested-loop join
+    (sql/migrations/0002_aggregation_version.sql) — so the retained view carries
+    the interval as a literal and there are three homes for one number: the
+    Python constant, the declaring view, and the predicate the engine actually
+    runs.
+
+    The third is read out of `rw_catalog` rather than out of the .sql file, and
+    then handed back to the engine to evaluate. Grepping the migration would find
+    the value in the comment that explains it; the catalogue is what the engine
+    received.
+    """
+    declared = one(migrated_engine, f"SELECT retention_horizon FROM {RETENTION_HORIZON_VIEW}")
+    assert declared == RETENTION_HORIZON
+
+    definition = one(
+        migrated_engine,
+        "SELECT definition FROM rw_catalog.rw_materialized_views "
+        "WHERE schema_name = current_schema() AND name = %s",
+        RETAINED_HOST_CONTEXT_VIEW,
+    )
+    intervals = re.findall(r"INTERVAL '([^']+)'", definition)
+    assert len(intervals) == 1, definition
+    assert one(migrated_engine, f"SELECT INTERVAL '{intervals[0]}'") == RETENTION_HORIZON
+
+
+@pytest.mark.integration
+def test_the_boundary_hides_an_old_context_and_keeps_the_records(
+    bounded: psycopg.Connection,
+):
+    """Retention is a temporal filter, not a delete.
+
+    The layer capture's two 2024 contexts are in the aggregate and not in the
+    retained view; the two re-stamped ones are in both. Nothing was deleted —
+    which is what makes the rejection counter below able to count what was
+    dropped, and what makes an archived capture replayable.
+    """
+    assert one(bounded, f"SELECT count(*) FROM {HOST_CONTEXT}") == 4
+    assert (
+        one(
+            bounded,
+            f"SELECT count(*) FROM {HOST_CONTEXT} WHERE window_start < '2025-01-01'",
+        )
+        == 2
+    )
+    retained = rows(
+        bounded,
+        f"SELECT window_start FROM {RETAINED_HOST_CONTEXT_VIEW} ORDER BY window_start",
+    )
+    assert len(retained) == 2
+    assert all(start.year >= 2026 for (start,) in retained)
+
+
+@pytest.mark.integration
+def test_an_entity_row_is_inside_the_boundary_exactly_when_its_context_is(
+    bounded: psycopg.Connection,
+):
+    """The entity boundary is the context's, by construction rather than by copy.
+
+    `helena_signal_context_entities_retained` joins the retained context instead
+    of repeating the temporal predicate, so there is no second copy of the
+    horizon to drift — and an entity row cannot outlive the context it belongs
+    to, which is what would leave a citation pointing at entities of a context
+    nothing can resolve.
+    """
+    assert one(bounded, f"SELECT count(*) FROM {CONTEXT_ENTITIES}") > 0
+    assert rows(
+        bounded,
+        f"SELECT DISTINCT e.context_id FROM {RETAINED_CONTEXT_ENTITIES_VIEW} e "
+        f"ORDER BY e.context_id",
+    ) == rows(
+        bounded,
+        f"SELECT DISTINCT c.context_id FROM {CONTEXT_ENTITIES} c "
+        f"JOIN {RETAINED_HOST_CONTEXT_VIEW} r ON c.context_id = r.context_id "
+        f"ORDER BY c.context_id",
+    )
+    assert (
+        one(
+            bounded,
+            f"SELECT count(*) FROM {RETAINED_CONTEXT_ENTITIES_VIEW} e "
+            f"WHERE NOT EXISTS (SELECT 1 FROM {RETAINED_HOST_CONTEXT_VIEW} r "
+            f"WHERE r.context_id = e.context_id)",
+        )
+        == 0
+    )
+
+
+@pytest.mark.integration
+def test_completeness_is_open_while_the_window_is_and_provisional_after(
+    bounded: psycopg.Connection,
+):
+    """The two values, on two real contexts, and there is no third.
+
+    `open` is a window that has not closed; `provisional` is one that has, whose
+    records are still retained and which a late record can still revise. Neither
+    is "final" — `concept/02-concepts-and-taxonomy.md` — and a context does not
+    become final, it leaves the retained view.
+    """
+    window = datetime.fromtimestamp(current_window(), tz=timezone.utc)
+    assert rows(
+        bounded,
+        f"SELECT completeness, window_start FROM {LIVE_HOST_CONTEXT_VIEW} "
+        f"ORDER BY window_start",
+    ) == [
+        ("provisional", window - timedelta(hours=1)),
+        ("open", window),
+    ]
+
+
+@pytest.mark.integration
+def test_completeness_has_no_final_value_anywhere(bounded: psycopg.Connection):
+    """The domain is two values, and it is structural on both sides.
+
+    In the engine `completeness` is a two-branch CASE in a view nothing writes
+    to, so a third value has nowhere to come from; in Python it is a `Literal`,
+    so a frozen row claiming one is a validation error rather than a stored
+    claim that a context is finished.
+    """
+    assert [
+        value
+        for (value,) in rows(
+            bounded, f"SELECT DISTINCT completeness FROM {LIVE_HOST_CONTEXT_VIEW}"
+        )
+    ] != []
+    assert all(
+        value in COMPLETENESS_VALUES
+        for (value,) in rows(
+            bounded, f"SELECT DISTINCT completeness FROM {LIVE_HOST_CONTEXT_VIEW}"
+        )
+    )
+    assert "final" not in COMPLETENESS_VALUES
+
+    live = rows(
+        bounded,
+        f"SELECT {', '.join(name for name, _ in FROZEN_CONTEXT_SHAPE)} "
+        f"FROM {LIVE_HOST_CONTEXT_VIEW} LIMIT 1",
+    )[0]
+    fields = dict(zip((name for name, _ in FROZEN_CONTEXT_SHAPE), live, strict=True))
+    assert FrozenContext(**fields).completeness in COMPLETENESS_VALUES
+    with pytest.raises(ValidationError):
+        FrozenContext(**{**fields, "completeness": "final"})
+
+
+@pytest.mark.integration
+def test_a_context_leaves_the_retained_view_when_its_window_passes_the_horizon(
+    migrated_engine: psycopg.Connection, tmp_path: Path
+):
+    """The boundary is enforced by the engine as the clock moves, not at read time.
+
+    The shipped horizon is 24 hours, which no test can wait out, so what is
+    measured here is the mechanism the shipped view is built from: the same
+    temporal filter over the same aggregate, with a horizon computed to expire a
+    few seconds from now. The row is there when the view is created and gone
+    once the horizon passes, while the aggregate behind it still holds it —
+    retention is a filter, not a delete.
+
+    Measured before this migration was written, and this is the test that keeps
+    it true: a context whose window_end was 277.6 s old, under a 283-second
+    horizon, was present at creation and gone 5 s after the horizon passed.
+    """
+    store_records(
+        migrated_engine,
+        tmp_path / "expiring.jsonl",
+        [restamped(layers_records()[0], current_window() - 1)],
+    )
+    window_end = one(migrated_engine, f"SELECT window_end FROM {HOST_CONTEXT}")
+    horizon = int(time.time() - window_end.timestamp()) + 6
+    migrated_engine.execute(
+        f"CREATE MATERIALIZED VIEW probe_retained AS "
+        f"SELECT context_id, window_end FROM {HOST_CONTEXT} "
+        f"WHERE window_end > now() - INTERVAL '{horizon} seconds'"
+    )
+    assert one(migrated_engine, "SELECT count(*) FROM probe_retained") == 1
+
+    deadline = time.time() + 60
+    while (
+        one(migrated_engine, "SELECT count(*) FROM probe_retained") > 0
+        and time.time() < deadline
+    ):
+        time.sleep(0.5)
+    assert one(migrated_engine, "SELECT count(*) FROM probe_retained") == 0
+    assert one(migrated_engine, f"SELECT count(*) FROM {HOST_CONTEXT}") == 1
+
+
+@pytest.mark.integration
+def test_a_late_record_inside_the_boundary_still_revises_through_the_filter(
+    migrated_engine: psycopg.Connection, tmp_path: Path
+):
+    """`concept/08-open-questions.md` lists this as untested. It is now measured.
+
+    The note says: untested, **and not to be inferred**, whether a late record
+    inside the boundary still revises under a temporal filter. A temporal filter
+    is a streaming operator between the aggregate and the reader, and "the row
+    updates" is not something to assume of it — so a second observation of a
+    window that already has a retained context is put through the real path, and
+    the retained row is read before and after.
+
+    It revises: the counters change through the filter exactly as they change in
+    the aggregate, and the context id does not move.
+    """
+    window = current_window()
+    first, second = layers_records()[0], layers_records()[1]
+    store_records(migrated_engine, tmp_path / "first.jsonl", [restamped(first, window + 1)])
+    before = rows(
+        migrated_engine,
+        f"SELECT context_id, flow_count, bytes_sent FROM {RETAINED_HOST_CONTEXT_VIEW}",
+    )
+    assert before == [(before[0][0], 1, first["ip"]["bsent"])]
+
+    store_records(
+        migrated_engine, tmp_path / "second.jsonl", [restamped(second, window + 2)]
+    )
+    assert rows(
+        migrated_engine,
+        f"SELECT context_id, flow_count, bytes_sent FROM {RETAINED_HOST_CONTEXT_VIEW}",
+    ) == [(before[0][0], 2, first["ip"]["bsent"] + second["ip"]["bsent"])]
+
+
+@pytest.mark.integration
+def test_the_context_version_is_a_digest_of_the_id_and_the_statistics(
+    bounded: psycopg.Connection,
+):
+    """What a citation pins, recomputed outside the view that produces it.
+
+    The parts are length-prefixed, the construction the event id and the context
+    id already use. `duration_seconds` goes in as the engine's rendering of a
+    DOUBLE PRECISION, so the expectation reads that rendering back from the
+    engine rather than formatting a float in Python: what this checks is the
+    column set and the composition, not float formatting.
+    """
+    casts = ", ".join(f"{name}::VARCHAR" for name in VERSIONED_STATISTICS)
+    for context_id, version, *statistics in rows(
+        bounded,
+        f"SELECT context_id, context_version, {casts} FROM {LIVE_HOST_CONTEXT_VIEW}",
+    ):
+        material = b"".join(
+            f"{len(part.encode())}:".encode() + part.encode()
+            for part in (context_id, *statistics)
+        )
+        assert version == hashlib.sha256(material).hexdigest()
+
+
+@pytest.mark.integration
+def test_a_revised_context_mints_a_new_version_and_keeps_its_identity(
+    migrated_engine: psycopg.Connection, tmp_path: Path
+):
+    """The two identities pull apart exactly here.
+
+    `concept/07-principles.md` settled on 2026-09-04 that a revised context keeps
+    its `context_id` — an incrementally maintained view edits the counters in
+    place, and task 13 measured it. The same note requires a citation to be
+    stable rather than merely current. `context_version` is what carries that: a
+    revision leaves the id alone and produces a new version of the values, so
+    "a revised context is a new version rather than an edit in place" is true of
+    the thing a citation records.
+    """
+    window = current_window()
+    store_records(
+        migrated_engine,
+        tmp_path / "before.jsonl",
+        [restamped(layers_records()[0], window + 1)],
+    )
+    before = rows(
+        migrated_engine,
+        f"SELECT context_id, context_version FROM {LIVE_HOST_CONTEXT_VIEW}",
+    )
+    store_records(
+        migrated_engine,
+        tmp_path / "after.jsonl",
+        [restamped(layers_records()[1], window + 2)],
+    )
+    after = rows(
+        migrated_engine,
+        f"SELECT context_id, context_version FROM {LIVE_HOST_CONTEXT_VIEW}",
+    )
+    assert [context_id for context_id, _ in after] == [
+        context_id for context_id, _ in before
+    ]
+    assert after[0][1] != before[0][1]
+
+
+@pytest.mark.integration
+def test_a_frozen_context_survives_the_revision_of_the_context_it_copied(
+    migrated_engine: psycopg.Connection, tmp_path: Path
+):
+    """Freezing before eviction is what makes a citation stable, not merely current.
+
+    The copy is taken, the context is then revised by a second observation, and
+    the frozen row still says what the first citation was issued against. A
+    second freeze adds the revised version beside it rather than overwriting it:
+    two citations, two answers, both resolvable.
+    """
+    window = current_window()
+    first, second = layers_records()[0], layers_records()[1]
+    store_records(migrated_engine, tmp_path / "cited.jsonl", [restamped(first, window + 1)])
+    contexts = store(migrated_engine)
+    context_id = one(migrated_engine, f"SELECT context_id FROM {LIVE_HOST_CONTEXT_VIEW}")
+
+    cited = contexts.freeze(context_id)
+    assert cited.flow_count == 1
+    assert cited.bytes_sent == first["ip"]["bsent"]
+    assert cited.completeness == "open"
+    assert cited.aggregation_version == AGGREGATION_VERSION
+
+    store_records(
+        migrated_engine, tmp_path / "revision.jsonl", [restamped(second, window + 2)]
+    )
+    assert (
+        one(migrated_engine, f"SELECT flow_count FROM {LIVE_HOST_CONTEXT_VIEW}") == 2
+    )
+    assert contexts.frozen(context_id) == [cited]
+
+    revised = contexts.freeze(context_id)
+    assert revised.context_id == cited.context_id
+    assert revised.context_version != cited.context_version
+    assert revised.flow_count == 2
+    assert sorted(contexts.frozen(context_id), key=lambda row: row.flow_count) == [
+        cited,
+        revised,
+    ]
+
+
+@pytest.mark.integration
+def test_freezing_an_unrevised_context_twice_writes_one_row(
+    migrated_engine: psycopg.Connection, tmp_path: Path
+):
+    """A finding issued twice against the same numbers is one frozen version.
+
+    The key is (identity, context_id, context_version), so the second freeze is
+    an upsert of an identical row rather than a second copy.
+    """
+    store_records(
+        migrated_engine,
+        tmp_path / "twice.jsonl",
+        [restamped(layers_records()[0], current_window() + 1)],
+    )
+    contexts = store(migrated_engine)
+    context_id = one(migrated_engine, f"SELECT context_id FROM {LIVE_HOST_CONTEXT_VIEW}")
+    assert contexts.freeze(context_id) == contexts.freeze(context_id)
+    assert len(contexts.frozen(context_id)) == 1
+
+
+@pytest.mark.integration
+def test_freezing_a_context_outside_the_boundary_is_a_typed_refusal(
+    bounded: psycopg.Connection,
+):
+    """A copy-out that came too late is not a silent no-op.
+
+    The context is still in the aggregate — nothing was deleted — and it is
+    outside the boundary, so there is nothing live to cite. A freeze that wrote
+    no row and said nothing would leave a citation resolving to whatever the
+    live view happens to say later, which is the failure
+    `concept/07-principles.md`'s copy-out rule exists to prevent.
+    """
+    outside = one(
+        bounded,
+        f"SELECT context_id FROM {HOST_CONTEXT} WHERE window_start < '2025-01-01' "
+        f"ORDER BY window_start LIMIT 1",
+    )
+    contexts = store(bounded)
+    with pytest.raises(ContextOutsideRetention) as refusal:
+        contexts.freeze(outside)
+    assert outside in str(refusal.value)
+    assert contexts.frozen(outside) == []
+
+
+@pytest.mark.integration
+def test_a_store_cannot_freeze_another_deployments_context(
+    bounded: psycopg.Connection,
+):
+    """The identity is on the store, so a context is frozen under its own tenant.
+
+    The same rule `EventStore.record` enforces on the way in: a row written under
+    another deployment's key is an isolation failure that looks like it is
+    working.
+    """
+    context_id = one(bounded, f"SELECT context_id FROM {LIVE_HOST_CONTEXT_VIEW} LIMIT 1")
+    other = store(bounded, HELENA_TENANT="another-tenant")
+    with pytest.raises(ContextOutsideRetention):
+        other.freeze(context_id)
+    assert store(bounded).freeze(context_id).tenant == settings().identity.tenant
+
+
+@pytest.mark.integration
+def test_the_boundary_reports_what_it_drops(bounded: psycopg.Connection):
+    """The rejection counter, against contexts whose numbers the fixture fixes.
+
+    Ten records of the layer capture are outside the boundary and two re-stamped
+    ones are inside, so the counter is 2 of 4 contexts and 10 of 12 records. The
+    rate is the number `concept/07-principles.md` requires to be observable and
+    `concept/08-open-questions.md` says the horizon itself will be chosen by.
+    """
+    rejections = store(bounded).rejections()
+    assert rejections == RetentionRejections(
+        tenant=settings().identity.tenant,
+        sensor=settings().identity.sensor,
+        horizon=RETENTION_HORIZON,
+        contexts=4,
+        contexts_outside_boundary=2,
+        records=12,
+        records_outside_boundary=10,
+    )
+    assert rejections.rate == 10 / 12
+    assert (
+        one(bounded, f"SELECT sum(flow_count) FROM {HOST_CONTEXT}")
+        == rejections.records
+    )
+
+
+@pytest.mark.integration
+def test_the_rejection_counter_keeps_two_deployments_apart(
+    bounded: psycopg.Connection, tmp_path: Path
+):
+    """It groups by identity, and a second tenant's records are not this one's."""
+    store_records(
+        bounded,
+        tmp_path / "other-tenant.jsonl",
+        [restamped(layers_records()[2], current_window() + 3)],
+        HELENA_TENANT="another-tenant",
+    )
+    assert store(bounded).rejections().records == 12
+    other = store(bounded, HELENA_TENANT="another-tenant").rejections()
+    assert other.tenant == "another-tenant"
+    assert (other.records, other.records_outside_boundary) == (1, 0)
+    assert other.rate == 0.0
+
+
+@pytest.mark.integration
+def test_a_store_with_no_contexts_reports_zeros_and_no_rate(
+    migrated_engine: psycopg.Connection,
+):
+    """No rate over nothing.
+
+    0.0 would read as "the boundary dropped nothing" when the truth is "nothing
+    was aggregated" — the same refusal `QuarantineCounts.rate` makes, and the
+    same reason `stale` and `no_match` are never one value. The horizon still
+    comes from the engine, so an empty counter still reports the boundary the
+    store was built with.
+    """
+    rejections = store(migrated_engine).rejections()
+    assert (rejections.contexts, rejections.records) == (0, 0)
+    assert rejections.horizon == RETENTION_HORIZON
+    with pytest.raises(ValueError, match="no rejection rate"):
+        rejections.rate
+
+
+def test_the_rejection_counter_refuses_a_set_that_does_not_reconcile():
+    """A counter that has stopped meaning anything fails loudly.
+
+    Unit, not integration: what is checked is the contract, and a number the
+    engine cannot currently produce is exactly what a broken view would produce.
+    """
+    with pytest.raises(ValidationError, match="does not reconcile"):
+        RetentionRejections(
+            tenant="t",
+            sensor="s",
+            horizon=RETENTION_HORIZON,
+            contexts=1,
+            contexts_outside_boundary=2,
+            records=1,
+            records_outside_boundary=0,
+        )
+    with pytest.raises(ValidationError, match="does not reconcile"):
+        RetentionRejections(
+            tenant="t",
+            sensor="s",
+            horizon=RETENTION_HORIZON,
+            contexts=1,
+            contexts_outside_boundary=0,
+            records=1,
+            records_outside_boundary=2,
+        )

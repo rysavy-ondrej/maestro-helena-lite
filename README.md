@@ -517,3 +517,66 @@ events become an entity row, and the entity row becomes a registrable domain.
 A failed fetch leaves the previous snapshot in place and writes a
 `failed` row to `helena_reference_public_suffix_load` naming a typed reason.
 Nothing schedules the loader; "its own schedule" is whatever runs the script.
+
+### The retention boundary, completeness, and the frozen copy
+
+`sql/migrations/0009_retention_boundary.sql` puts a boundary around the context
+views. **Retention is a temporal filter, not a delete**
+(`concept/07-principles.md`): `helena_signal_host_context_retained` and
+`helena_signal_context_entities_retained` are materialized views holding what is
+inside the horizon, and nothing is removed from the aggregates behind them.
+
+**The horizon is one parameter, and it is also the late-record tolerance** — a
+record arriving after its window's raw records are gone cannot revise anything.
+It is `24 hours`, and it is a **candidate rather than a decision**: the concept
+records the horizon as unset and to be chosen by watching the rejection counter.
+It has three homes — `helena.context.RETENTION_HORIZON`, the
+`helena_retention_horizon` view, and the literal in the retained view's
+predicate, which a streaming query cannot read from a view — and the suite reads
+the third out of `rw_catalog` and hands it back to the engine to evaluate, so
+the three cannot drift.
+
+`helena_signal_host_context_live` is the citable row: a retained context plus
+two columns a materialized view cannot carry, because `now()` outside a `WHERE`
+clause is refused in a streaming query.
+
+- **`completeness` is `open` or `provisional`, and there is no `final`.** `open`
+  is a window that has not closed; `provisional` is one that has, whose records
+  are still retained and which a late record can still revise. A context does
+  not become final — it leaves the retained view.
+- **`context_version` is a digest of the context id and its six statistics.** It
+  is the second identity on the row and the two do different jobs: `context_id`
+  is stable across revisions (settled, and measured — an incrementally
+  maintained view edits in place), while a revision mints a new
+  `context_version`. So *a revised context is a new version rather than an edit*
+  is true of the thing a citation records.
+
+**A context cited by a finding is copied out, never evicted.**
+`helena.context.ContextStore.freeze` copies a live row into
+`helena_frozen_context`, keyed by `(tenant, sensor, context_id,
+context_version)`: freezing an unrevised context twice writes one row, freezing
+after a revision keeps both, and freezing a context that has already left the
+boundary is a typed `ContextOutsideRetention` rather than a silent no-op.
+Nothing calls it yet — the code that issues a finding does not exist, so what is
+demonstrated is that a frozen copy survives a revision, not that one is taken at
+the right moment.
+
+**The boundary reports what it drops.** `helena_signal_retention_rejections`
+counts contexts and records outside the horizon per identity, reading the
+*unbounded* aggregate on purpose — a counter over the retained view could only
+report zero. `RetentionRejections.rate` raises rather than returning `0.0` when
+nothing was aggregated, because a zero would read as "the boundary dropped
+nothing".
+
+Two things were measured against the pinned engine before any of it was written.
+A temporal filter in a materialized view **really evicts**: a context 277.6 s
+past its window, under a 283-second horizon, was there at creation and gone five
+seconds after the horizon passed, while the aggregate behind it kept the row.
+And **a late record inside the boundary still revises through the filter** —
+`concept/08-open-questions.md` had that as untested and not to be inferred; it
+is now measured, and the note says so.
+
+Every fixture in this repository is dated 2024-06-01, so **the retained views
+are empty over the fixtures**, and the tests reach the inside of the boundary
+with a real record whose `ts` is re-stamped. The same holds for a deployment:
+replaying an archived capture produces contexts the boundary does not show.
