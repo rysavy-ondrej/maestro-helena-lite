@@ -1,0 +1,50 @@
+// A trimmed extract of the Public Suffix List, for the test suite.
+//
+// Every rule the committed tests need and nothing else: the rules the official
+// checkPublicSuffix vectors turn on, the rules that decide the names in
+// data/ingest/flow-sample.jsonl, and github.io / workers.dev / trafficmanager.net
+// for the shared-infrastructure case. Trimmed from the snapshot fetched on
+// 2026-09-03; the section markers are the list's own, and the parser reads them.
+//
+// It is an extract, not the list: tests/test_enrichment.py asserts that it
+// produces the same answer as the full list for every one of those names, and
+// the live list is fetched by a test of its own.
+
+// ===BEGIN ICANN DOMAINS===
+ac
+arpa
+in-addr.arpa
+biz
+*.ck
+!www.ck
+cn
+com.cn
+公司.cn
+com
+io
+jp
+ac.jp
+kyoto.jp
+*.kobe.jp
+!city.kobe.jp
+ide.kyoto.jp
+*.mm
+net
+org
+uk
+co.uk
+us
+ak.us
+k12.ak.us
+中国
+dev
+// ===END ICANN DOMAINS===
+// ===BEGIN PRIVATE DOMAINS===
+akadns.net
+akamai.net
+edgesuite.net
+uk.com
+workers.dev
+github.io
+trafficmanager.net
+// ===END PRIVATE DOMAINS===

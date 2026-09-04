@@ -451,11 +451,69 @@ blocklist** — the rows exist and nothing enriches them, which is why
 no source matched is `no_match`, and those may not be collapsed. **URL feeds
 have narrow reach on this input**, because TLS yields an SNI and not a URL — 36
 request URIs against 25 TLS handshakes in the sample. And **the value is the
-name as observed**: nothing is lowercased and no registrable domain is derived,
-which is the Public Suffix List question and is deferred.
+name as observed**: nothing is lowercased and no registrable domain is derived
+here. The registrable domain arrives beside it, from the Public Suffix List —
+see below.
 
 `helena_signal_entity_observations` sits underneath as a **plain view** — one
 row per (flow, entity) observation, the intermediate the entity rows are
 aggregated from, and the one place the window is taken. Nothing reads a single
 observation, so it is not materialized; the entity rows above it are, because
 they are the join target the enrichment tables and the rendering come to.
+
+### Registrable domains: the Public Suffix List
+
+`sql/migrations/0008_public_suffix_list.sql` adds
+`helena_reference_public_suffix` — one snapshot of the published list — and
+derives, for every domain entity value, the **public suffix** and the
+**registrable domain**.
+
+```bash
+uv run scripts/load_public_suffix_list.py            # fetch and load
+uv run scripts/load_public_suffix_list.py --status   # what is loaded
+```
+
+**This is normalization, not enrichment.** `concept/05-threat-intelligence.md`
+puts the list in the catalogue with an empty "Maps to" cell and no tier:
+*registrable-domain normalization — needed for scope correctness, not
+enrichment*. The table carries no threat type, no confidence and no tier, and a
+test asserts by column name that it never will. Nothing here produces a taxonomy
+claim, and a name's registrable domain escalates nothing.
+
+It is needed because a scope comparison is unreliable without it in both
+directions: `example.co.uk` and `other.co.uk` share two trailing labels and
+nothing else, while `a.b.example.com` and `c.example.com` are one registrant.
+Where the boundary is cannot be derived from a name — it is published, per
+suffix, and it changes.
+
+`entity_value` is untouched. The name as observed is what
+[`docs/decisions/0009-netify-application-identification.md`](docs/decisions/0009-netify-application-identification.md)
+fixes the one existing feed's join on, and the registrable domain arrives as a
+column beside it in `helena_signal_context_domains`, for a different question.
+
+`registrable_domain_status` keeps four states apart, and they are four different
+things:
+
+| Status | Means |
+| --- | --- |
+| `derived` | the name has a registrable domain, and it is on the row |
+| `name_is_a_public_suffix` | the name **is** a public suffix (`co.uk`, `com`, an unlisted single-label name). Nothing is missing; there is nothing there |
+| `invalid_name` | not a domain name — an empty label, or an address literal. The list was consulted and refused |
+| `list_not_loaded` | no rule matched at all, not even the algorithm's default `*`, which means the reference table is empty. `missing`, never `no_match` |
+
+The derivation is a join, not a function: the engine has no UDF this could be,
+and a `LIKE` join would be a streaming nested-loop join, which RisingWave
+refuses. A name's candidate suffixes — its rightmost 0, 1, 2 … labels — are
+equi-joined against the rules, wildcards and exceptions fall out of two integer
+columns, and the algorithm's default rule is stored as an actual row so that
+*no rule matched* can only mean *the list is not loaded*.
+
+Correctness is not argued here. The suite runs the publisher's own 77
+`checkPublicSuffix` vectors — mixed case, leading dots, unlisted TLDs, wildcards
+with exceptions, IDN labels in both Unicode and punycode — through the whole
+path: a name becomes a DNS query in a capture, the capture becomes events, the
+events become an entity row, and the entity row becomes a registrable domain.
+
+A failed fetch leaves the previous snapshot in place and writes a
+`failed` row to `helena_reference_public_suffix_load` naming a typed reason.
+Nothing schedules the loader; "its own schedule" is whatever runs the script.

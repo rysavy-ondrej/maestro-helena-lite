@@ -509,7 +509,56 @@ The procedure:
 
 ---
 
-## 9. When something is wrong
+## 9. Reference data: the Public Suffix List
+
+The only reference table so far, and it is **normalization, not enrichment** —
+`concept/05-threat-intelligence.md` gives it an empty "Maps to" cell and no tier.
+It decides where a name's registry-controlled part ends, which is what makes a
+scope comparison between a feed's domain and an observed name mean anything. It
+maps to nothing in the taxonomy and escalates nothing.
+
+    uv run scripts/load_public_suffix_list.py            # fetch and load
+    uv run scripts/load_public_suffix_list.py --status   # what is loaded
+
+Nothing schedules it. "Its own schedule" is cron, a timer, or a hand-run; the
+publisher refreshes the list a few times a week and the loader is idempotent —
+the same bytes are the same snapshot and are recorded as `unchanged` rather than
+rewritten.
+
+### A failed load leaves the previous snapshot in place
+
+Every attempt writes a row to `helena_reference_public_suffix_load`, including
+the ones that wrote nothing else:
+
+    SELECT attempted_at, status, snapshot_version, rule_count, failure_reason
+    FROM helena_reference_public_suffix_load ORDER BY attempted_at DESC;
+
+`loaded`, `unchanged` and `failed` are three different things, and a `failed` row
+names one of `fetch_failed`, `malformed_rule` or `empty_list`. The rules table is
+untouched by a failure, so the previous snapshot stays current — which is the
+right behaviour and also the one that goes unnoticed, so read the load table
+before trusting a registrable domain.
+
+### `list_not_loaded` is not `no_match`
+
+`helena_signal_domain_registrable.registrable_domain_status` has four values and
+they are not interchangeable:
+
+| Status | Means |
+| --- | --- |
+| `derived` | the registrable domain is on the row |
+| `name_is_a_public_suffix` | the name **is** a public suffix. Nothing is missing |
+| `invalid_name` | not a domain name — an empty label, or an address literal |
+| `list_not_loaded` | the reference table is empty. Run the loader |
+
+With a snapshot loaded, every valid name matches at least the algorithm's default
+`*` rule, so `list_not_loaded` can only mean nobody loaded the list. A whole
+column of `NULL` registrable domains right after a fresh migration is this, not a
+bug in the derivation.
+
+---
+
+## 10. When something is wrong
 
 | Symptom | Cause |
 | --- | --- |
@@ -533,3 +582,5 @@ The procedure:
 | `FAILED: ... consumed more than once` | the capture was published to the topic twice and drained once. §8 |
 | `INCOMPLETE: N record(s) never came off the topic` | records were lost between the producer and the store. §7, then replay again |
 | `helena_ingest_quarantine` is filling up | the producer drifted, or the wrong `HELENA_INPUT_FORMAT` is set. §6 — the `reason` column tells you which |
+| `list_not_loaded` on every domain row | the Public Suffix List was never loaded. §9 |
+| `load_public_suffix_list.py` prints `failed: ... fetch_failed` | no route to the publisher, or a proxy. The previous snapshot is still in place; §9 |

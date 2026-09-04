@@ -23,6 +23,7 @@ What exists so far:
 | flatten | `sql/migrations/0005_flatten_layer.sql` | eight plain views over `helena_normalized_events` |
 | signal | `sql/migrations/0006_host_context.sql` | `helena_signal_host_context`, a materialized view: one host context per host per 5-minute window |
 | signal | `sql/migrations/0007_context_entities.sql` | `helena_signal_entity_observations`, a plain view, and `helena_signal_context_entities`, a materialized view: one row per entity per context, with the traffic of the flows that observed it |
+| signal | `sql/migrations/0008_public_suffix_list.sql` | the registrable-domain derivation: two plain candidate views, `helena_signal_domain_registrable` (materialized) and `helena_signal_context_domains` (plain). Its writer is `helena.enrichment`, not this module, because the reference table it joins is loaded rather than derived |
 | analytical | — | deferred: the enriched-context view (D3) |
 
 The flatten layer's shape and the three choices behind it are in
@@ -31,8 +32,12 @@ identity and version are argued in the head of its own migration, including the
 cost the window choice accepts and the one thing that cannot be measured without
 the evaluation corpus. The entity rows' extraction rules, their
 observation-scoped traffic and the three coverage gaps they inherit are argued
-in the head of theirs. `tests/test_context.py` is what exercises all three,
-against a real engine over real records.
+in the head of theirs. The registrable-domain derivation is argued in the head
+of `sql/migrations/0008_public_suffix_list.sql` and tested by
+`tests/test_enrichment.py`, because what it joins against is a reference table
+with a loader — it is normalization for scope correctness and it produces no
+taxonomy claim. `tests/test_context.py` is what exercises the flatten and
+signal layers, against a real engine over real records.
 
 Maturity: experimental — both layers exist and are exercised by execution over
 the sample capture and the layer-coverage fixture. Nothing outside the test

@@ -1005,6 +1005,16 @@ def test_every_signal_object_declares_what_it_is(migrated_engine: psycopg.Connec
         HOST_CONTEXT: "MATERIALIZED VIEW",
         ENTITY_OBSERVATIONS: "VIEW",
         CONTEXT_ENTITIES: "MATERIALIZED VIEW",
+        # The registrable-domain derivation of
+        # sql/migrations/0008_public_suffix_list.sql. The two candidate views
+        # are intermediates — nothing reads a single candidate — and the
+        # derivation is materialized because it is joined from. What they hold
+        # is tests/test_enrichment.py's; that they declared themselves is this
+        # test's, because the query is by prefix.
+        "helena_signal_domain_suffix_candidates": "VIEW",
+        "helena_signal_domain_public_suffix": "VIEW",
+        "helena_signal_domain_registrable": "MATERIALIZED VIEW",
+        "helena_signal_context_domains": "VIEW",
     }
 
 
