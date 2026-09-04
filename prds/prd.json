@@ -220,7 +220,7 @@
         "Document the measured cost — a materialized intermediate feeding only an aggregate cost 42% more disk for rows nothing reads",
         "Add a disk-usage check to the dev script so the cost is observable rather than argued"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D3 Enrichment] Taxonomy version module with validated paths",
