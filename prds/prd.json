@@ -195,7 +195,7 @@
         "Add tests over multi-label and unusual-suffix cases",
         "Document that this table is normalization, not enrichment, and produces no taxonomy claim"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D2 Context] Completeness, context versioning and the retention boundary",
