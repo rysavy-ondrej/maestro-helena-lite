@@ -125,7 +125,28 @@ nobody knows is missing.
 **No watermark on the flow source.** A record is admitted on arrival regardless of
 its event time; context aggregates are incrementally maintained views, not closed
 windows, and revision is a property of the engine rather than something the project
-builds. **A revised context is a new version, never an edit in place.**
+builds. **A revised context keeps its identity — the counters change in place and
+the `context_id` does not.**
+
+> **Decided 2026-09-04, and the earlier text was wrong.** This note used to say
+> *"a revised context is a new version, never an edit in place"*, which no
+> incrementally maintained view can honour, and which contradicted the assumption
+> [08 — Open questions](08-open-questions.md) holds in force. Task 13 measured the
+> real behaviour against the pinned engine: a late record folded into the existing
+> row, taking window `21:30:00Z` from 59 flows to 60, with the `context_id`
+> unchanged. Replaying a capture does not double a context either — the source
+> rows are upserts and the aggregate follows them.
+>
+> The consequence is accepted rather than softened: **a finding may cite a context
+> id whose numbers have since changed.** The answer is the one this note already
+> gives — a context cited by a finding is **copied out, never evicted** — and
+> `concept/08` keeps the trigger to revisit it when findings outlive a retention
+> boundary.
+>
+> What still mints a *new* identity is a revision of the **aggregation itself**:
+> the aggregation version is inside the `context_id` digest, so changing how a
+> context is computed produces new ids rather than silently changing what an
+> existing id means.
 
 **Feed snapshots are part of the provenance.** Evidence cites the snapshot it
 matched, and replaying a case must join the snapshot that was current then, not

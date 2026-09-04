@@ -89,7 +89,7 @@ says holds everything.
 | A local environment file is the secret source — a development convenience, not a deployment answer | First non-local deployment |
 | The authorized source set is fixed; some feeds need an agreement or a licence | A second feed |
 | Model assignments are candidates; a plain tool loop is the analyst baseline | Settled by measurement, which needs the corpus |
-| What a revised context means for a finding already issued: context identity is stable across revisions, so a finding may cite an id whose numbers have changed | Findings outlive a retention boundary |
+| **Settled 2026-09-04** — context identity is **stable across revisions** ([07 — Principles](07-principles.md)), so a revision edits the counters in place and the id does not change. What that means for a finding *already issued*, which may cite an id whose numbers have since changed, stays open | Findings outlive a retention boundary |
 | The retention horizon is unset; the prototype runs on bounded fixtures. Now empirical — a candidate can be observed in the rejection counter before it is committed to | Retention is built |
 | Untested, **and not to be inferred**: whether a late record inside the boundary still revises under a temporal filter | Retention is built |
 | Unmeasured: how many entity rows a busy host produces. The fixture is one host for two minutes | With the rendering bounds |
