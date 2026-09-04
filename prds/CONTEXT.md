@@ -74,8 +74,9 @@ data/            Fixtures. Real data, not evaluation data.
 Do not assume a file exists because a note mentions it, and do not rebuild what
 §3 says is already here. The package, `pyproject.toml` and `uv.lock` were created
 by task 0, and the tree **is** a git repository whose default branch is `main`.
-A finished task is committed and merged (§4, *Land*); it is not left sitting on a
-branch nobody merged.
+**Development is linear: one task in flight, `main` always the whole of what is
+done.** A finished task is committed and merged (§4, *Land*); an unfinished one
+blocks the next from starting.
 
 ---
 
@@ -228,6 +229,29 @@ you.
 
 ## 4. The session loop
 
+### Check the tree is clear — before anything else
+
+**The history is linear and exactly one task is ever in flight.** A task may not
+start while the previous one is unfinished or unmerged. There are never two
+branches at different stages of development, and `main` is always the whole of
+what is done.
+
+Run this first. If any of the three is non-empty, **stop**: write
+`prds/reports/task-NN.json` with `"status": "blocked"` naming what is
+outstanding, change nothing else, and let the operator resolve it.
+
+```bash
+git status --porcelain          # uncommitted work from an earlier task
+git branch --list 'task-*'      # a task branch that was never merged
+git worktree list               # a workspace that was never released
+```
+
+This is a hard precondition, not a preference. An unmerged branch is a task
+someone stopped in the middle of; starting a second task on top of it is how a
+repository ends up with two half-finished stages and no way to tell which one
+`main` should believe. **Resolving it is the operator's call, never a session's**
+— do not merge, rebase, delete or stash another session's work to clear your way.
+
 ### Orient — cheaply
 
 1. Read `session-memory.json`. Past sessions recorded lessons and failed
@@ -300,6 +324,11 @@ A task may be implemented in its own workspace, and when it is finished it is
 `main` is fine for a small task: the rule is not "always branch", it is *do not
 leave finished work uncommitted*.
 
+**A workspace here buys a clean revert point for one task, never parallelism.**
+Development is linear (§4, first block), so at most one task branch exists at any
+moment and it is released before the next task starts. Two task branches alive at
+once is the state this workflow exists to prevent.
+
 ```bash
 git worktree add -b task-NN ../helena-task-NN
 ```
@@ -341,9 +370,13 @@ Four rules around it:
   are never committed; `uv.lock` always is.
 - **A credential never enters a commit message**, exactly as it never enters a
   log line or a report.
-- **Merge only a green suite.** If the task ends `blocked`, `partial` or
-  `failed`, commit what exists, say so in the report, and **leave the branch
-  unmerged** for the operator. A red `main` costs every later session.
+- **Merge only a green suite** — and understand what not merging costs. If the
+  task ends `blocked`, `partial` or `failed`, commit what exists, say so in the
+  report, and **leave the branch unmerged** for the operator. That branch then
+  **halts the pipeline**: by the precondition at the top of §4, the next task
+  cannot start until the operator resolves it. That is the intended behaviour —
+  a red or half-finished `main` costs every later session more than a stopped
+  queue does.
 - **Only one engine runs per machine** (task 3: meta and compute bind fixed
   ports), so a worktree does not get its own RisingWave. Run the suite in one
   workspace at a time.
@@ -498,4 +531,5 @@ the copy above drift:
 
 - [ ] The work is **committed, and merged to `main`**, and any workspace opened
       for it is released (§4, *Land*). A `blocked`, `partial` or `failed` task
-      commits but does **not** merge.
+      commits but does **not** merge — and its unmerged branch **stops the next
+      task from starting** until the operator resolves it (§4, first block).
