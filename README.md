@@ -324,3 +324,48 @@ backfilling a newly added view actually requires — measured, and narrower than
 the concept note assumed: a view over `helena_normalized_events` backfills from
 the table, so what needs replaying is records that never reached the store, not
 views that were created late.
+
+## Context: the flatten layer
+
+The Context Builder is three layers of views — **flatten → signal → analytical**
+— and an analytical view reads the signal layer, never the flatten layer and
+never the source (`concept/03-architecture.md`). The bottom one exists:
+`sql/migrations/0005_flatten_layer.sql` creates eight **plain views** over
+`helena_normalized_events`, turning the stored JSONB observation into typed
+columns once, rather than in every view above that wants a start time or a
+domain.
+
+| View | One row per |
+| --- | --- |
+| `helena_flatten_flows` | normalized event — the flow, typed |
+| `helena_flatten_dns` | event that observed DNS: its rcode and its counts |
+| `helena_flatten_dns_queries` | question asked |
+| `helena_flatten_dns_responses` | resource record answered |
+| `helena_flatten_tls` | event that observed TLS: SNI, versions, fingerprints |
+| `helena_flatten_http` | observed HTTP layer, per version |
+| `helena_flatten_http_requests` | request, HTTP/1 and HTTP/2 together |
+| `helena_flatten_http_responses` | response, HTTP/1 and HTTP/2 together |
+
+Every row carries the whole assigned identity — tenant, sensor, capture sha256,
+record offset, event id and schema version.
+
+Nothing here is materialized, because nothing queries a flatten row on its own:
+`concept/03-architecture.md` measured a materialized intermediate at 42 % more
+disk than the same query as a plain view. That is only free if the layer above
+can still be a streaming job over it, so it was measured first and the suite
+asserts it — a materialized view over these views backfills and returns rows,
+including over `jsonb_array_elements(...) WITH ORDINALITY` and a `UNION ALL` of
+two such branches, and `TUMBLE(helena_flatten_flows, flow_start, INTERVAL '5
+minutes')` is accepted directly off the plain view.
+
+**Absence stays distinct from emptiness**, which is why there is a row per
+observed *layer* and not only rows per unpacked element: a set-returning function
+turns "the array was empty" and "the layer was never observed" into the same zero
+rows. A layer that was observed has a row whose count column may read 0; a layer
+that was not observed has no row at all. `tcp.24` observed TLS and negotiated no
+protocol (`alpn_count = 0`); `udp.28` observed no application layer and appears
+in none of the seven.
+
+[`docs/decisions/0015-the-flatten-layer.md`](docs/decisions/0015-the-flatten-layer.md)
+has the rest, including what the layer deliberately does not do — it does not
+split a URI into a domain, and it does not sum the two directions.
