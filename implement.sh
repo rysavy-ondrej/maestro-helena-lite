@@ -497,6 +497,33 @@ PROMPT
 }
 
 # --- state updates ----------------------------------------------------------
+
+# The runner updates its tracking files AFTER the session has committed, so
+# without this the tree is never clean once a task ends and git_gate blocks the
+# next one on the runner's own bookkeeping. Commits only the paths the runner
+# owns -- never `git add -A`, which would sweep up anything a session left behind
+# and hide it inside a commit that claims to be bookkeeping.
+land_bookkeeping() {
+  local idx="$1" status="$2" nn
+  nn="$(printf '%02d' "$idx")"
+  git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || return 0
+
+  git -C "$ROOT" add -- \
+      "$PRD_JSON" "$PROGRESS" "$SESSION" "$MEMORY" "$LOGS" 2>/dev/null || true
+  if git -C "$ROOT" diff --cached --quiet 2>/dev/null; then
+    return 0                      # nothing of ours changed
+  fi
+  if git -C "$ROOT" commit -q -m "runner: task $nn $status" \
+       -m "Tracking files the runner owns, written after the session's own
+commit: prd.json, progress.txt, session.json, session-memory.json and the
+session log. Committed here so the tree is clean and the linear-history
+gate means what it says." 2>/dev/null; then
+    say "  ${dim}bookkeeping committed${rst}"
+  else
+    warn "could not commit runner bookkeeping — the tree is left dirty"
+  fi
+}
+
 record_result() {
   local idx="$1" status="$2" exitcode="$3" started="$4" ended="$5" sid="$6"
   python3 - "$PRD_JSON" "$SESSION" "$MEMORY" "$PROGRESS" "$REPORTS" \
@@ -795,6 +822,8 @@ PY
     blocked)   say "  ${ylw}blocked${rst} — needs a decision; see the report's escalations" ;;
     *)         say "  ${red}$status${rst} — see prds/reports/task-$nn.json and $log" ;;
   esac
+
+  land_bookkeeping "$idx" "$status"
 
   if [ "$status" != "completed" ]; then
     overall=2

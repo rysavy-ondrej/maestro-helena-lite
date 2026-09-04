@@ -90,9 +90,19 @@ structured data, and no agent should be given a channel it has no use for.
 - **Ingestion identity comes from deployment configuration.** The normalizer is
   configured per deployment with its tenant and sensor, which **does not scale to
   multiple sensors sharing one normalizer** — a known revisit.
-- **Every view a deployment needs must exist before data flows.** The broker is
-  consume-once, so a view added later starts empty rather than backfilling; adding
-  one to a running deployment requires replay from the retained captures.
+- **What never reached the store cannot be recovered from the broker** — only
+  from the retained capture. The broker is consume-once, so a record consumed
+  before a view existed is not replayable from the topic.
+
+  The stronger form of this rule, that *a view added later starts empty rather
+  than backfilling*, was **measured false on 2026-09-04** and is corrected here
+  rather than repeated. Since migration 0004 the normalized events are a **TABLE**
+  in the single store, not a stream: a materialized view created over that table
+  reported every existing row the moment it was created, and picked up a later
+  replay incrementally. What still holds is the narrower rule above — the backlog
+  a new view sees is what is in the store, and anything that never got there comes
+  back only by replaying the capture. `docs/runbook.md` and task 11's report carry
+  the measurement.
 
 ## Compatibility boundaries
 
