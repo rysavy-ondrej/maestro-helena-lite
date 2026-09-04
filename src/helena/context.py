@@ -21,14 +21,20 @@ What exists so far:
 | Layer | Where | State |
 | --- | --- | --- |
 | flatten | `sql/migrations/0005_flatten_layer.sql` | eight plain views over `helena_normalized_events` |
-| signal | — | deferred: the windowed host context and the entity rows (prd tasks 13-14) |
+| signal | `sql/migrations/0006_host_context.sql` | `helena_signal_host_context`, a materialized view: one host context per host per 5-minute window |
+| signal | — | deferred: the entity rows (prd task 14) |
 | analytical | — | deferred: the enriched-context view (D3) |
 
 The flatten layer's shape and the three choices behind it are in
-`docs/decisions/0015-the-flatten-layer.md`; `tests/test_context.py` is what
-exercises them, against a real engine over real records.
+`docs/decisions/0015-the-flatten-layer.md`; the host context's window, host key,
+identity and version are argued in the head of its own migration, including the
+cost the window choice accepts and the one thing that cannot be measured without
+the evaluation corpus. `tests/test_context.py` is what exercises both, against a
+real engine over real records.
 
-Maturity: experimental — the flatten layer exists and is exercised by execution
-over the sample capture and the layer-coverage fixture. The signal and analytical
-layers above it are deferred and still say so.
+Maturity: experimental — both layers exist and are exercised by execution over
+the sample capture and the layer-coverage fixture. Nothing outside the test
+suite reads a host context yet, no context has been cited, and window coherence
+is unmeasured. The entity rows and the analytical layer above are deferred and
+still say so.
 """

@@ -325,7 +325,7 @@ the concept note assumed: a view over `helena_normalized_events` backfills from
 the table, so what needs replaying is records that never reached the store, not
 views that were created late.
 
-## Context: the flatten layer
+## Context: the flatten and signal layers
 
 The Context Builder is three layers of views — **flatten → signal → analytical**
 — and an analytical view reads the signal layer, never the flatten layer and
@@ -369,3 +369,44 @@ in none of the seven.
 [`docs/decisions/0015-the-flatten-layer.md`](docs/decisions/0015-the-flatten-layer.md)
 has the rest, including what the layer deliberately does not do — it does not
 split a URI into a domain, and it does not sum the two directions.
+
+### The host context
+
+`sql/migrations/0006_host_context.sql` creates the signal layer's first object:
+`helena_signal_host_context`, one row per host per five-minute tumbling window,
+aggregated off `helena_flatten_flows`. **A flow is assigned by its start time**,
+so a long flow is credited entirely to the window it began in
+(`concept/02-concepts-and-taxonomy.md`). The host key is the source address, so
+a host seen only as a destination gets no context — in the sample that is 16 of
+the 17 observed addresses. The four counters stay bidirectional and there is no
+total column, and **the context carries no verdict**: no classification, no
+confidence, no score.
+
+It is the one object so far that **is** materialized. The measured rule is not
+to materialize an intermediate that only feeds an aggregate; this is the
+aggregate, it is queried by host and window on its own, and it is the row a
+finding will cite by `context_id`.
+
+`context_id` is `sha256` over the length-prefixed tenant, sensor, host, window
+start as epoch seconds and aggregation version — the event id's construction,
+plus the version. That last part is deliberate and is the difference between the
+two ids: an event id says *which record*, a context id says *which computation
+over which records*, so a revised aggregation is a new context rather than an
+in-place edit of what an existing id means. The aggregation version is stamped
+on every row from the SQL literal, because a streaming query cannot read
+`helena_aggregation_version`.
+
+What a *late record* does is the other thing, and it is measured rather than
+claimed: it revises the context's row in place, changing the counters and
+leaving the id alone. `concept/07-principles.md` and
+`concept/08-open-questions.md` describe that differently; the migration file
+records the disagreement and why the implementation follows the second.
+Replaying a capture, by contrast, changes nothing — the source rows are upserts,
+and the aggregate follows.
+
+The window choice has a cost — a long flow inflates the window it started in, and
+two flows either side of a boundary are never seen together — and **measuring
+window coherence needs the evaluation corpus that does not exist**. No sampled
+flow crosses a boundary at all, so the suite demonstrates the rule with a real
+record whose duration is lengthened past one, and claims nothing about how often
+it matters.

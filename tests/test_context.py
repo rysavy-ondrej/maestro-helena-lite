@@ -4,13 +4,17 @@ The component's source is SQL — `concept/03-architecture.md` makes the engine'
 view definitions project source in their own right — so this file tests it the
 only way that means anything: by applying the migrations to a throwaway engine,
 putting real records through the real ingestion path, and asking the views what
-they hold. Reading `sql/migrations/0005_flatten_layer.sql` and agreeing with it
-would find the comment, not the view.
+they hold. Reading `sql/migrations/0005_flatten_layer.sql` or
+`sql/migrations/0006_host_context.sql` and agreeing with them would find the
+comment, not the view.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import psycopg
@@ -27,6 +31,7 @@ from helena.normalizer import (
     describe_capture,
     scan_captures,
 )
+from helena.versions import AGGREGATION_VERSION, AGGREGATION_VERSION_VIEW
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SAMPLE = PROJECT_ROOT / "data" / "ingest" / "flow-sample.jsonl"
@@ -36,6 +41,13 @@ FIXTURE_CAPTURES = Path(__file__).resolve().parent / "fixtures" / "captures"
 # the sample contains, including the flow with no application layer at all and
 # the TLS observation whose ALPN is observed and empty. See the README beside it.
 LAYERS_CAPTURE = "ace6ca33f7bf8aa949f79124abf33fc115cfd0909e9dea798f4762cf87af8318"
+
+# The one-record capture. Its single record is byte-for-byte offset 8 of the
+# capture above, under a different capture hash — so ingesting it after the
+# layer capture is a second observation of the same traffic, not a replay.
+ONE_RECORD_CAPTURE = (
+    "6e361f1b99b88a8b3e77aeec4b630abff5e71396087a485eea03db3bb1856e64"
+)
 
 # The same environment shape tests/test_normalizer.py uses, and for the same
 # reason: values that are obviously not credentials, so a leak into a pytest
@@ -150,6 +162,31 @@ FLATTEN_SHAPES = {
 
 FLATTEN_OBJECTS = tuple(FLATTEN_SHAPES)
 
+# The signal layer, as sql/migrations/0006_host_context.sql declares it. The
+# same deliberate friction as FLATTEN_SHAPES above: this is the second copy of
+# the object's interface, and adding a column to the view means editing here
+# too. There is no verdict, classification, confidence, severity or score
+# column, and `test_the_host_context_carries_no_verdict` is what says so.
+HOST_CONTEXT = "helena_signal_host_context"
+
+HOST_CONTEXT_SHAPE = (
+    ("context_id", "character varying"),
+    ("tenant", "character varying"),
+    ("sensor", "character varying"),
+    ("host", "character varying"),
+    ("window_start", "timestamp with time zone"),
+    ("window_end", "timestamp with time zone"),
+    ("flow_count", "bigint"),
+    ("duration_seconds", "double precision"),
+    ("bytes_sent", "bigint"),
+    ("bytes_received", "bigint"),
+    ("packets_sent", "bigint"),
+    ("packets_received", "bigint"),
+    ("aggregation_version", "character varying"),
+)
+
+WINDOW_SECONDS = 300
+
 
 def test_module_imports():
     assert helena.context.__doc__
@@ -195,6 +232,52 @@ def flattened(migrated_engine: psycopg.Connection) -> psycopg.Connection:
     """The ten-record layer-coverage capture, ingested and stored."""
     store_capture(migrated_engine, layers_capture())
     return migrated_engine
+
+
+@pytest.fixture
+def contexts(flattened: psycopg.Connection) -> psycopg.Connection:
+    """The same ten records, read through the signal layer.
+
+    The layer capture is the right input for this too: its nine flows before
+    21:35:00Z and one after it are a single host across a window boundary, which
+    is exactly the shape one host context per host per window has to get right.
+    """
+    return flattened
+
+
+def _by_window(records: list[dict]) -> list[tuple[datetime, list[dict]]]:
+    """`records` grouped by the window their start time falls in, in order.
+
+    The window is computed from the record's own `ts` in Python — the same
+    arithmetic `TUMBLE` does, written independently — so the expected values in
+    a test come from the file rather than from a number someone wrote down.
+    """
+    grouped: dict[datetime, list[dict]] = {}
+    for record in records:
+        start = datetime.fromtimestamp(
+            int(record["ts"] // WINDOW_SECONDS) * WINDOW_SECONDS, tz=timezone.utc
+        )
+        grouped.setdefault(start, []).append(record)
+    return sorted(grouped.items())
+
+
+def _context_id(
+    tenant: str, sensor: str, host: str, window_start: datetime, version: str
+) -> str:
+    """The context id, recomputed from the parts the row carries.
+
+    Written out here rather than imported, because a test that called the
+    implementation would agree with it by construction. The parts are
+    length-prefixed — `<utf8 byte length>:<bytes>` — which is the event id's
+    encoding and for the same reason: an operator-supplied tenant can contain
+    any delimiter, so `tenant='a'/sensor='b:c'` must not hash to the same bytes
+    as `tenant='a:b'/sensor='c'`.
+    """
+    parts = (tenant, sensor, host, str(int(window_start.timestamp())), version)
+    material = b"".join(
+        f"{len(part.encode())}:".encode() + part.encode() for part in parts
+    )
+    return hashlib.sha256(material).hexdigest()
 
 
 def rows(connection: psycopg.Connection, sql: str, *args: object) -> list[tuple]:
@@ -847,3 +930,469 @@ def test_the_flow_start_is_a_timestamp_a_window_can_be_taken_over(
     )
     assert [count for _, count in windows] == [59, 3]
     assert sum(count for _, count in windows) == 62
+
+
+# --- The signal layer: one host context per host per window -----------------
+
+
+@pytest.mark.integration
+def test_the_host_context_is_a_materialized_view(migrated_engine: psycopg.Connection):
+    """The declaration in the migration file, checked against the engine.
+
+    The flatten layer below is plain views because a materialized intermediate
+    that only feeds an aggregate costs 42 % more disk for rows nothing reads
+    (`concept/03-architecture.md`). This is the aggregate, it is queried by host
+    and window on its own, and it is the row a finding will cite — so it is
+    materialized, and a plain view appearing here would be a citable row that
+    exists only as a query plan.
+    """
+    assert rows(
+        migrated_engine,
+        "SELECT table_name, table_type FROM information_schema.tables "
+        "WHERE table_schema = current_schema() "
+        "AND table_name LIKE 'helena_signal_%'",
+    ) == [(HOST_CONTEXT, "MATERIALIZED VIEW")]
+
+
+@pytest.mark.integration
+def test_the_host_context_has_the_shape_it_declares(
+    migrated_engine: psycopg.Connection,
+):
+    """Column names and types, in order, as the engine reports them."""
+    shape = tuple(
+        rows(
+            migrated_engine,
+            "SELECT column_name, data_type FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = %s "
+            "ORDER BY ordinal_position",
+            HOST_CONTEXT,
+        )
+    )
+    assert shape == HOST_CONTEXT_SHAPE
+
+
+@pytest.mark.integration
+def test_the_host_context_carries_no_verdict(migrated_engine: psycopg.Connection):
+    """`concept/02-concepts-and-taxonomy.md`: a host context carries no verdict.
+
+    A fact and an inference are separate rows — an inference is appended, never
+    written onto the fact it is about — so a column here that could hold one is
+    the conflation the whole taxonomy note exists to prevent. Checked by name
+    rather than by reading the file, because the failure this catches is someone
+    adding the column, not someone editing the comment.
+    """
+    forbidden = ("verdict", "classification", "confidence", "severity", "score")
+    columns = [name for name, _ in HOST_CONTEXT_SHAPE]
+    assert [name for name in columns if any(word in name for word in forbidden)] == []
+    engine_columns = [
+        name
+        for (name,) in rows(
+            migrated_engine,
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = %s",
+            HOST_CONTEXT,
+        )
+    ]
+    assert sorted(engine_columns) == sorted(columns)
+
+
+@pytest.mark.integration
+def test_one_context_per_host_per_window(contexts: psycopg.Connection):
+    """The layer-coverage capture is one host across a window boundary.
+
+    Its ten records are nine flows starting before 21:35:00Z and one (`tcp.30`,
+    21:35:08.6Z) after it, all from `10.127.0.100` — so the aggregation must
+    produce exactly two rows, and the key must be unique across them.
+    """
+    assert rows(
+        contexts,
+        f"SELECT host, window_start, flow_count FROM {HOST_CONTEXT} "
+        f"ORDER BY window_start",
+    ) == [
+        ("10.127.0.100", datetime(2024, 6, 1, 21, 30, tzinfo=timezone.utc), 9),
+        ("10.127.0.100", datetime(2024, 6, 1, 21, 35, tzinfo=timezone.utc), 1),
+    ]
+    assert one(
+        contexts,
+        f"SELECT count(*) FROM (SELECT DISTINCT tenant, sensor, host, window_start "
+        f"FROM {HOST_CONTEXT}) k",
+    ) == one(contexts, f"SELECT count(*) FROM {HOST_CONTEXT}")
+
+
+@pytest.mark.integration
+def test_a_flow_is_assigned_to_the_window_containing_its_start(
+    migrated_engine: psycopg.Connection,
+):
+    """Every flow of the whole sample, against the window computed from its own `ts`.
+
+    The expected split is taken from the file in Python rather than written
+    down: a record's window is `floor(ts / 300) * 300`, which is what "assigned
+    by its start time" means, and the 62 records fall 59/3 across 21:35:00Z.
+    """
+    store_capture(migrated_engine, describe_capture(SAMPLE))
+    records = [json.loads(line) for line in SAMPLE.read_bytes().splitlines()]
+
+    expected = Counter(
+        datetime.fromtimestamp(int(record["ts"] // 300) * 300, tz=timezone.utc)
+        for record in records
+    )
+    found = rows(
+        migrated_engine,
+        f"SELECT window_start, window_end, flow_count FROM {HOST_CONTEXT} "
+        f"ORDER BY window_start",
+    )
+    assert [(start, count) for start, _, count in found] == sorted(expected.items())
+    assert [count for _, _, count in found] == [59, 3]
+    # The window is five minutes wide and its bounds are the ones the flows were
+    # assigned by — an end that is not start + 5 minutes would mean the rows are
+    # grouped by one window and labelled with another.
+    assert all(end - start == timedelta(minutes=5) for start, end, _ in found)
+
+
+@pytest.mark.integration
+def test_a_long_flow_is_credited_entirely_to_the_window_it_began_in(
+    migrated_engine: psycopg.Connection, tmp_path: Path
+):
+    """The rule the fixtures cannot otherwise reach, and what that costs.
+
+    Measured over all 62 sampled records: the longest flow runs 110.5 s
+    (`tcp.7`) and **no sampled flow crosses a window boundary**, so no test over
+    the real capture can tell assignment-by-start from assignment-by-overlap.
+    The only honest way to show the mechanism is a real record whose duration is
+    lengthened past the boundary — `td` is a float the contract accepts any
+    value for — which demonstrates the rule and measures nothing at all about
+    how often it matters. Window coherence stays blocked on the corpus
+    (`concept/08-open-questions.md`).
+    """
+    record = dict(layers_records()[0])  # udp.0, 21:32:57.8Z, 0.019 s
+    assert record["ts"] < 1717277700 <= record["ts"] + 900
+    record["td"] = 900.0  # fifteen minutes: three windows, starting in the first
+    path = tmp_path / "long.jsonl"
+    path.write_bytes(json.dumps(record).encode() + b"\n")
+    store_capture(migrated_engine, describe_capture(path))
+
+    assert rows(
+        migrated_engine,
+        f"SELECT window_start, flow_count, duration_seconds FROM {HOST_CONTEXT}",
+    ) == [(datetime(2024, 6, 1, 21, 30, tzinfo=timezone.utc), 1, 900.0)]
+
+
+@pytest.mark.integration
+def test_a_host_seen_only_as_a_destination_gets_no_context(
+    migrated_engine: psycopg.Connection,
+):
+    """The host key is the source address, and the sample makes the cost visible.
+
+    Seventeen addresses are observed in `data/ingest/flow-sample.jsonl`. One is
+    a source; the other sixteen are only ever destinations and get no context at
+    all — `concept/08-open-questions.md` records that as an assumption in force,
+    and this is what it looks like in rows.
+    """
+    store_capture(migrated_engine, describe_capture(SAMPLE))
+    records = [json.loads(line) for line in SAMPLE.read_bytes().splitlines()]
+    sources = {record["ip"]["src"] for record in records}
+    destinations = {record["ip"]["dst"] for record in records}
+    assert len(sources) == 1 and len(destinations - sources) == 16
+
+    hosts = {
+        host
+        for (host,) in rows(
+            migrated_engine, f"SELECT DISTINCT host FROM {HOST_CONTEXT}"
+        )
+    }
+    assert hosts == sources
+    assert hosts & destinations == set()
+
+
+@pytest.mark.integration
+def test_the_context_counters_stay_bidirectional(contexts: psycopg.Connection):
+    """Four counters, per window, against the same four summed from the JSON.
+
+    `concept/07-principles.md` keeps connection statistics bidirectional because
+    direction is signal. The two windows of the layer capture are lopsided in
+    opposite proportions — 10 904 sent against 33 096 received in the first —
+    so a column reading the other direction's array, or a `bytes_total` quietly
+    replacing the pair, cannot pass this.
+    """
+    expected = []
+    for start, group in _by_window(layers_records()):
+        expected.append(
+            (
+                start,
+                sum(record["ip"]["bsent"] for record in group),
+                sum(record["ip"]["brecv"] for record in group),
+                sum(record["ip"]["psent"] for record in group),
+                sum(record["ip"]["precv"] for record in group),
+            )
+        )
+    assert rows(
+        contexts,
+        f"SELECT window_start, bytes_sent, bytes_received, packets_sent, "
+        f"packets_received FROM {HOST_CONTEXT} ORDER BY window_start",
+    ) == expected
+    assert expected[0][1] != expected[0][2] and expected[0][3] != expected[0][4]
+
+
+@pytest.mark.integration
+def test_the_context_durations_are_the_flows_own_durations(
+    contexts: psycopg.Connection,
+):
+    """The duration statistic is the sum of the flows credited to the window.
+
+    Not the span of the window, and not the span from the first flow's start to
+    the last flow's end: a host context says how much flow time was credited
+    here, and the window bounds are already two columns of their own.
+    """
+    expected = [
+        (start, sum(record["td"] for record in group))
+        for start, group in _by_window(layers_records())
+    ]
+    found = rows(
+        contexts,
+        f"SELECT window_start, duration_seconds FROM {HOST_CONTEXT} "
+        f"ORDER BY window_start",
+    )
+    assert [start for start, _ in found] == [start for start, _ in expected]
+    for (_, got), (_, want) in zip(found, expected):
+        assert got == pytest.approx(want)
+
+
+@pytest.mark.integration
+def test_the_context_flow_counts_reconcile_with_the_flatten_layer(
+    contexts: psycopg.Connection,
+):
+    """Every flow is credited to exactly one context, and none is dropped.
+
+    `concept/instruction.md` §7 wants the counts to reconcile rather than to be
+    asserted about. The window assignment is a total function over the flows —
+    every flow has a start — so the flow counts must sum to the flatten layer's
+    row count, and a `WHERE` that quietly excluded a row would show up here as a
+    number that does not add up.
+    """
+    assert one(contexts, f"SELECT sum(flow_count)::BIGINT FROM {HOST_CONTEXT}") == one(
+        contexts, "SELECT count(*) FROM helena_flatten_flows"
+    )
+
+
+# --- Identity and the aggregation version -----------------------------------
+
+
+@pytest.mark.integration
+def test_every_context_row_carries_the_aggregation_version(
+    contexts: psycopg.Connection,
+):
+    """The third copy of the constant, asserted against the other two.
+
+    `sql/migrations/0002_aggregation_version.sql` measured why this one has to
+    be a literal: a streaming query cannot read `helena_aggregation_version`
+    (RisingWave rejects it as a streaming nested-loop join), so the aggregation
+    stamps the value itself. Two copies that can drift are worse than none, so
+    the rows this view produces are compared against the Python constant *and*
+    against the engine's own copy.
+    """
+    stamped = {
+        version
+        for (version,) in rows(
+            contexts, f"SELECT DISTINCT aggregation_version FROM {HOST_CONTEXT}"
+        )
+    }
+    assert stamped == {AGGREGATION_VERSION}
+    assert stamped == {
+        one(contexts, f"SELECT aggregation_version FROM {AGGREGATION_VERSION_VIEW}")
+    }
+
+
+@pytest.mark.integration
+def test_the_context_id_is_a_digest_of_the_identity_the_window_and_the_version(
+    contexts: psycopg.Connection,
+):
+    """The id recomputed in Python from the row's own columns.
+
+    The construction is the event id's — length-prefixed parts, so a delimiter
+    inside an operator-supplied tenant cannot make two identities collide
+    (`docs/decisions/0011-event-identity-and-the-event-id.md`) — with the window
+    start as epoch seconds and the aggregation version included. Recomputed here
+    rather than compared against a stored constant, because what has to hold is
+    that the id is a function of exactly those five things and of nothing else.
+    """
+    found = rows(
+        contexts,
+        f"SELECT context_id, tenant, sensor, host, window_start, "
+        f"aggregation_version FROM {HOST_CONTEXT}",
+    )
+    assert len(found) == 2
+    for context_id, tenant, sensor, host, window_start, version in found:
+        assert context_id == _context_id(tenant, sensor, host, window_start, version)
+    assert len({context_id for context_id, *_ in found}) == 2
+
+
+@pytest.mark.integration
+def test_the_context_id_changes_with_the_aggregation_version(
+    contexts: psycopg.Connection,
+):
+    """A revised aggregation is a new context, not an edit of an existing one.
+
+    The version is in the digest, which is the opposite of the event id and
+    deliberate: an event id says *which record*, a context id says *which
+    computation over which records*. So the same host and window under a
+    revised aggregation cannot resolve to the id a citation already holds. This
+    asserts the digest actually depends on the version rather than merely
+    carrying it in a column beside the id.
+    """
+    (context_id, tenant, sensor, host, window_start, version), *_ = rows(
+        contexts,
+        f"SELECT context_id, tenant, sensor, host, window_start, "
+        f"aggregation_version FROM {HOST_CONTEXT} ORDER BY window_start",
+    )
+    assert context_id == _context_id(tenant, sensor, host, window_start, version)
+    assert context_id != _context_id(tenant, sensor, host, window_start, "v2")
+
+
+@pytest.mark.integration
+def test_two_tenants_ingesting_one_capture_get_two_contexts(
+    migrated_engine: psycopg.Connection,
+):
+    """The same host in the same window under two tenants is two contexts.
+
+    Tenant and sensor are in the digest for the reason the event id has them
+    there: one store holds both deployments, and an id that collided across
+    tenants would be a cross-tenant overwrite that looks like it is working.
+    """
+    capture = layers_capture()
+    store_capture(migrated_engine, capture)
+    store_capture(migrated_engine, capture, HELENA_TENANT="other-tenant")
+
+    found = rows(
+        migrated_engine,
+        f"SELECT tenant, count(*), sum(flow_count)::BIGINT FROM {HOST_CONTEXT} "
+        f"GROUP BY tenant ORDER BY tenant",
+    )
+    assert found == [("other-tenant", 2, 10), ("tenant-under-test", 2, 10)]
+    identifiers = {
+        context_id
+        for (context_id,) in rows(
+            migrated_engine, f"SELECT context_id FROM {HOST_CONTEXT}"
+        )
+    }
+    assert len(identifiers) == 4
+
+
+# --- What a revision does, measured -----------------------------------------
+
+
+@pytest.mark.integration
+def test_replaying_a_capture_does_not_double_a_context(
+    contexts: psycopg.Connection,
+):
+    """Replay is an upsert at the source, and the aggregate follows it.
+
+    Every field of an event is derived from the capture, the offset and the
+    configured identity, so a replayed record rewrites a byte-identical row —
+    and a materialized view over it must reflect the update rather than count
+    the record twice. Measured rather than assumed: the counts are read, the
+    capture is put through the whole path again, and the counts are read again.
+    """
+    before = rows(
+        contexts,
+        f"SELECT context_id, flow_count, bytes_sent FROM {HOST_CONTEXT} "
+        f"ORDER BY window_start",
+    )
+    store_capture(contexts, layers_capture())
+    assert (
+        rows(
+            contexts,
+            f"SELECT context_id, flow_count, bytes_sent FROM {HOST_CONTEXT} "
+            f"ORDER BY window_start",
+        )
+        == before
+    )
+
+
+@pytest.mark.integration
+def test_a_late_record_revises_a_context_in_place(contexts: psycopg.Connection):
+    """What "revision" actually is here, recorded rather than claimed away.
+
+    `concept/07-principles.md` says a revised context is a new version and never
+    an edit in place; `concept/08-open-questions.md` says context identity is
+    stable across revisions, "so a finding may cite an id whose numbers have
+    changed". They disagree, and this is the measurement that says which one
+    describes the implementation: a record for a window that already has a
+    context is folded into that context's row, the counters change and the id
+    does not. Freezing a cited context is `concept/07`'s own answer, and it
+    belongs to the increment that issues a finding — nothing cites a context
+    yet.
+
+    The late record is the one-record capture, whose single record (`udp.28`,
+    812 octets sent) is also offset 8 of the layer capture but under a different
+    capture hash, so it is a second observation and not a replay of the first.
+    """
+    before = rows(
+        contexts,
+        f"SELECT context_id, flow_count, bytes_sent FROM {HOST_CONTEXT} "
+        f"ORDER BY window_start",
+    )
+    assert before[0][1:] == (9, 10904)
+
+    store_capture(contexts, scan_captures(FIXTURE_CAPTURES)[ONE_RECORD_CAPTURE])
+
+    after = rows(
+        contexts,
+        f"SELECT context_id, flow_count, bytes_sent FROM {HOST_CONTEXT} "
+        f"ORDER BY window_start",
+    )
+    assert [context_id for context_id, *_ in after] == [
+        context_id for context_id, *_ in before
+    ]
+    assert after[0][1:] == (10, 10904 + 812)
+    assert after[1] == before[1]
+
+
+@pytest.mark.integration
+def test_two_hosts_in_one_window_are_two_contexts(
+    migrated_engine: psycopg.Connection, tmp_path: Path
+):
+    """The other half of the host key, which no fixture can reach on its own.
+
+    Every one of the 62 sampled flows has the same source address, so every test
+    above exercises "one row per host per window" across windows and across
+    tenants but never across two hosts in one window — and the group key would
+    look correct with the host dropped from it. Two real records, one of them
+    with its address pair reversed (the same conversation observed from the
+    other side, which is a shape the contract permits and this producer's single
+    vantage point simply never emitted), put through the real normalizer.
+
+    Only `src` and `dst` are exchanged. The counters are left as they were: what
+    is being asserted is that the host key is read off `ip.src`, and each
+    context carries the traffic of the flows keyed to it.
+    """
+    first, second = (dict(record) for record in layers_records()[:2])
+    second["ip"] = {
+        **second["ip"],
+        "src": second["ip"]["dst"],
+        "dst": second["ip"]["src"],
+    }
+    assert first["ip"]["src"] != second["ip"]["src"]
+    path = tmp_path / "two-hosts.jsonl"
+    path.write_bytes(
+        b"".join(json.dumps(record).encode() + b"\n" for record in (first, second))
+    )
+    store_capture(migrated_engine, describe_capture(path))
+
+    assert rows(
+        migrated_engine,
+        f"SELECT host, window_start, flow_count, bytes_sent, bytes_received "
+        f"FROM {HOST_CONTEXT} ORDER BY host",
+    ) == sorted(
+        (
+            record["ip"]["src"],
+            datetime(2024, 6, 1, 21, 30, tzinfo=timezone.utc),
+            1,
+            record["ip"]["bsent"],
+            record["ip"]["brecv"],
+        )
+        for record in (first, second)
+    )
+    assert (
+        one(migrated_engine, f"SELECT count(DISTINCT context_id) FROM {HOST_CONTEXT}")
+        == 2
+    )
