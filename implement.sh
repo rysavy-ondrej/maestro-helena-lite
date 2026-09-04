@@ -33,6 +33,7 @@ PERMISSION_MODE="bypassPermissions"
 TIMEOUT_SECONDS=0         # 0 = no timeout
 DRY_RUN=0
 SKIP_BUDGET=0
+SKIP_GIT=0
 RETRY_FAILED=0
 
 bold=$'\033[1m'; dim=$'\033[2m'; red=$'\033[31m'; grn=$'\033[32m'; ylw=$'\033[33m'; rst=$'\033[0m'
@@ -69,6 +70,7 @@ OPTIONS
         --retry-failed       Also pick up tasks whose last report was failed or
                              blocked. By default those are skipped.
         --no-budget-check    Skip the budget gate entirely. Use knowingly.
+        --no-git-check       Skip the linear-history gate entirely. Use knowingly.
         --dry-run            Print the command and the prompt, run nothing.
     -l, --list               Show every task and its state, then exit.
     -s, --status             Show budget and progress, then exit.
@@ -79,6 +81,8 @@ EXIT CODES
     2  a task ended blocked, partial or failed (loop stopped)
     3  budget below the threshold — nothing was started; message says when to retry
     4  no unfinished tasks left
+    5  the previous task is not landed — uncommitted work, an unmerged task
+       branch, or a workspace that was never released. Nothing was started
     1  configuration or environment error
 
 EXAMPLES
@@ -102,6 +106,7 @@ while [ $# -gt 0 ]; do
     --timeout)           TIMEOUT_SECONDS="${2:?}"; shift 2 ;;
     --retry-failed)      RETRY_FAILED=1; shift ;;
     --no-budget-check)   SKIP_BUDGET=1; shift ;;
+    --no-git-check)      SKIP_GIT=1; shift ;;
     --dry-run)           DRY_RUN=1; shift ;;
     -l|--list)           MODE="list"; shift ;;
     -s|--status)         MODE="status"; shift ;;
@@ -253,6 +258,60 @@ budget_report() {
 }
 
 # 0 = proceed, 3 = stop.
+# Development here is linear: one task in flight, and `main` always the whole of
+# what is done (prds/CONTEXT.md §4). Starting a task on top of an unlanded one is
+# how the tree ends up with two half-finished stages and no way to tell which one
+# `main` should believe. This refuses rather than discovering it three tasks later.
+git_gate() {
+  if [ "$SKIP_GIT" -eq 1 ]; then
+    warn "linear-history check skipped (--no-git-check)"
+    return 0
+  fi
+  if ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    warn "not a git repository — the linear-history guardrail cannot run"
+    return 0
+  fi
+
+  local dirty branches worktrees n
+  dirty="$(git -C "$ROOT" status --porcelain)"
+  branches="$(git -C "$ROOT" for-each-ref --format='%(refname:short)' 'refs/heads/task-*')"
+  worktrees="$(git -C "$ROOT" worktree list --porcelain | awk '/^worktree /{print $2}' | tail -n +2)"
+
+  if [ -z "$dirty" ] && [ -z "$branches" ] && [ -z "$worktrees" ]; then
+    info "git ok — clean tree, no task branch, no stray workspace [linear]"
+    return 0
+  fi
+
+  say ""
+  say "${red}${bold}The previous task is not landed.${rst}"
+  say ""
+  if [ -n "$dirty" ]; then
+    say "  ${bold}uncommitted changes:${rst}"
+    printf '%s\n' "$dirty" | head -15 | sed 's/^/    /'
+    n="$(printf '%s\n' "$dirty" | wc -l | tr -d ' ')"
+    [ "$n" -gt 15 ] && say "    ${dim}... and $((n - 15)) more${rst}"
+    say ""
+  fi
+  if [ -n "$branches" ]; then
+    say "  ${bold}task branch never merged:${rst}"
+    printf '%s\n' "$branches" | sed 's/^/    /'
+    say ""
+  fi
+  if [ -n "$worktrees" ]; then
+    say "  ${bold}workspace never released:${rst}"
+    printf '%s\n' "$worktrees" | sed 's/^/    /'
+    say ""
+  fi
+  say "  ${bold}Nothing was started.${rst} Development here is linear: one task in"
+  say "  ${dim}flight, and 'main' always the whole of what is done. A second task${rst}"
+  say "  ${dim}started on top of an unlanded one leaves two half-finished stages${rst}"
+  say "  ${dim}and no way to tell which one 'main' should believe.${rst}"
+  say ""
+  say "  Review it, then merge or discard it, and re-run."
+  say "  ${dim}prds/CONTEXT.md §4 has the rule. --no-git-check proceeds anyway.${rst}"
+  return 5
+}
+
 budget_gate() {
   if [ "$SKIP_BUDGET" -eq 1 ]; then
     warn "budget check skipped (--no-budget-check)"
@@ -586,6 +645,11 @@ fi
 
 overall=0
 for ((run = 1; run <= ITERATIONS; run++)); do
+
+  if ! git_gate; then
+    [ "$run" -gt 1 ] && say "${dim}$((run - 1)) task(s) ran before the tree stopped being clean.${rst}"
+    exit 5
+  fi
 
   if ! budget_gate; then
     [ "$run" -gt 1 ] && say "${dim}$((run - 1)) task(s) ran before the budget gate stopped the loop.${rst}"
