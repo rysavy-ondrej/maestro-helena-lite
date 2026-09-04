@@ -157,7 +157,7 @@
         "Apply the rule: do not materialize an intermediate that only feeds an aggregate",
         "Add execution tests asserting each flatten object returns the expected shape over the fixture capture"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D2 Context] Windowed host-context aggregation with bidirectional statistics",
