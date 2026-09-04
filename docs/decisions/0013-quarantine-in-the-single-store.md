@@ -78,9 +78,9 @@ value would silently mean "the last time this was refused" rather than "when it
 was first seen". When a record arrived is a property of an ingest run, and
 nothing records runs yet. The increment that does owns adding it.
 
-**There is no version set.** `helena.versions.VersionSet` requires all eight
-dimensions and seven of them do not exist yet (ADR-0008); stamping one here
-would mean inventing seven constants for a row no assessment cites. What
+**There is no version set.** `helena.versions.VersionSet` requires every
+dimension and most of them do not exist yet (ADR-0008); stamping one here would
+mean inventing constants for a row no assessment cites. What
 determined this row is recorded instead: the contract version that refused it
 and the input format that read it. ADR-0012 deferred "an adapter version on
 `ParseFailure`" to this increment — the adapter still has no version of its own,

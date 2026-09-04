@@ -147,8 +147,9 @@ are in
 
 ## Versions
 
-Every row an assessment could cite records eight versions — model, prompt,
-schema, rendering, taxonomy, enrichment snapshot, policy and aggregation —
+Every row an assessment could cite records nine versions — model, prompt,
+schema, rendering, taxonomy, enrichment snapshot, normalization snapshot, policy
+and aggregation —
 because **a hosted endpoint can change beneath a stable API name, and an
 unrecorded change silently breaks replay**. `helena.versions.VersionSet` is that
 record; its field names are the column names, `stamp(row)` adds them and refuses

@@ -154,7 +154,7 @@ default:
 - **No identity stamping and no event id.** `FlowRecord` is the input; the
   normalized event with its identity block is the next increment.
 - **No schema version for the input contract.** The schema version is one of the
-  eight dimensions in `helena.versions`, and it is stamped on the normalized
+  dimensions in `helena.versions`, and it is stamped on the normalized
   event, not on the raw record — the raw record is what arrived, and it has no
   version because the producer sends none.
 - **No versions on a `Capture`.** Nothing an assessment can cite exists yet: a

@@ -168,7 +168,7 @@ today's — otherwise a replayed assessment silently scores against different da
 | **Agent schemas** | Historical versions retained as frozen classes; replay validates a stored assessment against the version **that assessment recorded**, never against current code. Migrating old rows forward is rejected — a migration that reshapes a field changes what the assessment says the agent saw, so replay would reproduce the migration rather than the original run |
 | **Taxonomy** | A revision is a new version module, never an edit |
 | **Aggregation** | The aggregation version is bumped whenever the aggregation changes what a context *means*, recorded on every row, and the SQL and the code constant are asserted equal by a test — two copies of a version that can drift apart are worse than none |
-| **Recorded on every assessment** | Model, prompt, schema, rendering, taxonomy, enrichment snapshot and policy versions. **A hosted endpoint can change beneath a stable API name, and an unrecorded change silently breaks replay** |
+| **Recorded on every assessment** | Model, prompt, schema, rendering, taxonomy, enrichment snapshot, **normalization snapshot**, policy and aggregation versions — nine. **A hosted endpoint can change beneath a stable API name, and an unrecorded change silently breaks replay.** The normalization snapshot is the Public Suffix List that decided a registrable domain, and is not the feed snapshot: normalization runs before enrichment and settles what the join key is (added 2026-09-04; this row previously named seven, omitting aggregation) |
 
 ## Privacy and disclosure
 

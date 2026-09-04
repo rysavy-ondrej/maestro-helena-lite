@@ -1,7 +1,7 @@
 # 0008 — The version registry, and why a revision is never an edit
 
 **Status: accepted.** Task 5 (D0 Foundations).
-**Authority:** `concept/07-principles.md` ("Versioning": the eight dimensions
+**Authority:** `concept/07-principles.md` ("Versioning": the nine dimensions
 recorded on every assessment, the aggregation constant asserted equal in SQL and
 Python, taxonomy and agent schemas frozen once recorded),
 `concept/02-concepts-and-taxonomy.md` ("The vocabulary is frozen as a version. A
@@ -10,7 +10,7 @@ revision is a new version module, never an edit"), `concept/06-technology.md`
 classes), `concept/instruction.md` §2 (reproducibility) and §3 (editing the
 taxonomy is an escalation).
 
-`helena.versions` holds `VersionSet` — the eight dimensions — and
+`helena.versions` holds `VersionSet` — the nine dimensions — and
 `AGGREGATION_VERSION`. `sql/migrations/0002_aggregation_version.sql` holds the
 engine's copy of that one constant. `tests/test_versions.py` asserts the two
 equal by asking a real engine.
@@ -20,7 +20,8 @@ equal by asking a real engine.
 The failure being prevented is the quiet one: **a hosted endpoint changes
 beneath a stable API name**, and a replayed assessment scores against something
 other than what ran. So model, prompt, schema, rendering, taxonomy, enrichment
-snapshot, policy and aggregation are all recorded, and replay validates a stored
+snapshot, normalization snapshot, policy and aggregation are all recorded, and
+replay validates a stored
 assessment against *the version that assessment recorded* — never against
 current code, and never after migrating the row forward, which would make replay
 reproduce the migration instead of the original run.
@@ -38,7 +39,7 @@ what answers to it changes. The increment that first calls a model owns getting
 it; the registry only refuses to record nothing.
 
 **The field names are the column names.** `VersionSet.stamp(row)` returns the
-row with the eight version columns added and refuses a row that already carries
+row with the nine version columns added and refuses a row that already carries
 one; `VersionSet.from_row(row)` is the replay direction and names any dimension
 the row does not record. One set of names, so a written row and a read row
 cannot disagree.
@@ -110,17 +111,36 @@ The rule from `concept/02-concepts-and-taxonomy.md` and
   a claim cites the snapshot it matched, and replay joins the snapshot that was
   current then.
 
+## Amendment, 2026-09-04 — a ninth dimension
+
+`normalization_snapshot_version` was added, on the operator's decision, after
+task 15 found the gap: the Public Suffix List snapshot that decides a registrable
+domain had no dimension to record it.
+
+It is **not** `enrichment_snapshot_version`. That one is the feed snapshot an
+enrichment join matched against. Normalization runs *before* enrichment and
+settles what the join key even is, and the list is revised regularly — its
+wildcard and exception rules mean a name can fall under a different registrable
+domain under a later snapshot. Without its own dimension, an assessment citing a
+registrable domain and replayed later could score against a different scope than
+the one that ran, which is the exact failure this registry exists to prevent.
+
+Added now rather than at the increment that needs it because nothing stores
+version columns yet, so there are no rows to migrate forward and no frozen schema
+to break — the alternative was to add it once assessments existed, when it would
+have been a change to stored data rather than to a class nothing has written.
+
 ## What was not done
 
 - **No assessment table, and no version columns in SQL.** The columns are named
   by `VERSION_COLUMNS` in Python; the migration that creates the first
   version-carrying table declares them, and a stamped row whose column names do
   not match will fail loudly on the INSERT rather than silently drop a version.
-- **No values for the seven dimensions that do not exist yet.** Prompts,
+- **No values for the dimensions that do not exist yet.** Prompts,
   renderings, taxonomy modules, feed snapshots and policies arrive in D2–D5, and
   a constant invented here would be a version for nothing.
 - **No version table in the engine and no version-set identifier.** Whether a
-  stored assessment carries the eight columns inline or cites a version-set row
+  stored assessment carries the nine columns inline or cites a version-set row
   is a question for the increment that writes the first assessment; deciding it
   here would be a join table with no rows.
 - **No `Version` ordering or comparison.** Nothing compares two versions yet;

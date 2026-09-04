@@ -1,4 +1,4 @@
-"""Versions — the eight dimensions a citable row records, and the constant with two homes.
+"""Versions — the nine dimensions a citable row records, and the constant with two homes.
 
 `concept/07-principles.md` gives the reason in one line: **a hosted endpoint can
 change beneath a stable API name, and an unrecorded change silently breaks
@@ -112,6 +112,13 @@ class VersionSet(BaseModel):
     # The feed snapshot the enrichment join matched against. Replay joins the
     # snapshot that was current then, not today's.
     enrichment_snapshot_version: Version
+    # The Public Suffix List snapshot that decided the registrable domain, which
+    # is NOT the feed snapshot above: normalization runs before enrichment and
+    # settles what the join key even is. The list changes, and its wildcard and
+    # exception rules mean a name can fall under a different registrable domain
+    # under a later snapshot — so an assessment replayed without this could score
+    # against a different scope than the one that ran.
+    normalization_snapshot_version: Version
     policy_version: Version
     aggregation_version: Version
 
@@ -160,6 +167,6 @@ class VersionSet(BaseModel):
 
 
 # The version columns, in field order. Derived from the model so the two cannot
-# drift; `tests/test_versions.py` names all eight literally, so dropping a
+# drift; `tests/test_versions.py` names all nine literally, so dropping a
 # dimension is a test failure rather than a quietly shorter row.
 VERSION_COLUMNS = tuple(VersionSet.model_fields)

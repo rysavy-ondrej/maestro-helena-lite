@@ -38,6 +38,7 @@ DIMENSIONS = (
     "rendering_version",
     "taxonomy_version",
     "enrichment_snapshot_version",
+    "normalization_snapshot_version",
     "policy_version",
     "aggregation_version",
 )
