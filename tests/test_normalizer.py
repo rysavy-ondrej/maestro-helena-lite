@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import subprocess
+import time
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -62,8 +65,10 @@ from helena.normalizer import (
     RawRecordReference,
     TlsObservation,
     adapter_for,
+    consume_ingest_topic,
     describe_capture,
     ingest_counts,
+    publish_capture,
     read_capture,
     scan_captures,
 )
@@ -1940,3 +1945,291 @@ def test_two_deployments_ingesting_one_capture_keep_their_own_events(
     assert ours.stored(capture)[0].identity.event_id != (
         theirs.stored(capture)[0].identity.event_id
     )
+
+
+def test_consuming_a_record_twice_is_not_reported_as_a_lost_record():
+    """Two failures that look identical in the arithmetic, kept apart by name.
+
+    Storing an event twice is an upsert, so `normalized` does not grow — which
+    makes a double-consumed run and a run that lost records produce the same
+    three numbers. Replay is what makes the first one reachable, so it is
+    checked first and says what it is; an operator sent looking for a lost
+    record would be looking for a broker fault that is not there.
+    """
+
+    def set_of(**overrides: int) -> dict[str, object]:
+        return {
+            "records": 3,
+            "consumed": 3,
+            "normalized": 3,
+            "quarantine": QuarantineCounts(
+                records=3,
+                quarantined=0,
+                by_reason=dict.fromkeys(PARSE_FAILURE_REASONS, 0),
+            ),
+            **overrides,
+        }
+
+    with pytest.raises(ValidationError, match="more than once"):
+        IngestCounts(**set_of(consumed=6))
+    with pytest.raises(ValidationError, match="reached neither store"):
+        IngestCounts(**set_of(normalized=2))
+
+
+# --- Replay: the retained capture, back through the live path ---------------
+#
+# `concept/07-principles.md`: *the durable record is the retained capture,
+# replayed through the same ingestion path as live traffic so replay exercises
+# the real pipeline rather than a parallel one.*
+#
+# Two claims, and they need different tests. That replay *publishes the capture*
+# is a fact about the wire, checked by reading the topic back. That it goes
+# through *the same path* is a fact about the rows: the events a replay leaves
+# in the store are compared against the events the same capture produces read
+# straight off disk, so a second normalization path would have to produce
+# byte-identical rows to escape notice.
+
+
+@pytest.mark.parametrize("rate", [0.0, -1.0], ids=["zero", "negative"])
+def test_a_replay_rate_that_publishes_nothing_is_refused(rate: float):
+    """Refused before the topic is created — which is why `None` is the producer.
+
+    A rate of zero is not "as fast as possible"; it is a run that never
+    finishes. Reading it as the unpaced case would be the silent default
+    `concept/instruction.md` §6 names, one layer up from configuration.
+    """
+    with pytest.raises(ValueError, match="publish"):
+        publish_capture(
+            fixture_capture(LAYERS_CAPTURE), None, "helena-ingest-never", rate=rate
+        )
+
+
+@pytest.mark.integration
+def test_replay_publishes_every_record_of_a_capture_in_the_wire_form(
+    broker_bootstrap: str,
+):
+    """Every record, in file order, with the reference the capture addresses it by."""
+    capture = fixture_capture(LAYERS_CAPTURE)
+    topic = ingest_topic_name()
+
+    with BrokerProducer(broker_bootstrap) as producer:
+        published = publish_capture(capture, producer, topic)
+
+    assert published == capture.record_count
+    with BrokerConsumer(broker_bootstrap) as consumer:
+        messages = list(consume_ingest_topic(consumer, topic, idle_timeout=3.0))
+    assert [
+        (message.raw_record.record_offset, message.payload) for message in messages
+    ] == list(read_capture(capture))
+    assert {message.raw_record.capture_sha256 for message in messages} == {
+        capture.sha256
+    }
+
+
+@pytest.mark.integration
+def test_replay_paces_at_the_configured_rate(broker_bootstrap: str, tmp_path: Path):
+    """The rate is a floor on the run, and the unpaced control says it is the rate.
+
+    Without the control this measures nothing: a slow broker would satisfy the
+    floor on its own. Both topics are created before the clock starts, so
+    neither number includes a `CreateTopics` round trip.
+    """
+    capture = capture_of(
+        tmp_path / "paced.jsonl", [flat_line(offset) for offset in range(5)]
+    )
+    rate = 2.5
+    floor = (capture.record_count - 1) / rate
+    paced_topic, control_topic = ingest_topic_name(), ingest_topic_name()
+
+    with BrokerProducer(broker_bootstrap) as producer:
+        producer.create_topic(paced_topic)
+        producer.create_topic(control_topic)
+        started = time.monotonic()
+        publish_capture(capture, producer, paced_topic, rate=rate)
+        paced = time.monotonic() - started
+        started = time.monotonic()
+        publish_capture(capture, producer, control_topic)
+        unpaced = time.monotonic() - started
+
+    assert paced >= floor, f"{capture.record_count} records at {rate}/s took {paced}s"
+    assert unpaced < floor, (
+        f"the unpaced control took {unpaced}s, which is longer than the paced "
+        f"floor of {floor}s — this comparison says nothing about the pacer"
+    )
+
+
+@pytest.mark.integration
+def test_a_capture_replayed_twice_produces_identical_rows(
+    migrated_engine: psycopg.Connection, broker_bootstrap: str, tmp_path: Path
+):
+    """Both stores, over the wire, twice: the same rows and the same counters.
+
+    The capture holds a record the adapter refuses, so the second replay has to
+    reproduce the quarantine row as well as the events — every assigned field on
+    both sides is derived from the capture, the offset and the configured
+    identity, and an INSERT onto an existing key in RisingWave is an upsert, so
+    a second run rewrites rather than duplicates.
+
+    Each replay gets its own topic. The broker's reclaim after a drain is
+    asynchronous (measured, task 10), so reusing one topic would sometimes hand
+    the second run the first run's records.
+    """
+    capture = capture_of(
+        tmp_path / "replayed.jsonl", [flat_line(0), b'{"id":', flat_line(1)]
+    )
+    events = event_store_for(migrated_engine)
+    quarantine = quarantine_for(migrated_engine)
+
+    def replay() -> tuple[list[NormalizedEvent], list[QuarantinedRecord], IngestCounts]:
+        topic = ingest_topic_name()
+        with BrokerProducer(broker_bootstrap) as producer:
+            published = publish_capture(capture, producer, topic)
+        with BrokerConsumer(broker_bootstrap) as consumer:
+            consumed = normalizer().ingest_messages(
+                consume_ingest_topic(consumer, topic, idle_timeout=3.0),
+                events,
+                quarantine,
+            )
+        assert published == consumed == capture.record_count
+        return (
+            events.stored(capture),
+            quarantine.stored(capture),
+            ingest_counts(
+                capture=capture,
+                consumed=consumed,
+                events=events,
+                quarantine=quarantine,
+            ),
+        )
+
+    first = replay()
+    second = replay()
+
+    assert first == second
+    stored_events, quarantined, counts = second
+    offsets = [event.identity.raw_record.record_offset for event in stored_events]
+    assert offsets == [0, 2]
+    assert [row.raw_record.record_offset for row in quarantined] == [1]
+    assert counts.normalized == 2
+    assert counts.quarantine.quarantined == 1
+    assert counts.complete
+
+
+@pytest.mark.integration
+def test_a_replayed_capture_produces_the_rows_the_file_path_produces(
+    migrated_engine: psycopg.Connection, broker_bootstrap: str, tmp_path: Path
+):
+    """No parallel code path, stated as rows rather than as an assertion about imports.
+
+    The left side went through a broker, a header decode and a store; the right
+    side is the same capture read off disk. One adapter, one `_stamp`, so they
+    are the same events or the replay path is a second implementation.
+    """
+    capture = capture_of(
+        tmp_path / "same.jsonl", [flat_line(offset) for offset in range(4)]
+    )
+    topic = ingest_topic_name()
+    events = event_store_for(migrated_engine)
+
+    with BrokerProducer(broker_bootstrap) as producer:
+        publish_capture(capture, producer, topic)
+    with BrokerConsumer(broker_bootstrap) as consumer:
+        normalizer().ingest_messages(
+            consume_ingest_topic(consumer, topic, idle_timeout=3.0),
+            events,
+            quarantine_for(migrated_engine),
+        )
+
+    assert events.stored(capture) == list(normalizer().normalize_capture(capture))
+
+
+@pytest.mark.integration
+def test_replay_reports_produced_versus_materialized_counts(
+    migrated_engine: psycopg.Connection, broker_bootstrap: str
+):
+    """The whole real sample, published and then counted out of the store."""
+    capture = describe_capture(SAMPLE)
+    topic = ingest_topic_name()
+    events = event_store_for(migrated_engine)
+    quarantine = quarantine_for(migrated_engine)
+
+    with BrokerProducer(broker_bootstrap) as producer:
+        published = publish_capture(capture, producer, topic)
+    with BrokerConsumer(broker_bootstrap) as consumer:
+        consumed = normalizer().ingest_messages(
+            consume_ingest_topic(consumer, topic, idle_timeout=3.0),
+            events,
+            quarantine,
+        )
+    counts = ingest_counts(
+        capture=capture, consumed=consumed, events=events, quarantine=quarantine
+    )
+
+    assert published == len(SAMPLE_LINES)
+    assert counts.records == counts.consumed == counts.normalized == published
+    assert counts.quarantine.quarantined == 0
+    assert counts.complete
+
+
+# --- The command that drives a replay ---------------------------------------
+#
+# `scripts/replay_capture.py` is run the way an operator runs it — through
+# `uv run`, in a subprocess, resolving its configuration from the environment —
+# because what a wrapper gets wrong is argument handling and exit status, and
+# calling `main()` in-process would test neither.
+
+
+def replay_command(*arguments: str, **environment: str) -> subprocess.CompletedProcess:
+    """`scripts/replay_capture.py` in a subprocess, with an explicit environment.
+
+    The process environment wins over `.env` (`helena.config.Settings.load`), so
+    the values here are what the command resolves — a run that fell through to
+    the developer's own `.env` would publish to the real ingest topic.
+    """
+    return subprocess.run(
+        ["uv", "run", "scripts/replay_capture.py", *arguments],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env={**os.environ, **ENVIRONMENT, **environment},
+    )
+
+
+def test_the_replay_command_refuses_a_capture_it_cannot_find():
+    """Nothing is published, and the message says where it looked."""
+    result = replay_command("--captures", str(FIXTURE_CAPTURES), "0" * 64)
+    assert result.returncode == 1
+    assert "holds no capture" in result.stderr
+
+
+def test_the_replay_command_refuses_a_rate_that_publishes_nothing():
+    result = replay_command(
+        "--captures", str(FIXTURE_CAPTURES), "0" * 64, "--rate", "0"
+    )
+    assert result.returncode == 2
+    assert "greater than zero" in result.stderr
+
+
+@pytest.mark.integration
+def test_the_replay_command_publishes_the_capture_it_is_given(broker_bootstrap: str):
+    """The command, end to end on the producer side, against the pinned broker."""
+    capture = fixture_capture(LAYERS_CAPTURE)
+    topic = ingest_topic_name()
+
+    result = replay_command(
+        "--captures",
+        str(FIXTURE_CAPTURES),
+        capture.sha256,
+        KAFKA_BOOTSTRAP_SERVERS=broker_bootstrap,
+        HELENA_INGEST_TOPIC=topic,
+    )
+
+    assert result.returncode == 0, result.stderr
+    expected = f"published {capture.record_count} of {capture.record_count}"
+    assert expected in result.stdout
+    with BrokerConsumer(broker_bootstrap) as consumer:
+        messages = list(consume_ingest_topic(consumer, topic, idle_timeout=3.0))
+    assert [
+        (message.raw_record.record_offset, message.payload) for message in messages
+    ] == list(read_capture(capture))

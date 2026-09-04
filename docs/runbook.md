@@ -271,18 +271,24 @@ something that has shipped, write the next migration.
 
 ### Migrate before data flows
 
-**Every view a deployment needs must exist before anything is ingested.** The
-broker is consume-once and restart-volatile: a record that has been consumed is
-gone whatever retention says, and a restart discards what is queued
-(`concept/03-architecture.md`, "What is *not* a store"). So a view created after
-ingest has started **begins empty and stays that way** for everything that
-already flowed — there is no backlog to re-read it from.
+**Every view a deployment needs must exist before anything is ingested** — or,
+stated as the thing that actually bites, before the records it needs reach the
+store. The broker is consume-once and restart-volatile: a record that has been
+consumed is gone whatever retention says, and a restart discards what is queued
+(`concept/03-architecture.md`, "What is *not* a store"). A record consumed while
+`helena_normalized_events` did not exist is a record that is nowhere.
 
-The only way back is to replay a retained source capture through the ingestion
-path, which is why captures are the durable record and the broker is not. Adding
-a view to a running deployment therefore means: apply the migration, then replay
-the captures that cover the window you need. Order the startup `migrate`, then
-ingest — never the other way round.
+The step that usually follows this one does **not** hold here, and it is measured
+rather than reasoned (2026-09-04, §8): a view added over
+`helena_normalized_events` *does* backfill, because normalized events are a table
+in the single store rather than a stream the view had to have been listening to.
+The empty view to worry about is the one whose **records** never landed, not the
+one that was created late.
+
+Either way the answer is the same, and it is why captures are the durable record
+and the broker is not: apply the migration, then replay the captures that cover
+the window you need — §8. Order the startup `migrate`, then ingest, never the
+other way round.
 
 ### There is no rollback
 
@@ -407,11 +413,103 @@ that does not reconcile**: `normalized + quarantined` must equal `consumed`, and
 `consumed < records` is reported as `complete is False`, not raised. It means
 records went missing between the producer and the store, and because the broker
 keeps nothing they are gone — the answer is to replay the capture, which is
-still on disk.
+still on disk. §8.
 
 ---
 
-## 8. When something is wrong
+## 8. Replay: a retained capture, back through the pipeline
+
+    uv run scripts/replay_capture.py --captures <dir> <sha256>
+    uv run scripts/replay_capture.py --captures <dir> <sha256> --rate 200 --ingest
+
+The retained capture is the durable record (`concept/07-principles.md`). Replay
+publishes its records to `HELENA_INGEST_TOPIC` in exactly the wire form a sensor
+uses — §7 — and everything after that is the live path: the same adapter, the
+same identity stamping, the same two stores, the same counters. There is no
+second normalization path, and `tests/test_normalizer.py` states that as rows
+rather than as an intention: the events a replay leaves in the store are compared
+against the events the same capture produces read straight off disk.
+
+| Option | What it does |
+| --- | --- |
+| `--captures DIR` | required. The directory of retained captures. There is no default: replaying the wrong directory publishes another deployment's records under this one's identity |
+| `--rate PER_SECOND` | a **floor** on how fast records are published — record *k* goes no earlier than *k / rate* seconds after the first. Unset, they go as fast as the broker accepts them. A broker that cannot keep up makes the run slower and nothing speeds it back up; a pacer that caught up in a burst would replay at a rate nobody asked for |
+| `--ingest` | also run the **ingestion** side in this process and print the four counters. Nothing else consumes the topic in this prototype, so this is also how a replay actually reaches the store |
+| `--idle-timeout SECONDS` | with `--ingest`, how long the consumer waits before deciding the topic has gone quiet. There is no end-of-stream in the protocol |
+
+Exit status is 0 only when every record was published and, with `--ingest`, every
+record is accounted for in the store.
+
+### A capture directory holds files named by their own hash
+
+`<sha256>.jsonl`, and the digest is checked against the bytes on every scan, so a
+capture that changed under its name is refused rather than replayed under a
+reference that addresses different records. `data/ingest/` is **not** such a
+directory — `flow-sample.jsonl` is a sample, not a retained capture, and the
+command says so:
+
+    FAILED: data/ingest/flow-sample.jsonl: a capture file is named <sha256>.jsonl
+
+`tests/fixtures/captures/` is one.
+
+### Replaying twice is safe. Publishing twice and draining once is not
+
+Every assigned field is derived from the capture, the offset and the configured
+identity, and an INSERT onto an existing key is an upsert (§5), so a second
+replay **rewrites the same rows**. Measured 2026-09-04: the ten-record fixture
+replayed twice through the command left ten events with identical event ids.
+
+Publishing twice *without* draining in between is the case that fails, and it
+fails loud:
+
+    FAILED: the counters do not reconcile: ... 20 message(s) were consumed for a
+    capture of 10 records, so at least one record was consumed more than once
+
+That check runs **before** the accounting check on purpose. The upsert means
+`normalized` does not grow, so a double-consumed run produces the same three
+numbers as a run that lost records; a diagnosis pointing at loss would send you
+looking for a broker fault that is not there.
+
+### Backfilling a view added to a running deployment
+
+What actually needs replaying, measured against the pinned engine on 2026-09-04:
+
+- **A view added over `helena_normalized_events` backfills from the table.** With
+  ten events in the store, a `CREATE MATERIALIZED VIEW ... AS SELECT ... FROM
+  helena_normalized_events GROUP BY ...` reported all ten the moment it was
+  created, and picked up a later replay's record incrementally.
+- **Replay is needed when the records are not in the store**: consumed before the
+  table existed (migrate before data flows — §5), lost between the topic and the
+  store (`complete is False` — §7), or never ingested by this deployment.
+
+`concept/06-technology.md` says *the broker is consume-once, so a view added later
+starts empty rather than backfilling; adding one to a running deployment requires
+replay from the retained captures.* That is right about the broker, and right
+about a view over the stream. It is not what happens for a view over the stored
+events, because since migration 0004 normalized events are a **table in the single
+store**, not a stream a view had to be listening to. The rule underneath it still
+holds and is the one to carry: **what never reached the store cannot be recovered
+from the broker, only from the capture.**
+
+The procedure:
+
+1. Write the migration for the new view and apply it — `make migrate`, §5.
+2. Ask whether the records it needs are in the store:
+
+       SELECT tenant, capture_sha256, normalized FROM helena_ingest_counts;
+
+3. If they are there, the view is already populated — check it and stop.
+4. If they are not, replay each capture that covers the period:
+
+       uv run scripts/replay_capture.py --captures <dir> <sha256> --ingest
+
+5. Read the counters it prints. `every record of the capture reached the store` is
+   the only line that says so; anything else is a short run, and §7 says which
+   number is short.
+
+---
+
+## 9. When something is wrong
 
 | Symptom | Cause |
 | --- | --- |
@@ -429,5 +527,9 @@ still on disk.
 | A blink setting has no effect | it is an environment variable, not a YAML key; §3 |
 | The integration tests raise `ConfigurationError` | no `.env`. Copy `.env.example` and fill it in; the addresses are read through `helena.config` |
 | `scripts/migrate.py` refuses with "has changed since it was applied" | an applied migration was edited. §5 — write the next one instead |
-| A view exists but is empty and the data is old | it was created after the records flowed. §5 — replay a capture |
+| A view exists but is empty and the data is old | the records never reached the store, or they are not this capture's. §8 |
+| `FAILED: ... a capture file is named <sha256>.jsonl` | `--captures` is not a capture directory. §8 |
+| `FAILED: ... holds no capture <sha256>` | that digest is not in that directory — the file was renamed, or its bytes changed |
+| `FAILED: ... consumed more than once` | the capture was published to the topic twice and drained once. §8 |
+| `INCOMPLETE: N record(s) never came off the topic` | records were lost between the producer and the store. §7, then replay again |
 | `helena_ingest_quarantine` is filling up | the producer drifted, or the wrong `HELENA_INPUT_FORMAT` is set. §6 — the `reason` column tells you which |
