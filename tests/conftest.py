@@ -216,13 +216,63 @@ def engine_schema(engine_dsn: str) -> Iterator[psycopg.Connection]:
             connection.execute(f"DROP SCHEMA {schema} CASCADE")
 
 
+@pytest.fixture(scope="session")
+def _migrated_schema(engine_dsn: str) -> Iterator[psycopg.Connection]:
+    """One migrated schema for the whole run — migrating is the expensive part.
+
+    Applying `sql/migrations/` creates several materialized views, and each one
+    starts a streaming job in the engine. Rebuilding them per test made the suite
+    scale with (materialized views x tests) rather than with tests: measured over
+    the four D2 increments that added one view each, it went 124 s -> 310 s ->
+    585 s -> 1 025 s while the test count grew 15 %.
+
+    So the schema is built once and `migrated_engine` empties the data tables
+    between tests instead. What a test sees is unchanged — an empty store — and
+    what is no longer rebuilt is the schema itself, which no test modifies. A
+    test that needs a *pristine* schema takes `engine_schema` and applies what it
+    wants; that is what the migration runner's own tests do.
+    """
+    schema = f"helena_test_{uuid4().hex}"
+    with psycopg.connect(engine_dsn, autocommit=True, connect_timeout=5) as connection:
+        connection.execute(f"CREATE SCHEMA {schema}")
+        try:
+            connection.execute(f"SET search_path TO {schema}")
+            migrations.apply(connection)
+            yield connection
+        finally:
+            connection.execute("SET search_path TO public")
+            connection.execute(f"DROP SCHEMA {schema} CASCADE")
+
+
+def _data_tables(connection: psycopg.Connection) -> list[str]:
+    """Every base table in the current schema except the migration ledger.
+
+    Read from the catalogue rather than listed here, so a migration that adds a
+    table is emptied between tests without anyone remembering to add it. The
+    ledger is excluded because clearing it would tell the runner the migrations
+    it just applied are pending.
+    """
+    rows = connection.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'"
+    ).fetchall()
+    return [name for (name,) in rows if name != migrations.LEDGER_TABLE]
+
+
 @pytest.fixture
-def migrated_engine(engine_schema: psycopg.Connection) -> psycopg.Connection:
-    """`engine_schema` with every migration in `sql/migrations/` applied.
+def migrated_engine(_migrated_schema: psycopg.Connection) -> psycopg.Connection:
+    """A migrated schema whose data tables are empty.
 
     This is what anything needing the engine's schema should take: the views a
     test queries are the ones a deployment gets, from the same files, applied by
     the same runner.
+
+    Emptied on the way *in* rather than on the way out, so a test that failed
+    half-written cannot leave rows behind for the next one.
     """
-    migrations.apply(engine_schema)
-    return engine_schema
+    tables = _data_tables(_migrated_schema)
+    assert tables, "no data tables found — the catalogue query is wrong, not the schema"
+    for table in tables:
+        _migrated_schema.execute(f"DELETE FROM {table}")
+    _migrated_schema.execute("FLUSH")
+    return _migrated_schema

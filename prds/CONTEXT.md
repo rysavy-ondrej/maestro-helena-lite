@@ -299,6 +299,12 @@ A task is not done because the code looks right.
 
 - `uv run pytest -q` for the whole suite; `uv run pytest -q -k <pattern>` while
   iterating. Run the **full suite** at least once before reporting.
+- **`migrated_engine` shares one migrated schema across the run** and empties the
+  data tables before each test. Do not "fix" it back to migrating per test: each
+  materialized view starts a streaming job, so per-test migration made the suite
+  scale with (views x tests) and cost 1 135 s for one module where it now costs
+  42. If you need a genuinely pristine schema, take `engine_schema` and apply
+  what you want — that is what the migration runner's own tests do.
 - If the task touches SQL, the test must **execute** it against a throwaway
   engine instance, not assert on its text. (A test that greps SQL text finds the
   comment arguing for a thing's absence — assert against what the engine receives,
