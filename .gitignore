@@ -23,3 +23,7 @@ bin/lib/
 # A small extract committed as a test fixture is fine; the full files are not.
 data/threatfox/
 data/netify/
+
+# The runner budget cache: transient state, rewritten on every run.
+# Tracking it makes the linear-history gate fire on its own churn.
+prds/.usage-cache.json

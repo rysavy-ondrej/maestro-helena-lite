@@ -150,7 +150,7 @@ USAGE_STALE_SECONDS=1800    # fall back to a reading this old if the call fails
 # Prints "<remaining>|<binding limit>|<resets_at>|<human>|<source>"
 # or      "unavailable|<reason>|||"
 budget_probe() {
-  local token http body cached
+  local token http body cached hdr retry_after
   cached="$(python3 - "$USAGE_CACHE" "$USAGE_FRESH_SECONDS" <<'PY'
 import json, os, sys, time
 p, ttl = sys.argv[1], int(sys.argv[2])
@@ -177,32 +177,80 @@ except Exception: print('')
     printf 'unavailable|no OAuth token (API-key auth, or not logged in)|||\n'; return 0
   fi
 
-  body="$(curl -sS -m 20 -w $'\n%{http_code}' "$USAGE_URL" \
+  hdr="$(mktemp)"
+  body="$(curl -sS -m 20 -D "$hdr" -w $'\n%{http_code}' "$USAGE_URL" \
       -H "Authorization: Bearer $token" \
       -H "anthropic-beta: oauth-2025-04-20" \
       -H "Content-Type: application/json" 2>/dev/null)" || body=""
   http="${body##*$'\n'}"; body="${body%$'\n'*}"
   [ -n "$http" ] || http="000"
+  # The endpoint answers 429 with a Retry-After that has been observed at ~58
+  # minutes, so "wait a minute" was wrong and cost two runs. Report what it says.
+  retry_after="$(awk 'tolower($1) == "retry-after:" { gsub(/\r/, "", $2); print $2 }' "$hdr" | tail -1)"
+  rm -f "$hdr"
 
-  python3 - "$body" "$http" "$USAGE_CACHE" "$USAGE_STALE_SECONDS" <<'PY'
+  python3 - "$body" "$http" "$USAGE_CACHE" "$USAGE_STALE_SECONDS" "$retry_after" <<'PY'
 import json, os, sys, time, datetime
 
-body, http, cache, stale_ttl = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+body, http, cache = sys.argv[1], sys.argv[2], sys.argv[3]
+stale_ttl = int(sys.argv[4])
+retry_after = sys.argv[5] if len(sys.argv) > 5 else ""
 
-def fallback(reason):
+def _now():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+def _reset_at(line):
+    """The binding limit's reset time, field 2 of a cached line."""
+    parts = line.split("|")
+    if len(parts) < 3 or not parts[2]:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(parts[2].replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+def _refresh(line):
+    """Recompute the human 'in Xh Ym' so a kept reading does not print a stale one."""
+    parts = line.split("|")
+    t = _reset_at(line)
+    if t and len(parts) >= 4:
+        mins = max(0, int((t.astimezone() - _now().astimezone()).total_seconds() // 60))
+        parts[3] = f"{t.astimezone():%Y-%m-%d %H:%M %Z} (in {mins//60}h {mins%60}m)"
+    return "|".join(parts)
+
+def fallback(reason, keep_any_age=False):
+    c = None
     if os.path.exists(cache):
         try:
             c = json.load(open(cache))
-            age = int(time.time() - c["at"])
-            if age <= stale_ttl:
-                print(f'{c["line"]}|cached {age//60}m ago, live check {reason}')
-                return
         except Exception:
-            pass
+            c = None
+    if c:
+        age = int(time.time() - c["at"])
+        if age <= stale_ttl:
+            print(f'{_refresh(c["line"])}|cached {age//60}m ago, live check {reason}')
+            return
+        # A rate-limited endpoint means "cannot ask right now", not "the budget
+        # is unknown". The cached reading still describes the CURRENT limit
+        # window as long as that window has not reset -- and a reading from a
+        # window that HAS reset is meaningless whatever its age, so the reset
+        # timestamp is the right test rather than a duration.
+        t = _reset_at(c["line"])
+        if keep_any_age and t and t > _now():
+            print(f'{_refresh(c["line"])}|cached {age//60}m ago, kept: {reason}')
+            return
     print(f"unavailable|{reason}|||")
 
 if http != "200":
-    fallback(f"HTTP {http}" + (" (usage endpoint rate-limited — wait a minute)" if http == "429" else ""))
+    if http == "429":
+        if retry_after.isdigit():
+            mins = max(1, int(retry_after) // 60)
+            hint = f"retry in ~{mins}m"
+        else:
+            hint = "retry later"
+        fallback(f"HTTP 429 (usage endpoint rate-limited, {hint})", keep_any_age=True)
+    else:
+        fallback(f"HTTP {http}")
     raise SystemExit
 try:
     d = json.loads(body)
