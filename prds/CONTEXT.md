@@ -73,8 +73,9 @@ data/            Fixtures. Real data, not evaluation data.
 
 Do not assume a file exists because a note mentions it, and do not rebuild what
 §3 says is already here. The package, `pyproject.toml` and `uv.lock` were created
-by task 0, and the tree **is** a git repository — but sessions still do not commit
-(§5), so leave your work uncommitted for the operator to review.
+by task 0, and the tree **is** a git repository whose default branch is `main`.
+A finished task is committed and merged (§4, *Land*); it is not left sitting on a
+branch nobody merged.
 
 ---
 
@@ -292,6 +293,61 @@ A task is not done because the code looks right.
 Write `prds/reports/task-NN.json` (§7). **This is the deliverable the next
 session reads.** A task with working code and no report is an incomplete task.
 
+### Land — commit, merge, release the workspace
+
+A task may be implemented in its own workspace, and when it is finished it is
+**committed, merged to `main`, and the workspace released.** Working directly on
+`main` is fine for a small task: the rule is not "always branch", it is *do not
+leave finished work uncommitted*.
+
+```bash
+git worktree add -b task-NN ../helena-task-NN
+```
+
+**A fresh worktree does not carry what a session needs** — measured, not assumed.
+Everything gitignored is absent: `.env`, `bin/blink`, `bin/risingwave`,
+`bin/lib/`, `data/netify/`, `data/threatfox/` and `.venv/`, and `Settings.load()`
+fails there naming every variable. Link them in first:
+
+```bash
+cd ../helena-task-NN
+for p in .env bin/blink bin/risingwave bin/lib data/netify data/threatfox; do
+  ln -s "/root/maestro-helena-lite/$p" "$p"
+done
+uv sync          # this worktree's OWN .venv - see the warning below
+```
+
+**`uv sync` in the worktree is required, and is not the second environment §3
+forbids.** The main `.venv` carries `helena.pth` holding the absolute path
+`/root/maestro-helena-lite/src`, so a shared or symlinked venv makes `import
+helena` load the **main tree's** source: you would edit the worktree, test the
+other tree, and get a green suite that proves nothing. A worktree venv built by
+`uv sync` from the committed `uv.lock` is the same locked set and it is released
+with the worktree.
+
+Then, once the suite passes and the report is written:
+
+```bash
+git add -A && git commit          # the report is part of the commit
+cd /root/maestro-helena-lite
+git merge --no-ff task-NN
+git worktree remove ../helena-task-NN && git branch -d task-NN
+```
+
+Four rules around it:
+
+- **Check `git status` before committing** rather than trusting `.gitignore`.
+  `.env`, `secrets/`, the `bin/` binaries and `data/netify` / `data/threatfox`
+  are never committed; `uv.lock` always is.
+- **A credential never enters a commit message**, exactly as it never enters a
+  log line or a report.
+- **Merge only a green suite.** If the task ends `blocked`, `partial` or
+  `failed`, commit what exists, say so in the report, and **leave the branch
+  unmerged** for the operator. A red `main` costs every later session.
+- **Only one engine runs per machine** (task 3: meta and compute bind fixed
+  ports), so a worktree does not get its own RisingWave. Run the suite in one
+  workspace at a time.
+
 ---
 
 ## 5. Using Claude Code efficiently here
@@ -347,7 +403,7 @@ for the same information.
 
 - edit `prd.json`, `session.json`, `progress.txt` or `session-memory.json` — the
   runner owns them, and your channel to them is the report;
-- create git commits or branches unless the task says to;
+- leave a finished task uncommitted, or merged nowhere — see §4, *Land*;
 - add a `docs/` sprawl. If a decision was made, record it where the task says;
   otherwise it goes in the report.
 
@@ -435,3 +491,11 @@ From `concept/instruction.md` §7 — all of these, or the status is not `comple
 - [ ] Maturity labels present and accurate; deferred things still say deferred.
 - [ ] No credential in a prompt, row, log, trace, test fixture or the repository.
 - [ ] The claim made is no stronger than what was demonstrated.
+
+**And one item this file adds**, which is repository workflow rather than a build
+rule, so it is deliberately *not* in `concept/instruction.md` §7 and does not make
+the copy above drift:
+
+- [ ] The work is **committed, and merged to `main`**, and any workspace opened
+      for it is released (§4, *Land*). A `blocked`, `partial` or `failed` task
+      commits but does **not** merge.
