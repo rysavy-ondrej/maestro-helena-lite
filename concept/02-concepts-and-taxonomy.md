@@ -24,7 +24,7 @@ guards against are that conflation in some costume.
 | --- | --- |
 | **Fact** | An observation or an enrichment claim. Stored separately from inference |
 | **Host context** | What one host did in one window: traffic statistics, behavioural features, provenance. **Carries no verdict** |
-| **Entity** | The thing enrichment is about and the join target: a `domain`, an `address`, or a TLS `fingerprint` observed in a host's window |
+| **Entity** | The thing enrichment is about and the join target: an `address`, a `domain`, a TLS `fingerprint`, or a `url` observed in a host's window. [05 — Threat intelligence](05-threat-intelligence.md) names where each is extracted from and what can enrich it; `service` is deliberately not one ([ADR-0009](../docs/decisions/0009-netify-application-identification.md)) |
 | **Indicator** | An entity value as a *source* names it. What is disclosed when an external source is queried |
 | **Observation-scoped traffic** | Per-entity counts named for what they are: the traffic of the flows in which the entity was *observed*. A flag distinguishes an address seen as a flow destination from a name, or an address seen only as a DNS answer |
 | **Enrichment evidence** | One claim about one entity from one source: the classification, its confidence, its scope, its snapshot, its tier, its status. **An entity carries as many claims as its sources and their values produce** — multiplicity is evidence for the agent to weigh, never something to collapse before it is seen ([ADR-0009](../docs/decisions/0009-netify-application-identification.md)) |
