@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Bring the pinned engine and broker up, then run the ingest-and-context demo.
+#
+#   demo/run-demo            run it, leaving the engine and broker up
+#   demo/run-demo --down     ... and stop them again afterwards
+#
+# Process management is scripts/dev-up's job, not this script's: it verifies the
+# binaries against docs/versions.md and refuses to start anything that does not
+# match. This only sequences it with the demo.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+STOP_AFTER=0
+[ "${1:-}" = "--down" ] && STOP_AFTER=1
+
+scripts/dev-up || true          # says so and exits non-zero if already running
+uv run demo/ingest_and_context.py
+status=$?
+
+[ "$STOP_AFTER" -eq 1 ] && scripts/dev-down
+exit "$status"

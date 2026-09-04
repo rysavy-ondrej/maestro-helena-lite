@@ -50,6 +50,7 @@ src/helena/          one package, one module per architecture component
 sql/migrations/      the engine's schema: NNNN_name.sql, applied in order
 tests/               the one pytest suite, mirroring the package
 scripts/             dev-up / dev-down, the pin-and-endpoint check, migrate, replay
+demo/                one script that runs ingest and context and prints the result
 docs/decisions/      why each dependency and each layout choice is here
 docs/versions.md     the pinned binaries and their checksums
 docs/runbook.md      running the engine and broker, and the libpython hazard
