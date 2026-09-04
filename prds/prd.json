@@ -170,7 +170,7 @@
         "Add tests over the fixture capture asserting window assignment, host keying and bidirectional counters",
         "Record in code comments the accepted cost of the window choice and that measuring window coherence is blocked on the corpus"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D2 Context] Entity extraction with observation-scoped traffic",
