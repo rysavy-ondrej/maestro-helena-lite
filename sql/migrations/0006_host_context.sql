@@ -181,9 +181,11 @@
 --           `context_id`. A citable row that exists only as a query plan is not
 --           a stable evidence identifier.
 -- Reads:    helena_flatten_flows
--- Read by:  tests/test_context.py today. It exists for entity extraction and
---           the enriched-context view (prd tasks 14 and D3), which join the
---           context to its entities and to the enrichment reference tables.
+-- Read by:  helena_signal_context_entities (entity extraction),
+--           helena_signal_host_context_retained (the retention boundary),
+--           helena_signal_retention_rejections (the counter over what the
+--           boundary drops) and tests/test_context.py. The enriched-context view
+--           (D3) reads the live view above the boundary, not this one.
 --
 -- `'v1'` below is the literal copy of `helena.versions.AGGREGATION_VERSION`.
 -- It is a literal because a streaming query cannot read

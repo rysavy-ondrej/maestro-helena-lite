@@ -75,6 +75,14 @@
 -- not_this_format, contract_violation -- mean different things and are never
 -- collapsed into one (concept/instruction.md §2); the view below keeps them
 -- apart in the counter too.
+--
+-- Layer:    source. What ingestion writes, beside helena_normalized_events --
+--           the two halves of one decision about one record.
+-- Object:   TABLE. It holds the payload exactly as read, which is a row nothing
+--           can recompute; the broker is consume-once, so it is here or nowhere.
+-- Reads:    nothing.
+-- Read by:  helena_ingest_quarantine_counts below, src/helena/normalizer.py
+--           (Quarantine, its writer and reader) and tests/test_normalizer.py.
 CREATE TABLE IF NOT EXISTS helena_ingest_quarantine (
     tenant         VARCHAR,
     sensor         VARCHAR,
@@ -107,6 +115,14 @@ CREATE TABLE IF NOT EXISTS helena_ingest_quarantine (
 -- brings the two together and refuses a count that does not reconcile. The
 -- ingest counters that make "consumed" and "normalized" engine-side facts are
 -- the next increment.
+--
+-- Layer:    source. A counter over the source, not a signal about traffic.
+-- Object:   VIEW (plain). An aggregate over a table that holds only the records
+--           ingestion refused, and nothing streams or joins from it, so
+--           materializing it would be disk for a count.
+-- Reads:    helena_ingest_quarantine
+-- Read by:  src/helena/normalizer.py (Quarantine.counts) and
+--           tests/test_normalizer.py.
 CREATE VIEW helena_ingest_quarantine_counts AS
 SELECT tenant,
        sensor,

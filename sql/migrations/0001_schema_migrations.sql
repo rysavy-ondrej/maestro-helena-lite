@@ -22,6 +22,15 @@
 -- `version` is the four-digit number in the file name, as an integer.
 -- `checksum` is the sha256 of the file's bytes at the moment it was applied,
 -- which is what makes a later edit to an applied file detectable.
+--
+-- Layer:    operational. The ledger is the engine's own bookkeeping and is not
+--           part of the flatten -> signal -> analytical stack: no view reads it
+--           and it reads nothing.
+-- Object:   TABLE. State the runner writes with INSERT and reads back over the
+--           wire protocol; nothing streams from it.
+-- Reads:    nothing.
+-- Read by:  src/helena/migrations.py, its only writer and its only reader, and
+--           tests/test_migrations.py.
 CREATE TABLE IF NOT EXISTS helena_schema_migrations (
     version    INT PRIMARY KEY,
     name       VARCHAR NOT NULL,

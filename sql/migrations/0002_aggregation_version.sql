@@ -32,4 +32,14 @@
 -- helena.versions.AGGREGATION_VERSION; tests/test_versions.py pins the engine
 -- behaviour so an engine version that lifts the restriction is noticed rather
 -- than assumed.
+--
+-- Layer:    reference. One constant, one row -- the shape
+--           helena_retention_horizon in 0009 copies.
+-- Object:   VIEW (plain). There is nothing to materialize: the row is a literal,
+--           and by the measurement above a streaming query cannot read it at all.
+-- Reads:    nothing.
+-- Read by:  tests/test_versions.py and tests/test_context.py, which assert it
+--           equals helena.versions.AGGREGATION_VERSION. No view reads it -- an
+--           aggregation view stamps the literal itself, for the reason measured
+--           above.
 CREATE VIEW helena_aggregation_version AS SELECT 'v1' AS aggregation_version;

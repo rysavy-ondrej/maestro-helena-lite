@@ -165,6 +165,15 @@
 -- There is deliberately no `fetched_at` column here. When a snapshot was
 -- fetched is a property of the load, not of a rule, and 10 322 copies of one
 -- timestamp is a column that can disagree with itself.
+--
+-- Layer:    reference. A snapshot-versioned table a loader writes and the signal
+--           layer joins against -- not a view over observed traffic.
+-- Object:   TABLE. The snapshot itself; there is nothing below it to derive it
+--           from.
+-- Reads:    nothing.
+-- Read by:  helena_signal_domain_public_suffix below -- and through it, but not
+--           directly, helena_signal_domain_registrable -- plus
+--           src/helena/enrichment.py (the loader) and tests/test_enrichment.py.
 CREATE TABLE helena_reference_public_suffix (
     -- The sha256 of the fetched bytes. Same content, same version: two fetches
     -- of an unchanged list are one snapshot, and the loader says `unchanged`
@@ -209,6 +218,14 @@ CREATE TABLE helena_reference_public_suffix (
 -- here, for the reason `concept/instruction.md` §6 gives: a credential in a URL
 -- path must be redacted before anything is logged, stored **or recorded as
 -- provenance**. This list needs no credential; the rule is about the channel.
+--
+-- Layer:    reference. The provenance of the table above, in the same layer as
+--           what it is about.
+-- Object:   TABLE. One row per load attempt, including the failures, which is
+--           state nothing can recompute.
+-- Reads:    nothing.
+-- Read by:  helena_reference_public_suffix_load_counts below,
+--           src/helena/enrichment.py (the loader) and tests/test_enrichment.py.
 CREATE TABLE helena_reference_public_suffix_load (
     attempted_at     TIMESTAMPTZ,
     source_url       VARCHAR,
@@ -234,6 +251,13 @@ CREATE TABLE helena_reference_public_suffix_load (
 -- The reason is in the GROUP BY rather than summed away, for the reason
 -- helena_ingest_quarantine_counts gives: a single total would collapse "the
 -- network is down" into "the publisher changed the format".
+--
+-- Layer:    reference. A counter over the load table.
+-- Object:   VIEW (plain). An aggregate over a table holding a handful of rows,
+--           and nothing streams or joins from it.
+-- Reads:    helena_reference_public_suffix_load
+-- Read by:  tests/test_enrichment.py and an operator asking whether the last
+--           refresh worked.
 CREATE VIEW helena_reference_public_suffix_load_counts AS
 SELECT source_url,
        status,

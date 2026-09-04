@@ -19,6 +19,8 @@ Everything else it does is refusal:
 | an applied file's checksum or name changed | the engine no longer holds what the repository says it holds |
 | a recorded version is `failed` | the store is half-migrated and a human has to look |
 | the connection is not in autocommit | RisingWave DDL outside autocommit is not visible to the next statement |
+| an object has no declaration block, or one missing a field | a view that does not say what it is and what reads it is how a layer boundary rots |
+| a materialized view names nobody who reads it | that is a streaming job and its state, paid for rows nothing looks at |
 
 None of those touch the engine before they fire, except the ones that have to
 read the ledger.
@@ -44,12 +46,23 @@ before a view existed is gone: a view created later starts empty and there is
 nothing to replay it from except a retained source capture. Migrate first, then
 start ingest — see `docs/runbook.md`.
 
+**Every object a migration creates declares itself** in a comment block above
+its `CREATE` — which layer it is in, whether it is a view or a materialized view,
+what it reads and what reads it. The engine strips comments, so the file is the
+only place that block can live, and this module is where it is read:
+`declarations()` parses it, `layering_violations()` is
+`concept/03-architecture.md`'s flatten → signal → analytical rule over what it
+says, and `reads_the_engine_records()` is how what it says is checked against
+`rw_catalog.rw_depend` rather than believed. See `tests/test_view_layering.py`
+and `docs/decisions/0016-view-layering-and-materialization-policy.md`.
+
 Reads: `sql/migrations/*.sql` and the `helena_schema_migrations` table.
 Writes: whatever the migration files write, plus one ledger row per file.
 
 Maturity: experimental — exercised by `tests/test_migrations.py` against a real
-engine, including the failure paths. It has applied exactly one migration set on
-one engine version, and no deployment has run against it.
+engine, including the failure paths, and by `tests/test_view_layering.py` for the
+declarations. It has applied exactly one migration set on one engine version, and
+no deployment has run against it.
 """
 
 from __future__ import annotations
@@ -331,3 +344,284 @@ def _require_contiguous(versions: Sequence[int], what: str) -> None:
             f"contiguous sequence from 0001: "
             f"{[f'{v:04d}' for v in missing]} not there"
         )
+
+
+# --- Declarations: what each object is, which layer it is in, and who reads it
+
+
+# The layers an object can declare itself into. The middle three are
+# `concept/03-architecture.md`'s view stack -- **flatten -> signal ->
+# analytical** -- and the other three are what that stack stands on and beside:
+# `source` is what ingestion writes, `reference` is a constant or a
+# snapshot-versioned feed table, and `operational` is the engine's own
+# bookkeeping, which the pipeline does not read at all.
+LAYERS = ("operational", "source", "reference", "flatten", "signal", "analytical")
+
+# Which layer may read which. The row that matters is `analytical`: it reads the
+# signal layer, **never the flatten layer and never the source** -- the
+# invariant in `concept/instruction.md` §2 and `concept/03-architecture.md`.
+# `flatten` reading only `source` is the same rule from the bottom: a flatten
+# view that read another one would make the layer a stack of its own.
+MAY_READ: Mapping[str, frozenset[str]] = {
+    "operational": frozenset(),
+    "source": frozenset({"source"}),
+    "reference": frozenset({"reference"}),
+    "flatten": frozenset({"source"}),
+    "signal": frozenset({"flatten", "signal", "reference"}),
+    "analytical": frozenset({"signal", "reference"}),
+}
+
+# What the engine reports for each, in `information_schema.tables.table_type`.
+TABLE_TYPES = {
+    "TABLE": "BASE TABLE",
+    "VIEW": "VIEW",
+    "MATERIALIZED VIEW": "MATERIALIZED VIEW",
+}
+
+DECLARED_FIELDS = ("Layer", "Object", "Reads", "Read by")
+
+_CREATE = re.compile(
+    r"^CREATE\s+(TABLE|MATERIALIZED\s+VIEW|VIEW)\s+"
+    r"(?:IF\s+NOT\s+EXISTS\s+)?([a-z][a-z0-9_]*)",
+    re.MULTILINE,
+)
+_DECLARED_FIELD = re.compile(r"^--\s(Layer|Object|Reads|Read by):\s+(\S.*)$")
+_CONTINUATION = re.compile(r"^--\s{4,}(\S.*)$")
+_DECLARED_KIND = re.compile(r"(?:plain\s+)?(MATERIALIZED\s+VIEW|VIEW|TABLE)\b", re.I)
+# `Reads:` is a list and is parsed as one, so any relation name is recognised
+# there. `Read by:` is prose -- it says *why* something reads this, and names
+# modules and tests as well as relations -- so a relation is recognised in it by
+# the prefix every object in this schema carries. A migration that dropped the
+# prefix would be a naming decision, and this is one of the places it would cost.
+_IDENTIFIER = re.compile(r"[a-z][a-z0-9_]*")
+_READS_LIST = re.compile(r"^[a-z][a-z0-9_]*(?:,\s*[a-z][a-z0-9_]*)*\.?$")
+_RELATION = re.compile(r"\bhelena_[a-z0-9_]+\b")
+_REPOSITORY_FILE = re.compile(r"\b(?:src|tests|scripts)/[A-Za-z0-9_./-]+\.py\b")
+_MODULE_SYMBOL = re.compile(r"\bhelena\.([a-z][a-z0-9_]*)\.[A-Za-z_]")
+
+
+class DeclarationError(MigrationError):
+    """A migration file does not say what one of its objects is.
+
+    Every view declares whether it is a view or a materialized view and what
+    reads it (`concept/instruction.md` §7), and the declaration is a comment
+    block above the `CREATE` -- the engine strips comments, so this is the only
+    place it can live. An object without one is this error rather than an object
+    nobody notices.
+    """
+
+
+@dataclass(frozen=True)
+class Declaration:
+    """The declaration block above one `CREATE`, as the file states it."""
+
+    relation: str
+    kind: str
+    layer: str
+    reads: frozenset[str]
+    read_by: frozenset[str]
+    readers_outside_the_engine: frozenset[str]
+    migration: str
+    line: int
+
+    @property
+    def materialized(self) -> bool:
+        return self.kind == "MATERIALIZED VIEW"
+
+    @property
+    def table_type(self) -> str:
+        """What `information_schema.tables` reports for an object of this kind."""
+        return TABLE_TYPES[self.kind]
+
+
+def declarations(
+    migrations: Sequence[Migration] | None = None,
+) -> dict[str, Declaration]:
+    """Every object the migrations create, keyed by relation name.
+
+    Raises `DeclarationError` when an object has no declaration block, when a
+    block is missing a field, when `Reads:` is not a list of relations, or when
+    a materialized view names nobody who reads it -- a materialized view with no
+    reader is the 42 % `concept/03-architecture.md` measures, paid for rows
+    nothing looks at.
+    """
+    found: dict[str, Declaration] = {}
+    for migration in discover() if migrations is None else migrations:
+        lines = migration.sql.splitlines()
+        for match in _CREATE.finditer(migration.sql):
+            number = migration.sql.count("\n", 0, match.start()) + 1
+            relation = match.group(2)
+            if relation in found:
+                raise DeclarationError(
+                    f"{migration.label} line {number}: {relation} is created "
+                    f"twice; {found[relation].migration} created it already"
+                )
+            found[relation] = _declaration(
+                relation=relation,
+                kind=" ".join(match.group(1).split()).upper(),
+                block=_block_above(lines, number),
+                migration=migration.label,
+                line=number,
+            )
+    return found
+
+
+def _block_above(lines: Sequence[str], number: int) -> list[str]:
+    """The unbroken run of comment lines immediately above line `number`."""
+    start = number - 1
+    while start > 0 and lines[start - 1].startswith("--"):
+        start -= 1
+    return list(lines[start : number - 1])
+
+
+def _fields(block: Sequence[str]) -> dict[str, str]:
+    """The declared fields of one comment block, continuation lines joined.
+
+    A field runs until a line that is not indented under it, so the prose the
+    rest of the block carries is not read as part of the last field.
+    """
+    found: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for line in block:
+        field = _DECLARED_FIELD.match(line)
+        if field is not None:
+            current = found.setdefault(field.group(1), [])
+            current.append(field.group(2).strip())
+            continue
+        more = _CONTINUATION.match(line)
+        if more is not None and current is not None:
+            current.append(more.group(1).strip())
+            continue
+        current = None
+    return {name: " ".join(parts) for name, parts in found.items()}
+
+
+def _declaration(
+    *, relation: str, kind: str, block: Sequence[str], migration: str, line: int
+) -> Declaration:
+    where = f"{migration} line {line}: {relation}"
+    fields = _fields(block)
+    missing = [name for name in DECLARED_FIELDS if name not in fields]
+    if missing:
+        raise DeclarationError(
+            f"{where} has no {', '.join(missing)} in the comment block above "
+            f"its CREATE. Every object declares `Layer:`, `Object:` (view or "
+            f"materialized view), `Reads:` and `Read by:`."
+        )
+
+    layer = fields["Layer"].split()[0].rstrip(".").lower()
+    if layer not in LAYERS:
+        raise DeclarationError(
+            f"{where} declares layer {layer!r}, which is not one of "
+            f"{', '.join(LAYERS)}"
+        )
+
+    declared_kind = _kind(fields["Object"])
+    if declared_kind is None:
+        raise DeclarationError(
+            f"{where} does not say whether it is a TABLE, a VIEW or a "
+            f"MATERIALIZED VIEW: Object: {fields['Object']!r}"
+        )
+    if declared_kind != kind:
+        raise DeclarationError(
+            f"{where} declares itself a {declared_kind} and the CREATE makes it "
+            f"a {kind}"
+        )
+
+    # Only the first sentence of `Reads:` is the list; a note may follow it.
+    reads = re.split(r"\.\s", fields["Reads"].strip(), maxsplit=1)[0].strip()
+    if reads.rstrip(".").lower() == "nothing":
+        read = frozenset()
+    elif _READS_LIST.match(reads):
+        read = frozenset(_IDENTIFIER.findall(reads))
+    else:
+        raise DeclarationError(
+            f"{where} does not declare what it reads as a list of relations: "
+            f"Reads: {reads!r}. Write the names it selects from, comma "
+            f"separated, or `nothing`."
+        )
+    if relation in read:
+        raise DeclarationError(f"{where} declares that it reads itself")
+
+    read_by = frozenset(_RELATION.findall(fields["Read by"])) - {relation}
+    outside = frozenset(_REPOSITORY_FILE.findall(fields["Read by"])) | frozenset(
+        f"src/helena/{module}.py" for module in _MODULE_SYMBOL.findall(fields["Read by"])
+    )
+    if declared_kind == "MATERIALIZED VIEW" and not (read_by or outside):
+        raise DeclarationError(
+            f"{where} is a MATERIALIZED VIEW and its `Read by:` names nobody. "
+            f"Materialize where something is queried or joined from; a "
+            f"materialized view nothing reads is disk paid for rows nobody "
+            f"looks at (`concept/03-architecture.md`)."
+        )
+    return Declaration(
+        relation=relation,
+        kind=kind,
+        layer=layer,
+        reads=read,
+        read_by=read_by,
+        readers_outside_the_engine=outside,
+        migration=migration,
+        line=line,
+    )
+
+
+def _kind(declared: str) -> str | None:
+    """What `Object:` opens with. Anchored, because the prose after it says
+    "view" about other things and a substring search would read that."""
+    match = _DECLARED_KIND.match(declared)
+    if match is None:
+        return None
+    return " ".join(match.group(1).split()).upper()
+
+
+def layering_violations(declared: Mapping[str, Declaration]) -> list[str]:
+    """Every declared read that crosses a layer boundary it may not.
+
+    The list is empty or the layering rule is broken. Kept a pure function over
+    the declarations so that the `analytical` row of `MAY_READ` -- the one the
+    invariant is actually about, and the one no object in this repository is in
+    yet -- can be shown to fire.
+    """
+    broken = []
+    for name, declaration in sorted(declared.items()):
+        for target in sorted(declaration.reads):
+            if target not in declared:
+                broken.append(
+                    f"{name} ({declaration.layer}) reads {target}, which no "
+                    f"migration creates"
+                )
+                continue
+            into = declared[target].layer
+            if into not in MAY_READ[declaration.layer]:
+                broken.append(
+                    f"{name} ({declaration.layer}) reads {target} ({into}); the "
+                    f"{declaration.layer} layer may read "
+                    f"{', '.join(sorted(MAY_READ[declaration.layer])) or 'nothing'}"
+                )
+    return broken
+
+
+def reads_the_engine_records(declared: Mapping[str, Declaration]) -> dict[str, set[str]]:
+    """The declared reads expanded the way the engine expands them.
+
+    A plain view is inlined into the plan of whatever reads it, so RisingWave
+    records the reader as depending on what the view reads as well as on the
+    view; a materialized view and a table are where that expansion stops. This
+    is what `rw_catalog.rw_depend` holds, and computing it from the declarations
+    is how the declarations are checked against the engine rather than believed.
+    """
+
+    def expand(name: str, seen: frozenset[str]) -> set[str]:
+        found: set[str] = set()
+        for target in declared[name].reads:
+            found.add(target)
+            if target in declared and declared[target].kind == "VIEW":
+                if target in seen:
+                    raise DeclarationError(
+                        f"{target} is reached from itself through plain views"
+                    )
+                found |= expand(target, seen | {target})
+        return found
+
+    return {name: expand(name, frozenset({name})) for name in declared}

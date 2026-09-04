@@ -228,6 +228,7 @@ is worse than the current behaviour, not better.
     uv run scripts/dev_check.py --binaries-only   # pins only
     uv run scripts/dev_check.py                   # pins, then both endpoints
     uv run scripts/dev_check.py --wait 120        # ... retrying until they answer
+    uv run scripts/dev_check.py --storage         # what the migrated schema stores
 
 `scripts/dev_check.py` is the only code that reads the pins, and
 `tests/test_infrastructure.py` calls the same functions — so "the endpoint
@@ -309,6 +310,42 @@ manual and deliberate:
 One exception with no way around it: `0001_schema_migrations.sql` *is* the
 ledger, so if it fails there is nowhere to record that it failed. The error says
 so rather than implying the ledger was written.
+
+### What the schema costs
+
+    make storage        # or: uv run scripts/dev_check.py --storage
+
+One line per relation that stores anything, largest first, then a total. The
+numbers are `rw_catalog.rw_table_stats` — the engine's own accounting, an
+estimate that moves as compaction runs — and they cover the object's own rows
+**plus the state of the streaming job behind it**, which is where most of a
+materialized view's disk goes.
+
+```
+   2,392,442 bytes  materialized view  helena_signal_context_entities
+     361,636 bytes  materialized view  helena_signal_domain_registrable
+       ...
+   3,235,812 bytes  in total, across 11 tables and materialized views;
+                    19 plain views store nothing
+```
+
+**A plain view never appears with a number**, and that is the point: a layer
+showing up here that should have been plain views is paying disk for rows nothing
+reads (`docs/decisions/0016-view-layering-and-materialization-policy.md`, which
+carries what it was measured at). Run it after a load, not on an empty store —
+an empty schema is refused rather than reported as costing nothing.
+
+### Editing a migration that has already been applied
+
+Don't. The ledger holds each applied file's sha256 and the runner refuses to
+touch a store whose files have changed underneath it, **including a change to
+comments only** — the checksum is over the bytes. The refusal names the file and
+both hashes, and it is correct: the engine does not hold what the file says.
+
+A store that has had the migrations applied before task 17 (which retrofitted the
+declaration comments into 0001–0004 and 0008) has to be dropped and re-migrated.
+There is no in-place repair short of writing the new checksums into the ledger by
+hand, which is the same act with the evidence removed.
 
 ### Bumping the aggregation version
 

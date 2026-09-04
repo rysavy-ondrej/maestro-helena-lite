@@ -93,9 +93,9 @@
 -- Object:   VIEW (plain). Nothing queries a flow row on its own; the signal
 --           layer aggregates it into a host context.
 -- Reads:    helena_normalized_events
--- Read by:  tests/test_context.py today. It exists for the windowed host-context
---           aggregation and for entity extraction (prd tasks 13 and 14), which
---           are the first non-test readers.
+-- Read by:  helena_signal_host_context (the windowed aggregation) and
+--           helena_signal_entity_observations (entity extraction), both in the
+--           signal layer, and tests/test_context.py.
 --
 -- The counters stay in the two directions the input supplies.
 -- `concept/07-principles.md` keeps connection statistics bidirectional because
@@ -151,7 +151,9 @@ FROM helena_normalized_events e;
 -- Layer:    flatten
 -- Object:   VIEW (plain). It feeds the aggregate and the entity rows above it.
 -- Reads:    helena_normalized_events
--- Read by:  tests/test_context.py today; the signal layer next (prd tasks 13-14).
+-- Read by:  tests/test_context.py. No view above reads it: what it carries is
+--           the statement that the layer was observed, which the signal layer
+--           does not need yet and must not lose.
 --
 -- The row's existence is the statement "this flow observed DNS". `rcode` is on
 -- it because a lookup that resolved nothing is a different thing from a lookup
@@ -183,7 +185,7 @@ WHERE e.observation ? 'dns';
 -- Object:   VIEW (plain). Domain entities are extracted from it by the layer
 --           above; nothing reads a query row on its own.
 -- Reads:    helena_normalized_events
--- Read by:  tests/test_context.py today; entity extraction next (prd task 14).
+-- Read by:  helena_signal_entity_observations, and tests/test_context.py.
 --
 -- `query_index` is the position in the array as stored. Order is meaningful in
 -- DNS and the flatten layer is not entitled to lose it.
@@ -207,7 +209,7 @@ FROM helena_normalized_events e,
 -- Layer:    flatten
 -- Object:   VIEW (plain). Address and domain entities are extracted from it.
 -- Reads:    helena_normalized_events
--- Read by:  tests/test_context.py today; entity extraction next (prd task 14).
+-- Read by:  helena_signal_entity_observations, and tests/test_context.py.
 --
 -- One row per record, never an index into the chain.
 -- `concept/instruction.md` §6 lists reading `[0]` as a trap that has already
@@ -240,7 +242,7 @@ FROM helena_normalized_events e,
 -- Object:   VIEW (plain). Domain entities (from the SNI) and fingerprint
 --           entities (from the client JA3/JA4) are extracted from it.
 -- Reads:    helena_normalized_events
--- Read by:  tests/test_context.py today; entity extraction next (prd task 14).
+-- Read by:  helena_signal_entity_observations, and tests/test_context.py.
 --
 -- `client_ja3`/`client_ja4` fingerprint the client and `server_ja3`/`server_ja4`
 -- the server -- the input's `ja3`/`ja4` and `ja3s`/`ja4s`. The prefix is here
@@ -277,7 +279,8 @@ WHERE e.observation ? 'tls';
 -- Layer:    flatten
 -- Object:   VIEW (plain). It feeds the aggregate and the entity rows above it.
 -- Reads:    helena_normalized_events
--- Read by:  tests/test_context.py today; the signal layer next (prd tasks 13-14).
+-- Read by:  tests/test_context.py, as helena_flatten_dns is and for the same
+--           reason -- it is the observation object, not the items.
 --
 -- `protocol` is the observation key the row came from -- 'http' or 'http2' --
 -- rather than a version string this file invents. A flow that observed both
@@ -320,7 +323,7 @@ WHERE e.observation ? 'http2';
 -- Object:   VIEW (plain). URL entities and the host part of a URI are taken
 --           from it by the layer above.
 -- Reads:    helena_normalized_events
--- Read by:  tests/test_context.py today; entity extraction next (prd task 14).
+-- Read by:  helena_signal_entity_observations, and tests/test_context.py.
 --
 -- HTTP/1 and HTTP/2 requests arrive under different keys and are the same thing
 -- to everything above -- a method, a URI and a user agent observed on this flow
@@ -379,7 +382,8 @@ FROM helena_normalized_events e,
 -- Layer:    flatten
 -- Object:   VIEW (plain). Read with the requests by the layer above.
 -- Reads:    helena_normalized_events
--- Read by:  tests/test_context.py today; the signal layer next (prd tasks 13-14).
+-- Read by:  tests/test_context.py. Nothing above reads a response row yet;
+--           entity extraction takes the URI from the request side.
 --
 -- `status_code` and `content_length` are VARCHAR because that is how they
 -- arrive: the input carries `code` and `content_len` as strings and the

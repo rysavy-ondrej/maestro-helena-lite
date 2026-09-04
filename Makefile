@@ -3,7 +3,7 @@
 # Everything runs through `uv run`, against the `.venv/` that is already at the
 # project root. Never `pip`, never a second virtualenv, never a system python.
 
-.PHONY: help sync test check lint typecheck dev-up dev-down migrate
+.PHONY: help sync test check lint typecheck dev-up dev-down migrate storage
 
 help:
 	@echo "sync       install the locked environment (uv sync)"
@@ -12,6 +12,7 @@ help:
 	@echo "dev-up     verify the pinned binaries and run the engine and broker"
 	@echo "dev-down   stop them again"
 	@echo "migrate    apply sql/migrations/ to the configured engine"
+	@echo "storage    what each relation of the migrated schema stores"
 	@echo "lint       not yet available - see docs/decisions/0003-lint-and-typecheck-tooling.md"
 	@echo "typecheck  not yet available - see docs/decisions/0003-lint-and-typecheck-tooling.md"
 
@@ -31,6 +32,12 @@ dev-down:
 # consume-once, so a view created later starts empty. See docs/runbook.md.
 migrate:
 	uv run scripts/migrate.py
+
+# What the materialization policy costs, read off the running engine rather
+# than argued from the note. A plain view never appears with a number - see
+# docs/decisions/0016-view-layering-and-materialization-policy.md.
+storage:
+	uv run scripts/dev_check.py --storage
 
 check:
 	uv lock --check

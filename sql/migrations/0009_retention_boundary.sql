@@ -375,6 +375,9 @@ GROUP BY c.tenant, c.sensor, h.retention_horizon;
 --           context cited by a finding is copied out, never evicted"
 --           (`concept/07-principles.md`), and a copy that lived in a view would
 --           evict with what it copied.
+-- Reads:    nothing. A table has no definition, so the engine records no
+--           dependency for one; the copy is an INSERT ... SELECT that Python
+--           issues, and `Written by:` says where the row comes from.
 -- Written by: helena.context.ContextStore.freeze, as INSERT ... SELECT from
 --           helena_signal_host_context_live -- the engine does the copy, and a
 --           context that has already left the boundary inserts nothing, which

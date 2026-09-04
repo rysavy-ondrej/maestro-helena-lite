@@ -330,7 +330,20 @@ views that were created late.
 
 The Context Builder is three layers of views — **flatten → signal → analytical**
 — and an analytical view reads the signal layer, never the flatten layer and
-never the source (`concept/03-architecture.md`). The bottom one exists:
+never the source (`concept/03-architecture.md`).
+
+That rule and the materialization policy beside it are **enforced, not
+conventional**. Every object a migration creates declares itself above its
+`CREATE` — layer, view or materialized view, what it reads and what reads it —
+and `tests/test_view_layering.py` refuses a missing declaration, refuses a
+materialized view nobody reads, and asserts every `Reads:` line equal to
+`rw_catalog.rw_depend` on a running engine before it draws any conclusion from a
+comment. `make storage` reports what each relation costs, where a plain view
+never appears with a number:
+[`docs/decisions/0016-view-layering-and-materialization-policy.md`](docs/decisions/0016-view-layering-and-materialization-policy.md)
+has what that was measured at.
+
+The bottom layer exists:
 `sql/migrations/0005_flatten_layer.sql` creates eight **plain views** over
 `helena_normalized_events`, turning the stored JSONB observation into typed
 columns once, rather than in every view above that wants a start time or a

@@ -14,6 +14,7 @@ Run it directly:
     uv run scripts/dev_check.py --binaries-only # pins only, nothing has to run
     uv run scripts/dev_check.py --wait 120      # retry the endpoints until up
     uv run scripts/dev_check.py --addresses     # shell assignments for dev-up
+    uv run scripts/dev_check.py --storage       # what the migrated schema stores
 
 Maturity: experimental — exercised by tests/test_infrastructure.py and by
 scripts/dev-up on every start, and the measurements behind it are recorded in
@@ -251,6 +252,90 @@ def check_broker(bootstrap: str) -> list[str]:
     return [f"broker answers the Kafka wire protocol, advertising {advertised}"]
 
 
+# What the engine stores for one relation: the rows of the object itself plus
+# the state of the streaming job behind it, which is where most of a
+# materialized view's disk actually goes. A plain view has neither and reports
+# zero -- which is the whole of `concept/03-architecture.md`'s materialization
+# rule, made observable instead of argued.
+STORAGE = """
+SELECT r.name,
+       r.relation_type,
+       coalesce(o.total_key_size, 0) + coalesce(o.total_value_size, 0)
+     + coalesce(i.state_bytes, 0) AS bytes
+FROM rw_catalog.rw_relations r
+LEFT JOIN rw_catalog.rw_table_stats o ON o.id = r.id
+LEFT JOIN (SELECT it.job_id AS job_id,
+                  sum(s.total_key_size + s.total_value_size) AS state_bytes
+           FROM rw_catalog.rw_internal_tables it
+           JOIN rw_catalog.rw_table_stats s ON s.id = it.id
+           GROUP BY it.job_id) i ON i.job_id = r.id
+WHERE r.schema_id = (SELECT id FROM rw_catalog.rw_schemas
+                     WHERE name = coalesce(%s, current_schema()))
+"""
+
+
+def storage(
+    connection: object, schema: str | None = None
+) -> dict[str, tuple[str, int]]:
+    """Bytes stored per relation, as the engine accounts for them.
+
+    Keyed by relation name, valued `(relation_type, bytes)`; `schema` defaults
+    to the connection's own. The numbers come
+    from `rw_catalog.rw_table_stats`, which is the engine's own accounting over
+    what it has written -- an estimate, not a `du`, and it moves as compaction
+    runs. What it is exact about is the shape of the answer: a plain view stores
+    nothing at all, and every byte reported belongs to a table or to a
+    materialized view.
+    """
+    rows = connection.execute(STORAGE, (schema,)).fetchall()
+    return {name: (relation_type, int(size)) for name, relation_type, size in rows}
+
+
+def report_storage(dsn: str) -> list[str]:
+    """`storage_report` for the engine at `dsn`, in its default schema."""
+    import psycopg
+
+    try:
+        with psycopg.connect(dsn, autocommit=True, connect_timeout=5) as connection:
+            stored = storage(connection)
+    except psycopg.Error as error:
+        raise CheckFailed(f"the engine did not answer: {error}") from error
+    return storage_report(stored)
+
+
+def storage_report(stored: dict[str, tuple[str, int]]) -> list[str]:
+    """One line per relation that stores something, largest first, then a total.
+
+    `concept/03-architecture.md` measures a materialized intermediate at 42 %
+    more disk than the same query as a plain view. This is where that cost is
+    read off a running engine rather than argued from the note: everything with
+    a number beside it is a table or a materialized view, and a layer appearing
+    here that should have been plain views is paying for rows nothing reads.
+
+    An empty schema is a refusal rather than an empty report, because "nothing
+    is stored" is true of an unmigrated store and says nothing about the policy.
+    """
+    if not stored:
+        raise CheckFailed(
+            "this schema holds no relation at all; run `make migrate` before "
+            "asking what the schema costs"
+        )
+    lines = [
+        f"{size:>12,} bytes  {relation_type:<18} {name}"
+        for name, (relation_type, size) in sorted(
+            stored.items(), key=lambda item: (-item[1][1], item[0])
+        )
+        if size
+    ]
+    plain = sum(1 for kind, _ in stored.values() if kind == "view")
+    lines.append(
+        f"{sum(size for _, size in stored.values()):>12,} bytes  in total, "
+        f"across {len(stored) - plain} tables and materialized views; "
+        f"{plain} plain views store nothing"
+    )
+    return lines
+
+
 def addresses() -> dict[str, str]:
     """The engine and broker addresses, resolved the way the package does.
 
@@ -311,6 +396,11 @@ def main(argv: list[str] | None = None) -> int:
         help="retry the endpoint checks for up to SECONDS before failing",
     )
     parser.add_argument(
+        "--storage",
+        action="store_true",
+        help="print what each relation of the migrated schema stores, and exit",
+    )
+    parser.add_argument(
         "--addresses",
         action="store_true",
         help="print the resolved addresses as shell assignments and exit",
@@ -325,6 +415,10 @@ def main(argv: list[str] | None = None) -> int:
             # checked, so neither has to travel through a shell.
             for name in ("RW_LISTEN_ADDR", "BLINK_BROKER_PORTS", "BLINK_KAFKA_HOSTNAME"):
                 print(f"{name}={shlex.quote(resolved[name])}")
+            return 0
+        if arguments.storage:
+            for line in report_storage(addresses()["RISINGWAVE_DSN"]):
+                print(line)
             return 0
         recorded = pins()
         reported = check_binaries(recorded)

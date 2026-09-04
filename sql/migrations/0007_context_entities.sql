@@ -328,8 +328,11 @@ JOIN (
 --           its own to render a context's entities. A join target that exists
 --           only as a query plan is re-executed by every joiner.
 -- Reads:    helena_signal_entity_observations, helena_signal_host_context
--- Read by:  tests/test_context.py today. It exists for the enriched-context
---           view (D3), which joins these rows against the enrichment reference
+-- Read by:  helena_signal_context_entities_retained (the retention boundary),
+--           helena_signal_domain_suffix_candidates and
+--           helena_signal_context_domains (the registrable-domain derivation),
+--           and tests/test_context.py. It exists for the enriched-context view
+--           (D3), which joins these rows against the enrichment reference
 --           tables, and for the triage rendering, which needs per-domain and
 --           per-address records rather than arrays.
 --

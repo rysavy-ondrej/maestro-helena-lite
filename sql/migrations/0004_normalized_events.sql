@@ -65,6 +65,19 @@
 -- docs/decisions/0011 gives: a wall clock would make a capture replayed twice
 -- produce different rows from the run it replays. When a record arrived is a
 -- property of an ingest run.
+--
+-- Layer:    source. This is *the* source the layering rule names: the flatten
+--           layer reads it and nothing above the flatten layer may.
+-- Object:   TABLE. The record as read, held so that every view above is a view
+--           over one stored copy rather than over the topic, which is
+--           consume-once.
+-- Reads:    nothing.
+-- Read by:  the flatten layer of sql/migrations/0005_flatten_layer.sql --
+--           helena_flatten_flows, helena_flatten_dns, helena_flatten_dns_queries,
+--           helena_flatten_dns_responses, helena_flatten_tls, helena_flatten_http,
+--           helena_flatten_http_requests, helena_flatten_http_responses -- and
+--           helena_ingest_counts below, src/helena/normalizer.py (EventStore) and
+--           tests/test_normalizer.py.
 CREATE TABLE IF NOT EXISTS helena_normalized_events (
     tenant         VARCHAR,
     sensor         VARCHAR,
@@ -101,6 +114,13 @@ CREATE TABLE IF NOT EXISTS helena_normalized_events (
 -- src/helena/normalizer.py::ingest_counts brings all four together and refuses a
 -- set that does not reconcile: normalized + quarantined must equal consumed, and
 -- consumed may not exceed the records the capture holds.
+--
+-- Layer:    source. A counter over the source, like the quarantine counter.
+-- Object:   VIEW (plain). A count over a table; nothing streams or joins from
+--           it, so materializing it would be disk for a number.
+-- Reads:    helena_normalized_events
+-- Read by:  src/helena/normalizer.py (EventStore.normalized, ingest_counts) and
+--           tests/test_normalizer.py.
 CREATE VIEW helena_ingest_counts AS
 SELECT tenant,
        sensor,
