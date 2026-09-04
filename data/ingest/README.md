@@ -1,7 +1,13 @@
 # Ingest fixtures
 
-Recorded flow records used to build and test against. Not evaluation data — see
-`OQ-1b` / `B-001` for the labeled corpus, which does not exist yet.
+Recorded flow records used to build and test against. **Not evaluation data** —
+the labelled corpus does not exist, and every claim about verdict quality is
+blocked on it ([`concept/08-open-questions.md`](../../concept/08-open-questions.md)).
+
+> Identifiers below of the form `B-nnn` or `OQ-n` come from an earlier tracking
+> system and **do not resolve in this repository**. The facts they annotate —
+> the clearance, the provenance, the content inventory — were verified against
+> the capture and stand on their own.
 
 ---
 
@@ -91,8 +97,10 @@ what the running system sends and trusts, and they hold regardless of the
 fixture's clearance here.
 
 It is also a reminder that stripping query strings is a **correctness**
-requirement independent of privacy: B-046 already requires extracting the host
-part from a URI rather than storing it whole.
+requirement independent of privacy: storing the **host part** of a URI rather
+than the whole thing is a rule of this project too
+(`concept/instruction.md` §6, and `concept/05-threat-intelligence.md` for the
+domain entity).
 
 ### Provenance (B-098, closed 2026-09-01)
 

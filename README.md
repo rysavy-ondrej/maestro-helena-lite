@@ -46,6 +46,7 @@ src/helena/          one package, one module per architecture component
   config.py            the fail-loud environment loader and Secret
   observability.py     the one structured log channel and its redactor
   migrations.py        applies sql/migrations/ and records what it applied
+  versions.py          the nine recorded version dimensions, and stamping
 sql/migrations/      the engine's schema: NNNN_name.sql, applied in order
 tests/               the one pytest suite, mirroring the package
 scripts/             dev-up / dev-down, the pin-and-endpoint check, migrate, replay

@@ -110,9 +110,19 @@ references the signal layer, never the flatten layer and never the source
 directly.
 
 One measured rule sits beside the layering: **do not materialize an intermediate
-that only feeds an aggregate.** A materialized intermediate cost 42 % more disk
-than the same query as a plain view — storing rows nothing reads. Every view
-declares whether it is a view or a materialized view, and what reads it.
+that only feeds an aggregate** — it stores rows nothing reads. Every view declares
+whether it is a view or a materialized view, and what reads it.
+
+> **The size of the penalty is not a constant, and the earlier figure here was.**
+> This note used to say a materialized intermediate cost **42 %** more disk. Task
+> 17 measured it against the pinned engine on two workloads producing the same
+> aggregate and got **+12 %** (142 064 → 159 194 bytes over the ten-record layer
+> capture) and **+56 %** (119 154 → 186 236 bytes over 73 flow rows collapsing
+> into 2 contexts). The penalty scales with the **aggregation factor** — how many
+> rows the intermediate holds per row the aggregate emits — so 42 % was one
+> workload's number and is not reproducible as a rate. **The direction is what
+> holds and what the test asserts**; `make storage` reads the actual bytes off
+> the engine rather than arguing from a figure.
 
 ## Providers
 
