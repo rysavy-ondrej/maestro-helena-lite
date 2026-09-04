@@ -1,0 +1,84 @@
+{
+  "task_index": 3,
+  "title": "[D0 Foundations] Pin and run the broker and streaming engine",
+  "status": "completed",
+  "summary": "The pinned engine and broker are now runnable and checkable from the repository: `scripts/dev-up` / `scripts/dev-down` start and stop them on the addresses `helena.config` resolves, `docs/versions.md` carries the sha256 and version-string pins, `scripts/dev_check.py` is the one definition of \"the pins match and both endpoints answer\", and `tests/test_infrastructure.py` (9 tests, ordered ahead of every other integration test) executes it — including a round trip through the broker over the Kafka wire protocol and a psycopg query against a real engine. The libpython ABI hazard was measured rather than repeated, and `docs/runbook.md` §1 records the result: there is no runtime symptom at all, so the guard is structural (ldd plus a checksum on the resolved file) and has its own test.",
+  "assumption_validated": "That the packaging hazard in concept/06-technology.md is real and that a runtime check could detect it. Half negative, and that is the useful half. Real: yes — the SONAME is satisfied by libpython3.14 and the ABI differs. Detectable at runtime: NO. Measured with `libpython3.12.so.1.0 -> /usr/lib/x86_64-linux-gnu/libpython3.14.so.1.0` on LD_LIBRARY_PATH, `--version` printed the correct string and exited 0, `single_node --in-memory` started, bound the PostgreSQL port and answered `SELECT version()` with the identical string, and the engine's own log said nothing across a two-minute run. The one code path that calls into libpython (embedded Python UDFs, off by default) was tried and is INCONCLUSIVE: the first SELECT that evaluates such a function kills the engine silently, and it does so with the pinned library too, so it is a RisingWave 3.0.3 bug and not evidence about the ABI. Conclusion recorded and acted on: only a structural check discriminates, so dev-up and the suite resolve the SONAME through ldd and checksum the file it resolves to. Also validated, and contrary to what this session assumed before measuring: `single_node --in-memory` is fully usable (DDL, INSERT, FLUSH, SELECT) 0.65 s after launch, not tens of seconds.",
+  "makes_buildable": "Task 4 (SQL migration runner) gets a session-scoped `engine_dsn` fixture that guarantees a RisingWave answering on the configured DSN — started in-memory by the fixture when nothing is listening, reused when `scripts/dev-up` already has one — so migration tests can execute SQL against a throwaway instance without any per-test process management. Task 5 and everything downstream gets `broker_bootstrap` on the same terms, plus the measured rule that consumption must use `assign()` because blink 0.2.0 has no working consumer groups. `scripts/dev_check.py` gives any later task one call for \"is the infrastructure there\", and `docs/versions.md` gives a machine-readable pin block that a future `scripts/build-binaries.sh` can be written against.",
+  "files_changed": [
+    "scripts/dev-up",
+    "scripts/dev-down",
+    "scripts/dev_check.py",
+    "scripts/risingwave.toml",
+    "scripts/blink.yaml",
+    "docs/versions.md",
+    "docs/runbook.md",
+    "docs/decisions/0006-running-the-pinned-binaries.md",
+    "tests/conftest.py",
+    "tests/test_infrastructure.py",
+    "pyproject.toml",
+    "Makefile",
+    "README.md",
+    ".gitignore",
+    "bin/README.md"
+  ],
+  "verification": {
+    "command": "uv run pytest -q",
+    "passed": true,
+    "detail": "130 passed (121 before this task, 9 added). Run twice for real: once with `scripts/dev-up` running, so the fixtures used the live engine and broker, and once with nothing running, so the fixtures started and stopped the pinned binaries themselves — both green, no leftover processes or listening ports either time. `make check` green (uv lock --check, compileall over src/tests/scripts, the suite). Executed against real infrastructure, not mocks: a psycopg client ran `SELECT version()` and `SELECT 1` against a running RisingWave 3.0.3 and the reported version string was asserted equal to the pin in docs/versions.md; a record was produced to and consumed back from a real blink over the Kafka wire protocol with AdminClient create-topic, Producer.flush and Consumer.assign. `scripts/dev-up` and `scripts/dev-down` were each run end to end and verified by ss/pgrep. The ABI guard was verified by execution twice: a test that builds the bad symlink and asserts CheckFailed, and the dev_check CLI pointed at that directory, which exits 1 naming the resolved path and both checksums."
+  },
+  "escalations": [
+    {
+      "kind": "conflict",
+      "detail": "The PRD step said dev-up should FETCH the pinned Blink commit and RisingWave release. prds/CONTEXT.md §3 is higher authority and says the opposite — do not build, download, containerise or depend on these binaries. Implemented as verify-and-run: dev-up checks what is on disk against docs/versions.md and fails loud naming the file if a binary is absent or does not match. Recorded in docs/decisions/0006 and in docs/versions.md. The honest consequence: there is still NO automated way to get the binaries onto a fresh node, and bin/README.md's `scripts/build-binaries.sh` still does not exist. Writing it is separate work and would need a decision about downloading.",
+      "blocking": false
+    },
+    {
+      "kind": "egress",
+      "detail": "RisingWave 3.0.3 reports to telemetry.risingwave.dev by default (observed in .run/risingwave.log before the override, as HTTP 500s from its telemetry reporter). concept/06-technology.md puts the whole automatic pipeline on the local node and ADR-0005 already refused hosted tracing as a second egress channel, so scripts/risingwave.toml sets `[server] telemetry_enabled = false` and nothing else. Flagging it because it is an outbound channel decision made inside a task, and because it was ON in every engine run any earlier session did by hand.",
+      "blocking": false
+    },
+    {
+      "kind": "state file",
+      "detail": "scripts/dev-up writes pidfiles and logs under `.run/` (gitignored). This is process management for a dev script, not a store — no project data, nothing durable, nothing read by the pipeline — but the single-store rule is strict enough that it is worth naming rather than assuming. If that reading is wrong the alternative is matching processes by command line, which this session found actively dangerous (see failed_approaches).",
+      "blocking": false
+    },
+    {
+      "kind": "open, untouched",
+      "detail": "The concept/05 (Netify commercial-only, out of scope) vs data/netify (a million rows on disk) tension noted in CONTEXT.md §3 is still open. This task did not touch enrichment and did not pick a side.",
+      "blocking": false
+    }
+  ],
+  "invariant_conflicts": [
+    "PRD step 1 (\"fetches and runs\") vs prds/CONTEXT.md §3 (\"Do not build these, download them, containerise them, or add them as dependencies\"). Resolved in favour of CONTEXT.md; dev-up verifies and runs, never downloads. See the first escalation and docs/decisions/0006."
+  ],
+  "deferred": [
+    "`scripts/build-binaries.sh`. bin/README.md has referenced it since task 0 and it does not exist; this task made the reference honest (\"That script does not exist yet\") and pointed it at docs/versions.md, but did not write it, because writing it means downloading binaries and that is the conflict above.",
+    "A test pinning blink's broken consumer groups. It was written, then removed: every assertion available for it is either timing-based (subscribe and poll for N seconds) or wrong (AdminClient.list_consumer_groups SUCCEEDS and returns an empty result), so it would have passed for the wrong reason once blink fixes it. The limitation is recorded in docs/runbook.md §3 with the exact protocol evidence instead, and the positive path — assign() — is what the round-trip test executes.",
+    "A stronger engine-readiness check than `SELECT version()`. It is read-only on purpose because the same check runs against the dev-up instance and a health check should not write to the store. The measured gap is 0.15 s (version() at 0.51 s, DDL at 0.65 s from launch) and is recorded in docs/runbook.md §4; anything needing DDL immediately should retry its DDL.",
+    "Making the engine's fixed meta/compute ports (5690, 5688) configurable so two instances could coexist. `standalone` mode exposes per-node option strings that would allow it; not done, because one engine per machine is true at prototype scale and the fixtures handle it by using an instance that is already answering.",
+    "Any SQL, view or migration. Task 4 owns those; this task only proves an engine is there to run them against."
+  ],
+  "lessons": [
+    "task 03: The libpython ABI mismatch has NO runtime symptom. With libpython3.14 symlinked onto libpython3.12.so.1.0, `./bin/risingwave --version` prints the correct string and exits 0, `single_node --in-memory` starts, binds the PostgreSQL port and answers `SELECT version()` with the identical string, and nothing appears in its log. A MISSING library is loud ('error while loading shared libraries'); a WRONG one is silent. Only a structural check discriminates: `ldd bin/risingwave`, then sha256 the file the SONAME resolved to. `uv run scripts/dev_check.py --binaries-only` does exactly that.",
+    "task 03: RisingWave `single_node --in-memory` is usable in well under a second, not tens of seconds: connection accepted at 0.50 s, `SELECT version()` at 0.51 s, three RUNNING workers in rw_catalog.rw_worker_nodes at 0.53 s, and a full CREATE TABLE / INSERT / FLUSH / SELECT / DROP round trip at 0.65 s. Earlier sessions (this one included, at first) slept 30-40 s after starting it on an assumption nobody had measured.",
+    "task 03: `--listen-addr` moves only the PostgreSQL port. Meta and compute bind fixed 5690 and 5688, so a second RisingWave cannot run alongside the first whatever port you give it — it panics with 'failed to bind `grpc-meta-leader-service` to 127.0.0.1:5690: Address already in use'. That is why tests/conftest.py uses an already-answering instance instead of always starting a throwaway one.",
+    "task 03: The mysterious `secrets/` directory at the project root that task 0 noticed is RisingWave's. The frontend's `temp_secret_file_dir` defaults to `./secrets`, relative to the engine's working directory. dev-up runs it in `.run/engine/` and the fixtures run it in a pytest tmp dir, so it does not appear at the root any more.",
+    "task 03: RisingWave 3.0.3 phones home to telemetry.risingwave.dev by default. `scripts/risingwave.toml` with `[server] telemetry_enabled = false` turns it off, and the resolved value is visible in the engine's config dump in the log.",
+    "task 03: Blink is configured by ENVIRONMENT VARIABLES, not by the settings YAML — `--settings <path>` is required but the settings come from the environment. The full set is BROKER_PORTS, REST_PORT, KAFKA_HOSTNAME, RETENTION, KAFKA_CFG_NUM_PARTITIONS, ENABLE_CONSUMER_GROUPS, HEAP_MEMORY_FACTOR, KAFKA_MEM_HEAP, USE_LAST_ACCESSED_OFFSET, CHECK_FOR_SKIPPED_BATCHES, OBLITERATION_WARNING_INTERVAL_MINUTES. Unknown YAML keys are accepted silently. Blink prints the Settings struct it resolved on startup, so the log is the authority.",
+    "task 03: The reason blink's `subscribe()` returns nothing (task 00 found this and did not investigate) is exact: blink 0.2.0 CLOSES THE TCP CONNECTION on `FindCoordinatorRequest v2`. Metadata succeeds, the coordinator lookup gets a disconnect, the consumer loops in query-coord forever with no error. ENABLE_CONSUMER_GROUPS=true does not help (blink does start its consumer-group background tasks; the disconnect is unchanged), and neither does api.version.request=false with broker.version.fallback=0.10.0. The pinned commit 645c814f is literally titled 'Restrict the FindCoordinator version range to supported versions'. Consume with assign(TopicPartition(topic, partition, offset)) and manage offsets yourself.",
+    "task 03: `AdminClient.list_consumer_groups()` against blink SUCCEEDS and returns an empty result, so it is not a probe for the above. Do not use it to detect the limitation.",
+    "task 03: Neither binary can confirm its own provenance — blink does not embed its commit (it reports `blink 0.2.0`, banner `v0.2.LOCAL`) and RisingWave's v3.0.3 tag ships two Linux assets, only one of which is on disk. So the sha256 in docs/versions.md is the pin and the version strings are a sanity check. Both upstream facts were confirmed through the GitHub API rather than assumed: the tag exists (published 2026-08-17) and commit 645c814fe18edc43fc1d619d3f90f646ba18bedd exists in cleafy/blink (2025-10-06).",
+    "task 03: Embedded Python UDFs are off by default in RisingWave 3.0.3 (`[udf] enable_embedded_python_udf`), and with them on, the first SELECT that evaluates one kills the whole engine process with nothing in its log — with the pinned library as well as with a mismatched one. Do not read a UDF crash as an ABI problem, and do not build anything on Python UDFs.",
+    "task 03: pytest ordering is imposed in tests/conftest.py: unit tests, then tests/test_infrastructure.py, then any other test carrying the `integration` marker (registered in pyproject.toml because --strict-markers is on). The real guarantee that nothing addresses a dead endpoint is the fixture, which does the readiness wait before it yields."
+  ],
+  "failed_approaches": [
+    "task 03: `pkill -f` / `pgrep -f` with a pattern like 'bin/risingwave' or 'single_node' inside this session. The pattern matches the agent's own process argv (the task prompt contains those strings) and the bash wrapper's command line, so the command kills its own shell — two commands in this session died with exit 144 (SIGTERM) and one silently skipped writing a file it was supposed to create, which then produced a misleading 'failed to open config file' panic. Use `pgrep -x risingwave` / `pgrep -x blink`, or pidfiles.",
+    "task 03: Trying to make the libpython ABI mismatch observable by enabling embedded Python UDFs and evaluating one. It crashes the engine identically with the correct library, so it proves nothing. The control run is what caught it; without the control this session would have recorded a wrong 'failure symptom' in the runbook.",
+    "task 03: Configuring blink through its settings YAML (`BROKER_PORTS: [19092]`, `REST_PORT: 30104` as YAML keys). No effect and no error — the broker came up on its defaults. The same names as environment variables work immediately.",
+    "task 03: `api.version.request=false` + `broker.version.fallback=0.10.0` on a librdkafka Consumer as a way to get consumer groups working against blink. No assignment, no messages, same as the default configuration.",
+    "task 03: A pytest fixture written as `yield from _serve(...)` followed by `yield value` — that yields twice and pytest rejects it. `_serve` is a `@contextmanager` and the fixture is `with _serve(...): yield value`.",
+    "task 03: Faking a pytest item in a test with `type('m', (), {'__name__': module})` to stand in for `item.module`. `type()` overwrites `__name__` with the class name, so the stand-in never matches. `SimpleNamespace(**{'__name__': module})` works."
+  ],
+  "next_session_should_know": "Infrastructure is a solved problem for you: write a test, take the `engine_dsn` or `broker_bootstrap` fixture from tests/conftest.py, mark it `@pytest.mark.integration`, and an engine or broker will be there — started in-memory by the fixture if nothing is running, reused if `scripts/dev-up` has one. Do not start processes inside your own test. `uv run pytest -q` is green either way (130 tests, ~12 s from cold). Read docs/runbook.md before you touch bin/ or write a consumer; its §1 is the libpython hazard with the measurement, and §3 is why the broker must be consumed with `assign()` and never `subscribe()`. Three things that will bite otherwise: (1) `SELECT version()` becomes true about 0.15 s before DDL does, so if your migration runner fires immediately after startup, retry the DDL rather than trusting the endpoint check; (2) only one RisingWave can run per machine because meta and compute bind fixed ports, so `scripts/dev-down` before debugging a bind failure; (3) never use `pgrep -f`/`pkill -f` with a pattern that appears in your own prompt or command line — it kills your own session, which happened twice here. If you change a pinned binary you must change `docs/versions.md`; `scripts/dev_check.py` is the only code that reads it and both dev-up and the suite fail loud on a mismatch. Still open and untouched: `scripts/build-binaries.sh` does not exist and nothing in the repository downloads a binary (deliberate, ADR-0006); the concept/05 vs data/netify tension; and there is still no git repository, so nothing in this task was committed."
+}

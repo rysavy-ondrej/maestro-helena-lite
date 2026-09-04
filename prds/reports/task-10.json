@@ -1,0 +1,86 @@
+{
+  "task_index": 10,
+  "title": "[D1 Ingest] Kafka wire-protocol ingress and egress plumbing",
+  "status": "completed",
+  "summary": "The ingest path now runs over the wire: `helena.broker` is a thin producer/consumer wrapper that is the only module in the package importing a Kafka client, `helena.normalizer` consumes the ingest topic and writes validated events into `helena_normalized_events` (migration 0004), and `IngestCounts` reconciles four numbers from four places — the capture file, the run, `helena_ingest_counts` and `helena_ingest_quarantine_counts`. A capture published to a real blink topic, consumed back and stored in a real RisingWave produces rows identical to the same capture read from disk.",
+  "assumption_validated": "Two, both measured rather than assumed. (1) The invariant 'the broker is addressed only through the Kafka wire protocol' is enforceable structurally: one module imports the client, its bound names are an allowlist of wire-protocol clients, it imports no HTTP or socket module, and no module in the package holds an address literal. All four assertions were mutation-checked and all four bite. (2) 'The broker is not a store' is TRUE IN SUBSTANCE AND NOT INSTANTANEOUS. Measured on blink 0.2.0: a topic drained once can still return every record on an immediate second drain, and empties a few seconds later; a topic produced to and never read still holds its records after 30 s, so it is consume-once rather than a short retention window. The concept note's 'a topic is never re-readable' is right about the outcome and wrong about the timing, and a retry written against the sentence alone would occasionally double-ingest. This finding cost one flaky test before it was found.",
+  "makes_buildable": "Task 11 (capture replay driver) has everything but the CLI: `IngestMessage.headers()` is the producer side of the wire contract, `BrokerProducer.create_topic/publish/flush` is the publishing path (with a flush that raises instead of silently losing a capture), and `ingest_counts(...)` is the produced-versus-materialized report its step 3 asks for. Task 12 (flatten-layer views) has `helena_normalized_events` to build over, with the observation as JSONB that preserves absent-vs-empty (measured over all 62 real records) and `->`/`?` navigation working. Task 46/47 (sink and egress) has the wrapper and, more usefully, the boundary test that already covers the egress end — a Kafka client in `sink.py` is a test failure today.",
+  "files_changed": [
+    "src/helena/broker.py",
+    "src/helena/normalizer.py",
+    "src/helena/config.py",
+    "sql/migrations/0004_normalized_events.sql",
+    "tests/test_broker.py",
+    "tests/test_normalizer.py",
+    "tests/test_config.py",
+    "tests/test_package_layout.py",
+    "docs/decisions/0014-the-ingest-topic-message.md",
+    "docs/runbook.md",
+    "README.md",
+    ".env.example",
+    ".env"
+  ],
+  "verification": {
+    "command": "uv run pytest -q",
+    "passed": true,
+    "detail": "434 passed (409 before, so 25 new), run three times: twice against an engine and broker already up via scripts/dev-up, once cold with nothing running so the conftest fixtures start their own. `make check` also passes (uv lock --check, compileall, suite). 15 of the new tests are marked `integration` and execute against the pinned binaries: migration 0004 is applied by the `migrated_engine` fixture and the constants are checked against `information_schema`, never against the .sql text. The headline test publishes all 62 records of data/ingest/flow-sample.jsonl to a real blink topic, consumes them back through helena.broker, normalizes and stores them in a real RisingWave, and compares the stored observations against the JSON in the file record by record. Migration 0004 was also applied by hand with `uv run scripts/migrate.py` (four files, ledger clean) and a full end-to-end run against the persistent engine through Settings.load() and the real .env reported records=62 consumed=62 normalized=62 quarantined=0, complete=True (rows removed afterwards; store left with 0 events, 0 quarantine rows). Mutation-checked, seven mutations, all caught: storing the observation with model_dump instead of as_supplied (absence test fails), deleting the IngestCounts reconciliation (the lost-records test fails), narrowing the event-id digest to the raw-record reference (the two-deployments test fails), importing confluent_kafka in sink.py, adding a literal 'localhost:9092' to broker.py, importing urllib in broker.py, and binding ConfigResource from confluent_kafka.admin. One mutation did NOT fail and was correct not to: appending a trailing space to the payload on the wire path, because the store keeps the parsed observation and trailing whitespace is not part of the record. Probed against the engine before writing SQL: JSONB round-trips all 62 real records equal to their parsed JSON, `obs->'tls'->'alpn' = '[]'` finds the one observed-but-empty ALPN and `NOT (obs ? 'dns')` finds the 32 records with no DNS layer."
+  },
+  "escalations": [
+    {
+      "kind": "contract",
+      "detail": "The ingest topic's wire contract is new: the message value is the raw flow record byte for byte and the raw-record reference travels in two Kafka headers, `helena-capture-sha256` and `helena-record-offset`. This transports an existing contract field (RawRecordReference) rather than adding one, but it is a contract every producer sees, so it is recorded as a decision in docs/decisions/0014-the-ingest-topic-message.md rather than left implicit. The alternative — an envelope in the value — would have been a change to the input format for every producer, which docs/decisions/0012 says a second format must not require.",
+      "blocking": false
+    },
+    {
+      "kind": "open-question",
+      "detail": "A message that carries no usable reference in its headers cannot be quarantined: a quarantine row is KEYED by capture and offset, so there is no row to write. It raises IngestMessageError and stops the run, naming the header. Where such a refusal would live if a deployment ever needed to keep them is left open rather than answered by inventing a second table or a dead-letter topic (the broker is not a store). Recorded in ADR-0014.",
+      "blocking": false
+    },
+    {
+      "kind": "open-question",
+      "detail": "Live ingestion from a capture still being written is still not possible, and this increment inherits rather than resolves it: docs/decisions/0010 records that a hash identifies a capture only once the file closes, so a streaming producer has no digest to put in the header. Replay of a retained capture is fully served. The answer is a decision about what identifies a record in flight, not a provisional digest.",
+      "blocking": false
+    },
+    {
+      "kind": "enrichment-source",
+      "detail": "The concept/05 vs data/netify tension noted in CONTEXT.md §3 was not touched by this task and remains open.",
+      "blocking": false
+    }
+  ],
+  "invariant_conflicts": [
+    {
+      "step": "Implement a thin producer and consumer wrapper taking broker address and topic NAMES (plural) from configuration only",
+      "conflict": "Only HELENA_INGEST_TOPIC was added. An output-topic variable would be a configuration key with one value and no reader — concept/instruction.md §1 forbids exactly that, and §3 puts a second egress channel behind a decision. The invariant the step is protecting ('the rule holds on both ends so replacing the broker is a configuration change') is enforced instead by tests/test_broker.py, which asserts that helena.broker is the ONLY module in the package importing a Kafka client — that covers sink.py as much as normalizer.py, today, before the sink exists. HELENA_OUTPUT_TOPIC enters with the sink that writes to it (task 46)."
+    },
+    {
+      "step": "The broker is memory-first, single-node, consume-once and restart-volatile, so a topic is never re-readable",
+      "conflict": "Not a conflict in substance, but concept/03-architecture.md's timing is wrong and the correction is recorded rather than papered over: the reclaim after a read is asynchronous, so an immediate second drain can still return every record. Documented in docs/runbook.md §3, ADR-0014 and tests/test_broker.py (which asserts both the reclaim and the never-read control)."
+    }
+  ],
+  "deferred": [
+    "`helena replay-capture <hash>` and the publishing helper it will own — that is task 11. The test suite publishes a capture in three lines using IngestMessage and BrokerProducer; a helper in the package with only a test calling it would be structure ahead of the increment.",
+    "The output topic: no HELENA_OUTPUT_TOPIC, no egress producer call site. See invariant_conflicts.",
+    "A long-running consumer. `BrokerConsumer.consume` is bounded by an idle timeout because a bounded ingest run is what exists to be reconciled; a daemon that never returns has no caller yet.",
+    "Consuming across more than one partition. The pinned broker runs one partition per topic and fanning out would be ordering machinery for a case that does not exist; the partition is a parameter with one value in use.",
+    "Any use of blink's REST port (30004). Deliberately unreachable, and tests/test_broker.py asserts helena/broker.py imports no HTTP or socket module."
+  ],
+  "lessons": [
+    "task 10: The broker's consume-once reclaim is ASYNCHRONOUS. Measured on blink 0.2.0: produce 3, drain (get 3), drain again immediately -> can still get all 3; a few seconds later -> empty, watermarks back to (0,0). A topic produced to and never read still holds its records after 30 s, so it is consume-once and not a short retention window (RETENTION=5m is irrelevant to this). A test asserting 'the second drain returns nothing' is FLAKY — poll to a deadline instead, and keep a never-read control topic or the measurement says nothing about why the records went away.",
+    "task 10: blink 0.2.0 answers CreateTopics for an EXISTING topic with a response librdkafka cannot parse — `_BAD_MSG`, 'CreateTopics response protocol parse failure', plus a PROTOERR line 'Broker returned topic  that was not included in the original request'. It is NOT TOPIC_ALREADY_EXISTS, so create-and-catch cannot tell 'already there' from 'broker is broken'. Ask Metadata (`AdminClient.list_topics`) first and only create when absent.",
+    "task 10: Kafka message headers work against blink 0.2.0 and round-trip byte-identically. That is what makes 'one flow record per message, unchanged' compatible with 'every event records its raw-record reference' — the reference goes in the headers, the record stays untouched in the value.",
+    "task 10: RisingWave 3.0.3 JSONB round-trips all 62 real flow records equal to their parsed JSON, preserves an empty array (`obs->'tls'->'alpn' = '[]'::jsonb` finds tcp.24) and preserves an ABSENT key as absent (`NOT (obs ? 'dns')` finds 32 records). So 'absence is not emptiness' survives the store, and the flatten layer can tell the two apart. psycopg returns a JSONB column as a dict and takes `psycopg.types.json.Jsonb` on the way in.",
+    "task 10: A wire-level refusal and a record refusal are structurally different and must not be collapsed. A ParseFailure is quarantined, keyed by capture and offset. A message with no reference in its headers has no key, so there is literally no row to write — it raises and stops the run. The asymmetry falls out of the primary key, not out of a policy preference.",
+    "task 10: The boundary test that actually holds the Kafka invariant is 'exactly one module imports confluent_kafka', not 'nothing imports a forbidden name'. It covers the sink before the sink exists, and it is the assertion that makes 'replacing the broker is a configuration change' have one place it can be true or false.",
+    "task 10: A test that excludes docstrings when scanning string literals for hardcoded addresses is worth the extra ten lines. Without it, documenting the measured REST port (30004) in a module docstring — which concept/instruction.md §5 asks for — would fail the test that forbids hardcoding it, and the measurement would get pushed out of the repository.",
+    "task 10: `Quarantine.record` now takes a `RawRecordReference` rather than a capture and an offset. A consumer holds a reference and has no capture file, and passing a Capture it does not have would have meant either a second quarantine path or a fake capture."
+  ],
+  "failed_approaches": [
+    "task 10: Distinguishing 'the topic already exists' by catching KafkaException and comparing to KafkaError.TOPIC_ALREADY_EXISTS. It was written and it fails against blink 0.2.0 — see lessons. Do not retry it; ask Metadata first.",
+    "task 10: Asserting 'a second drain of a drained topic returns nothing' immediately after the first drain. It passes about half the time. The first version of tests/test_broker.py did exactly this and failed on its second run; the deadline-and-control version replaced it.",
+    "task 10: A mutation that appended a trailing space to the payload on the wire path did NOT fail any test, and that is correct rather than a hole: the store keeps the PARSED observation, and trailing whitespace is not part of a record. Worth knowing before someone adds a byte-level wire assertion that would only pin JSON serialization trivia.",
+    "task 10: Adding HELENA_OUTPUT_TOPIC 'while the config file is open' was considered and rejected before it was written — a key nothing reads has one value and no way to be wrong, and the egress invariant is enforced by the boundary test instead.",
+    "task 10: Giving `helena.broker` any knowledge of the ingest message shape was rejected. It carries bytes and header bytes; `IngestMessage` in helena.normalizer is the only thing that knows the headers mean a raw-record reference. That split is what makes the broker module swappable rather than merely wrapped, and it also avoids the import cycle a shared RawRecordReference would have created.",
+    "task 10: Making `ingest_messages` capture-scoped (taking a Capture, as the PRD's step-4 wording suggests) was rejected. A consumer has no capture file, and requiring one would have made live ingestion impossible by construction. The reconciliation against the capture happens after the run, in `ingest_counts`, which is the only place a file is needed."
+  ],
+  "next_session_should_know": "The ingress path is: BrokerProducer.publish(topic, message.payload, message.headers()) -> BrokerConsumer.consume(topic) -> IngestMessage.from_headers(value=..., headers=...) -> Normalizer.ingest_messages(messages, events, quarantine) -> ingest_counts(capture=..., consumed=..., events=..., quarantine=...). The whole of it is exercised end to end in tests/test_normalizer.py against the real broker and engine; copy `publish()` and `consumed_messages()` from that file into the replay driver rather than reinventing the framing. Eight things that will bite otherwise. (1) HELENA_INGEST_TOPIC is a NEW required variable — it is in helena.config.VARIABLES, .env.example and the local .env, and any test that builds an environment dict must include it or Settings.load fails naming it. (2) `settings.infrastructure.ingest_topic` is where it lands; there is no output topic and adding one is task 46's. (3) `helena.broker` is the ONLY module allowed to import confluent_kafka — tests/test_broker.py fails on a second importer, on an unapproved name bound from it, on an HTTP or socket import inside broker.py, and on ANY address-shaped string literal anywhere in src/helena (including a `:9092`-style port). Put an address in configuration, and put a measured fact about the broker in a docstring (docstrings are excluded from that scan on purpose). (4) `create_topic` asks Metadata first — do not rewrite it as create-and-catch, blink answers a duplicate create with an unparseable response. (5) `publish` is asynchronous; nothing has reached the broker until `flush()`, which RAISES on outstanding or refused messages. The `with BrokerProducer(...)` block flushes on clean exit. (6) The reclaim after a drain is asynchronous — do not write a test asserting a topic is empty immediately, and do not build a retry that re-reads a topic. Replay publishes the retained capture. (7) `Quarantine.record` changed signature: it takes `reference=RawRecordReference(...)` now, not `capture=`/`offset=`. (8) `IngestCounts` refuses a set that does not reconcile and `complete is False` means records were lost between the producer and the store — the capture is still on disk, replay it. Migration 0004 creates `helena_normalized_events` (TABLE, PK tenant/sensor/capture_sha256/record_offset, observation JSONB) and `helena_ingest_counts` (plain VIEW, read by EventStore.normalized and the reconciliation). The flatten layer of task 12 builds over the table, not the view. Docs: docs/decisions/0014-the-ingest-topic-message.md is the wire contract and the broker-is-not-a-store measurements; docs/runbook.md gained §7 (ingest and the four counters) and its §3 now carries the corrected CreateTopics and reclaim measurements; the old §7 troubleshooting table is now §8 and has four new rows."
+}

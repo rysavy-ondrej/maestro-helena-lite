@@ -1,0 +1,728 @@
+{
+  "project": "MAESTRO HELENA — Host-context Enrichment and LLM-Enhanced Network Analysis",
+  "tasks": [
+    {
+      "title": "[D0 Foundations] Bootstrap the single Python package and toolchain",
+      "description": "Create the repository skeleton for HELENA: Python 3.12, uv with a committed lockfile, one package with modules per component (normalizer, context, enrichment, agents, tools, orchestration, sink), and a single pytest suite. Dependencies are deliberately few — Pydantic, dotenv, a Kafka client, a PostgreSQL driver, pytest — and nothing else enters without a recorded reason.",
+      "steps": [
+        "Initialise the uv project targeting Python 3.12 and commit uv.lock",
+        "Create the single package `helena/` with empty modules per architecture component and a `tests/` tree mirroring it",
+        "Add pytest configuration, a `justfile`/Makefile with lint, test and typecheck targets",
+        "Pin the minimal dependency set (pydantic, python-dotenv, kafka client, psycopg) and record why each is present in `docs/decisions/`",
+        "Add a dependency boundary test that fails if an unapproved top-level import appears in the package",
+        "Write README.md pointing at the concept notes as the authoritative source"
+      ],
+      "done": true
+    },
+    {
+      "title": "[D0 Foundations] Fail-loud configuration and secret handling",
+      "description": "Implement configuration from the environment with the resolution order agent-specific → general → fail. A missing value is a startup error naming the variable; an empty or whitespace-only value counts as missing. No built-in default endpoints, no silent fallback to another agent's model, no silently defaulting tenant. Secrets use a wrapper type absent from string conversion and serialization.",
+      "steps": [
+        "Implement a `Settings` loader reading environment plus an uncommitted `.env`, with typed sections: model settings, per-agent overrides, provider credentials, ingestion identity (tenant, sensor), infrastructure addresses",
+        "Implement `Secret` wrapper whose `__str__`, `__repr__`, and Pydantic serialization emit a redacted placeholder",
+        "Implement resolution order agent-specific → general → fail, raising a startup error that names the missing variable",
+        "Treat empty and whitespace-only values as missing",
+        "Commit `.env.example` listing every variable name with an empty value, and add a test asserting the example and the loader's variable set are identical",
+        "Add tests for: missing tenant fails, missing per-agent model falls back to general, missing general fails, no default endpoint exists"
+      ],
+      "done": true
+    },
+    {
+      "title": "[D0 Foundations] Structured local logging with credential redaction",
+      "description": "Local structured logs only — no hosted tracer, because that would be a second egress channel for prompts and retrieved text. A credential that travels in a URL path must be redacted before anything is logged, stored or traced, including the fetch trace a loader records for provenance.",
+      "steps": [
+        "Implement a JSON structured logger with stable field names (component, tenant, sensor, event id, context id, version set)",
+        "Implement a URL redaction helper that strips credentials from path segments and query strings",
+        "Route every outbound-request log and every exception carrying a request URL through the redactor",
+        "Add a test that a known key value never appears in captured log output for a loader fetch and an exception path",
+        "Add a boundary test asserting no hosted tracing/telemetry SDK is importable from the package"
+      ],
+      "done": true
+    },
+    {
+      "title": "[D0 Foundations] Pin and run the broker and streaming engine",
+      "description": "Blink (broker) and RisingWave (streaming engine) are third-party binaries the project runs, not builds, pinned for reproducibility. Record the packaging hazard: the engine binary is dynamically linked against a specific Python minor version's shared library and symlinking another minor onto that name fails silently because the ABI differs.",
+      "steps": [
+        "Add a `scripts/dev-up` that fetches and runs the pinned Blink commit and pinned RisingWave release, with a `dev-down` counterpart",
+        "Record the exact pinned versions and their checksums in `docs/versions.md`",
+        "Verify RisingWave over the PostgreSQL wire protocol with a plain psycopg client and Blink over the Kafka wire protocol",
+        "Document the Python-minor ABI hazard prominently in the runbook, including the failure symptom",
+        "Add a smoke test that both endpoints answer before any other integration test runs"
+      ],
+      "done": true
+    },
+    {
+      "title": "[D0 Foundations] SQL migration runner over numbered files",
+      "description": "Engine view and model definitions are project source in their own right. Migrations are plain numbered .sql files applied in order and tested by execution against a throwaway instance — no SQL transformation framework, which would be a major dependency in the data path ahead of a measured need.",
+      "steps": [
+        "Create `sql/migrations/NNNN_name.sql` layout and a runner that applies files in order and records applied versions in the engine",
+        "Make the runner idempotent and fail loudly on a gap or a checksum change to an already-applied file",
+        "Add a pytest fixture that spins a throwaway engine instance, applies every migration, and tears it down",
+        "Add a test that the full migration set applies cleanly from empty",
+        "Document that every view a deployment needs must exist before data flows, because the broker is consume-once and a later view starts empty"
+      ],
+      "done": true
+    },
+    {
+      "title": "[D0 Foundations] Version registry for every recorded version dimension",
+      "description": "Every assessment records model, prompt, schema, rendering, taxonomy, enrichment snapshot and policy versions, because a hosted endpoint can change beneath a stable API name and an unrecorded change silently breaks replay. The aggregation version lives in both SQL and Python and the two copies must be asserted equal.",
+      "steps": [
+        "Define a `VersionSet` Pydantic model covering model, prompt, schema, rendering, taxonomy, enrichment snapshot, policy and aggregation versions",
+        "Define the aggregation version as a Python constant and as a SQL constant/column default",
+        "Add a test that reads the aggregation version out of the engine and asserts it equals the Python constant",
+        "Add helpers to stamp the version set onto any assessment row",
+        "Document the rule that a taxonomy or schema revision is a new version module, never an edit"
+      ],
+      "done": true
+    },
+    {
+      "title": "[D1 Ingest] Flow record input contract and capture fixtures",
+      "description": "The only input is one flat JSON object per observed flow with inline DNS/TLS/HTTP observations. It carries no tenant, sensor, schema version or raw-record reference. A capture is a retained file of flow records identified by the hash of the file, and the captures are the project's durable record.",
+      "steps": [
+        "Write the Pydantic model for the raw flow record exactly as the input supplies it, with no invented fields",
+        "Assert in the model's tests that tenant, sensor, schema version and raw-record reference are absent from the input contract",
+        "Add JSONL capture fixtures under `tests/fixtures/captures/`, each addressed by its file hash",
+        "Implement a capture registry that records file hash, record count and byte size",
+        "Record the open assumption that a hash identifies a capture only once the file closes, so live ingestion is provisional"
+      ],
+      "done": true
+    },
+    {
+      "title": "[D1 Ingest] Normalizer core with identity stamping from configuration",
+      "description": "The normalizer parses flow records into validated events and assigns tenant, sensor, schema version, event id and raw-record reference — none of which the input carries. Identity comes from deployment configuration and is never read from the record; a tenant that silently defaults is a tenant-isolation failure that looks like it is working.",
+      "steps": [
+        "Implement the normalized event model with an identity block (tenant, sensor, schema version, event id, raw-record reference) and an observation block",
+        "Stamp identity strictly from `Settings`, refusing to start when tenant or sensor is unset",
+        "Generate a deterministic event id from capture reference plus record offset so replay reproduces ids",
+        "Add a test that a record containing tenant-like fields cannot influence the stamped tenant",
+        "Add a test that replaying the same capture twice produces identical event ids"
+      ],
+      "done": true
+    },
+    {
+      "title": "[D1 Ingest] Per-format adapter interface",
+      "description": "A second input format later means writing an adapter, not changing the contracts — that is the boundary that must survive. Build one adapter for the current format behind an interface narrow enough that a second format proves the boundary holds.",
+      "steps": [
+        "Define the adapter protocol: raw bytes/line in, validated normalized event or typed parse failure out",
+        "Implement the adapter for the current flat-JSON flow format",
+        "Implement a deliberately trivial second adapter over a variant fixture format",
+        "Add a test that adding the second adapter required no change to the normalized event contract",
+        "Document the adapter registration point and that adding one is a configuration change"
+      ],
+      "done": true
+    },
+    {
+      "title": "[D1 Ingest] Quarantine invalid input without stalling the stream",
+      "description": "Invalid input is quarantined rather than dropped or allowed to stall ingestion. The concept records an open question about where quarantined records live, given they currently land outside the store the project says holds everything — resolve it by keeping them in the engine.",
+      "steps": [
+        "Create a quarantine table in the engine holding the raw payload, the parse failure, the capture reference, the offset and the ingestion identity",
+        "Route every typed parse or validation failure to quarantine and continue consuming",
+        "Expose a quarantine rate counter alongside the ingest counters",
+        "Add a test that a malformed record quarantines while surrounding valid records still normalize",
+        "Record the decision that quarantine lives in the single store, closing that open question"
+      ],
+      "done": true
+    },
+    {
+      "title": "[D1 Ingest] Kafka wire-protocol ingress and egress plumbing",
+      "description": "The broker is addressed only through the Kafka wire protocol, and the rule holds on both ends so replacing the broker is a configuration change. The broker is not a store: memory-first, single-node, consume-once and restart-volatile, so a topic is never re-readable.",
+      "steps": [
+        "Implement a thin producer and consumer wrapper taking broker address and topic names from configuration only",
+        "Add a boundary test asserting no broker-specific client or admin API beyond the Kafka protocol is imported",
+        "Wire the normalizer to consume the ingest topic and write normalized events into the engine",
+        "Add ingest counters (records consumed, normalized, quarantined) reconcilable against the capture record count",
+        "Document in the runbook that broker retention is not a durability mechanism and replay never reads it"
+      ],
+      "done": true
+    },
+    {
+      "title": "[D1 Ingest] Capture replay driver through the live ingestion path",
+      "description": "The durable record for replay is the retained source capture, replayed through the same ingestion path as live traffic so that replay exercises the real pipeline rather than a parallel one. This also becomes the tool that repopulates views added to a running deployment.",
+      "steps": [
+        "Implement `helena replay-capture <hash>` that publishes a capture's records to the ingest topic at a configurable rate",
+        "Reuse the exact normalizer and adapter path used by live ingestion — no parallel code path",
+        "Add a mode that reports produced-versus-materialized record counts at the end of the run",
+        "Add an integration test that a capture replayed twice produces identical normalized rows",
+        "Document replay as the procedure for backfilling a newly added view"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D2 Context] Flatten-layer views over normalized events",
+      "description": "The Context Builder is three view layers — flatten, signal, analytical — and an analytical view references the signal layer, never the flatten layer and never the source directly. Build the flatten layer: typed, flat rows over normalized events with the inline DNS, TLS and HTTP observations unpacked.",
+      "steps": [
+        "Write migrations creating flatten-layer views/tables for flows, DNS observations, TLS observations and HTTP observations",
+        "Carry identity (tenant, sensor, event id, capture reference) into every flatten row",
+        "Declare for each object whether it is a view or a materialized view, and what reads it",
+        "Apply the rule: do not materialize an intermediate that only feeds an aggregate",
+        "Add execution tests asserting each flatten object returns the expected shape over the fixture capture"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D2 Context] Windowed host-context aggregation with bidirectional statistics",
+      "description": "One host context per host per 5-minute tumbling window, a flow assigned by its start time so a long flow is credited entirely to the window it began in. The host key is the source address, so a host seen only as a destination gets no context. Connection statistics stay bidirectional because direction is signal. The host context carries no verdict.",
+      "steps": [
+        "Write the signal-layer aggregation producing one row per (tenant, sensor, host, window start) with duration, packets and octets kept bidirectional",
+        "Assign each flow to the window containing its start time",
+        "Stamp the aggregation version on every context row from the SQL constant",
+        "Add the context identity and version columns, with revision producing a new version rather than an in-place edit",
+        "Add tests over the fixture capture asserting window assignment, host keying and bidirectional counters",
+        "Record in code comments the accepted cost of the window choice and that measuring window coherence is blocked on the corpus"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D2 Context] Entity extraction with observation-scoped traffic",
+      "description": "Entities are the join target: `address`, `domain`, `fingerprint` and `url`. Per-entity counts are named for what they are — the traffic of the flows in which the entity was observed — and a flag distinguishes an address seen as a flow destination from one seen only as a DNS answer, and records which layers observed a name. Arrays inside a window cannot be joined to evidence, so the rows are per entity.",
+      "steps": [
+        "Extract address entities from flow destinations and from A/AAAA DNS answers, flagged by which",
+        "Extract domain entities from DNS query names, DNS response names, TLS SNI and the host part of HTTP URIs, recording the observing layers per name",
+        "Extract fingerprint entities from client-side JA3 and JA4, and url entities from HTTP and HTTP/2 URIs",
+        "Attach observation-scoped traffic columns (flows, packets, octets, bidirectional) to each entity row",
+        "Add tests asserting one row per entity per context, and that layer flags survive to the row",
+        "Record the coverage gaps in the migration comments: JA4 has no public blocklist, and URL feeds have narrow reach because TLS yields SNI not a URL"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D2 Context] Registrable-domain normalization via the Public Suffix List",
+      "description": "The Public Suffix List is loaded for registrable-domain normalization, which is needed for scope correctness rather than for enrichment. Without it, scope comparisons between a feed's domain and an observed name are unreliable.",
+      "steps": [
+        "Add a loader that fetches the Public Suffix List on its own schedule into a snapshot-versioned reference table",
+        "Implement registrable-domain derivation as an engine-side function or view used by entity extraction",
+        "Normalize domain entity values consistently and record both the observed name and its registrable domain",
+        "Add tests over multi-label and unusual-suffix cases",
+        "Document that this table is normalization, not enrichment, and produces no taxonomy claim"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D2 Context] Completeness, context versioning and the retention boundary",
+      "description": "Completeness is `open` or `provisional` and neither value is final: a context never reaches a state where it cannot change while its raw records are retained. Engine-side retention is a temporal filter, not a delete; the retention horizon is also the late-record tolerance — one parameter, not two — and the boundary must report what it drops.",
+      "steps": [
+        "Add the completeness column with values `open` and `provisional` and no `final` value in the domain",
+        "Implement retention as a declarative temporal predicate on the context views, driven by one configured horizon",
+        "Add a rejection counter for records arriving outside the boundary, exposed as a metric",
+        "Implement freeze-on-citation: a context cited by a finding is copied out rather than evicted, so the citation is stable rather than merely current",
+        "Add a test that a revised context produces a new version rather than editing in place",
+        "Record as untested and not to be inferred whether a late record inside the boundary still revises under a temporal filter"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D2 Context] View-layering boundary tests and materialization policy",
+      "description": "The view-layering rule is enforced by convention plus boundary tests over the SQL. `CREATE MATERIALIZED VIEW` is the habit-forming default and each layer boundary is a chance to pay 42% disk for nothing: materialize where something is queried or joined from, use a plain view where a layer only feeds the one above it.",
+      "steps": [
+        "Write a test that parses the migration SQL and asserts no analytical view references the flatten layer or a source directly",
+        "Require every view definition to carry a declaration comment: layer, view-or-materialized, and what reads it",
+        "Add a test that fails when a declaration comment is missing or when a materialized view has no declared reader",
+        "Document the measured cost — a materialized intermediate feeding only an aggregate cost 42% more disk for rows nothing reads",
+        "Add a disk-usage check to the dev script so the cost is observable rather than argued"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D3 Enrichment] Taxonomy version module with validated paths",
+      "description": "Two levels of classification sharing syntax, governance and versioning but classifying different subjects. Evidence-level roots are `no_match`, `normal`, `suspicious`, `malicious`, `unknown`; context-level roots are triage `normal`/`suspicious` and analyst `normal`/`suspicious`/`unknown`/`malicious`. Roots are closed, the root must equal the first path segment and this is validated rather than assumed. A revision is a new version module, never an edit.",
+      "steps": [
+        "Create `helena/taxonomy/v1.py` defining both level vocabularies as frozen structures with a version identifier",
+        "Implement path validation: dot-delimited, most-specific supported path, root equals first segment, root in the closed set for that level",
+        "Mark paths the prototype cannot yet justify (anomaly and baseline paths needing history) as declared-but-unused rather than deleting them",
+        "Forbid `unknown.*` sub-paths, since a child would claim specificity the run does not have",
+        "Add tests for each rule including an invalid root, a mismatched first segment and an unused-path lookup",
+        "Document that emitting a new version means adding a module, and replay validates against the recorded version"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D3 Enrichment] Source tier registry and per-source declared emit subsets",
+      "description": "Source tier A–D describes the source, not the entry, and is what makes 'deterministic signals escalate independently' a testable rule rather than a judgement call. Every source declares the taxonomy subset it can emit, publishes it, versions it and tests it — complete coverage is not required.",
+      "steps": [
+        "Define the tier enum A–D with the documented evidence meaning and use for each",
+        "Define a `SourceDescriptor` carrying source id, tier, entity types, declared emit subset and subset version",
+        "Register ThreatFox as tier B and the JA3 blocklist as tier C, with the JA3 caveat recorded on the descriptor",
+        "Add a test that every claim a source emits is inside its declared subset",
+        "Implement aggregator marking so evidence copied through an aggregator is never counted as many independent votes",
+        "Implement source-diversity counting that retains the origin of each claim"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D3 Enrichment] Enrichment evidence schema with status distinct from no_match",
+      "description": "One claim per (entity, source), normalizing a successful query into six fields: verdict, classification, confidence, scope `{type, value}` exactly normalized, nullable time fields, and the minimal native evidence justifying the mapping. Enrichment status is `ok`/`stale`/`failed`/`missing`, each distinct from `no_match`. A failed query emits a typed error and no taxonomy object.",
+      "steps": [
+        "Write the enrichment evidence Pydantic model and the matching engine table with a stable evidence identifier column",
+        "Model `confidence` as confidence in the mapping, not the probability the indicator is malicious, and document it on the field",
+        "Add nullable first-seen / last-seen / valid-until fields with an explicit rule against inventing missing precision",
+        "Model the typed error object as compact and forbidden from carrying secrets, auth headers or full provider responses",
+        "Add tests asserting a timeout produces a typed error rather than `no_match` or `unknown`",
+        "Add a test asserting `no_match` with confidence 1.0 is representable, since a definitive negative answer is a valid outcome"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D3 Enrichment] ThreatFox feed loader",
+      "description": "The first version loads exactly one feed: ThreatFox. Read from real downloads rather than a documentation page, it has five properties that change what the loader must do — `ip:port` indicators, a common compromised flag, spread numeric confidence, a threat-type vocabulary larger than any sample, and frequently absent references and last-seen dates with tags as a delimited string. Take the structured format, not the RPZ or hosts-file variants, which drop exactly the distinctions the composition rule needs.",
+      "steps": [
+        "Fetch the structured export on the feed's own schedule, respecting published fetch limits, with the key redacted from every log and trace because it travels in the URL path",
+        "Flatten the top-level object keyed by indicator id whose values are lists, rather than reading the first element",
+        "Split `ip:port` into address and port columns and keep the port — a C2 on one port matched against a host that contacted another is a weaker claim",
+        "Carry the compromised flag as native evidence and the operational role as the classification, since the taxonomy root cannot come from threat type alone",
+        "Let the entry's numeric confidence reach the claim rather than flattening it away",
+        "Map threat types deterministically, emitting the parent for any unseen value rather than guessing a child, and unit-test the mapping table",
+        "Normalize each indicator to its entity's shape and date claims by first-seen plus snapshot version, since recency cannot be read from last-seen alone"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D3 Enrichment] Snapshot versioning and never-empty-a-table failure semantics",
+      "description": "Snapshot versioning becomes the whole provenance story for the static tier: a table update is a system change that must be visible in the record, and a feed that failed to refresh is stale or missing, never `no_match`. A fetch failure, a format change or an empty response leaves the previous snapshot in place and records the failure. The primary feed regenerates every few minutes and is a rolling window, not a cumulative archive.",
+      "steps": [
+        "Add a snapshot table recording snapshot id, source, fetch time, row counts, outcome and failure detail",
+        "Write loads transactionally so a failed or empty fetch cannot replace a good snapshot",
+        "Retain enough snapshot history for replay to join the snapshot current at event time",
+        "Derive `stale` from snapshot age against the feed's configured schedule, and `missing` from the absence of any snapshot",
+        "Add tests for fetch failure, format change and empty response, each asserting the previous snapshot survives and the failure is recorded",
+        "Document that an indicator's disappearance between snapshots means aged out or retracted, and a differ reads them as one event"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D3 Enrichment] Feed mapping views producing evidence-level claims",
+      "description": "Enrichment views are SQL mapping and join views turning reference tables into enrichment evidence — no runtime service, no coordinator, no workers, no dispatch and no cache, because a join has nothing to deduplicate. Each mapping view emits stable evidence identifiers so every enriched value is citable.",
+      "steps": [
+        "Write the mapping view from the ThreatFox reference table to the enrichment evidence shape",
+        "Generate stable evidence identifiers deterministic in (source, snapshot, entity, native record) so a citation survives replay",
+        "Preserve contradictions rather than collapsing disagreement to a single verdict",
+        "Tag every row with evidence tier `enrichment`",
+        "Add execution tests asserting the mapped rows are valid taxonomy paths inside the source's declared subset"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D3 Enrichment] Enriched host context join view",
+      "description": "The enriched context is a join, not a dispatch, and it is per entity because arrays inside a window cannot be joined to evidence and the composition rule needs the indicator correlated with the matching traffic. Replay joins the snapshot current at event time, not today's.",
+      "steps": [
+        "Write the analytical-layer view joining host context, entity rows and enrichment evidence per entity",
+        "Select the snapshot current at the context's event time rather than the latest snapshot",
+        "Qualify address matches by port, recording whether the port matched as part of the claim's scope",
+        "Ensure `no_match`, `stale`, `failed` and `missing` are distinguishable on the joined row",
+        "Add a test that an entity with no hit on anything yields `no_match` and not an absent row, since an enriched context is mostly negative space",
+        "Add a test that changing the current snapshot does not change the enriched context of an older window"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D3 Enrichment] Enrichment status propagation acceptance tests",
+      "description": "How the enriched context represents enrichment that is missing, stale, in flight or failed — so triage cannot read absence of evidence as evidence of absence — is this stage's central acceptance property. Test it end to end rather than asserting it.",
+      "steps": [
+        "Build fixtures for each state: fresh hit, fresh no_match, stale snapshot, failed load, missing feed, in-flight load",
+        "Assert each state is distinguishable in the enriched context view",
+        "Assert no path exists by which a stale or failed feed can produce `no_match`",
+        "Assert an in-flight load does not present as either a hit or a clean lookup",
+        "Wire these as a named acceptance suite that must pass before the triage stage is considered buildable"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D4 Contract] Versioned agent request/result contract with typed failure envelope",
+      "description": "One versioned typed request/result pair covers every agent; agents never exchange free-form natural-language messages and nothing crosses an agent boundary except validated typed fields. Three fields were deliberately not adopted: a per-invocation free-text task, loose observations/relevant-context, and recommended actions. Historical schema versions are retained as frozen classes.",
+      "steps": [
+        "Define the request model: tenant, host and window in event time, context reference and version, trigger (scheduled triage / triage_suspicious / deterministic_signal), rendering with explicit truncation, budgets, and the full version set",
+        "Define the result model: root, classification path, confidence as a number to measure, citations by stable evidence id marked supporting or contradicting, evidence package, retrieval trace, gaps, proposed claims, cost, echoed versions",
+        "Define the typed failure envelope carrying the failure and no verdict",
+        "Enforce the citation rule: required except on a `normal` triage decision and on `unknown`, where the gaps list is mandatory instead",
+        "Add a contract test asserting no free-text task, observations, relevant-context or recommended-actions field exists",
+        "Set up `helena/contracts/v1.py` as a frozen module and document the add-a-version-never-edit rule"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D4 Rendering] Closed, versioned host attribute set from fixed configuration",
+      "description": "Triage's host knowledge is a closed, versioned field set sourced from fixed configuration only. That is what keeps triage input independent of any prior agent output, which is what keeps assessments comparable across hosts and across time. When a value is unknown it is rendered as unknown — never omitted, never guessed.",
+      "steps": [
+        "Define the closed host attribute set (address, device type, and only the fields configuration supplies) with a version identifier",
+        "Load host attributes from a configuration file, never from the store and never from any agent output",
+        "Render an absent attribute as an explicit unknown value rather than omitting the key",
+        "Add a test that no code path can populate a host attribute from an assessment, a proposal or an enrichment row",
+        "Version the attribute set and record its version on the rendering"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D4 Rendering] Triage rendering builder — the five-part bounded projection",
+      "description": "A bounded, versioned projection of the enriched host context in five parts: the host, domains contacted with observing layers and enrichment, addresses contacted with security information and classification, selected TLS parameters, and bidirectional connection statistics. Every enriched value carries a stable evidence identifier, and missing/stale/in-flight/failed enrichment is visible and distinct from 'enriched, found nothing'.",
+      "steps": [
+        "Implement the renderer producing the five sections from the enriched context view",
+        "Carry a stable evidence identifier and freshness on every enriched value without bloating the rendering past the budget it exists to respect",
+        "Render enrichment status explicitly so a domain nobody could look up does not read as a clean domain",
+        "Select the TLS parameter subset and record the selection criterion in a decision note rather than in a comment",
+        "Show which layers observed each name — a name in TLS SNI was connected to, where a name seen only in a DNS query may never have been",
+        "Filter to evidence tier `enrichment` only, so analyst-fetched data can never enter a triage rendering",
+        "Version the rendering and record its version on every request"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D4 Rendering] Bounded rendering with visible truncation",
+      "description": "The rendering is bounded, and truncation that is invisible is a correctness bug rather than a formatting choice. The first instance of the problem is the contributing-events list, which is unbounded and which nothing currently truncates. How many entity rows a busy host produces is unmeasured — the fixture is one host for two minutes.",
+      "steps": [
+        "Implement a size budget for the rendering with a deterministic, documented selection order for what is kept",
+        "Bound the contributing-events list explicitly and record what was dropped",
+        "Emit a structured truncation record naming each truncated section, the kept count and the total count",
+        "Carry the truncation record into the request so the agent and the stored assessment both see it",
+        "Add a test that a rendering exceeding the budget always carries a truncation record, and that no section can silently shrink",
+        "Add an instrumentation task output: measure entity rows per host over the fixture and record the number rather than assuming it"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D4 Agents] Model client, structured output and bounded schema retry",
+      "description": "LangChain over the OpenAI-compatible endpoint earns its place because tool binding and structured-output validation are needed on day one. Agents differ by model, not by framework, and model choice stays a configuration value, never a code path. Schema-invalid output is retried a small bounded number of times with the validation error fed back and then becomes a typed failure; a second-pass repair call is rejected because it can alter semantics rather than syntax.",
+      "steps": [
+        "Add the model client dependency and wire it to the OpenAI-compatible endpoint from configuration",
+        "Implement per-agent model selection purely from configuration with no branch on agent identity",
+        "Implement structured output validation against the versioned Pydantic result schema",
+        "Implement bounded retry feeding the validation error back, counting retries against the token budget",
+        "Convert exhausted retries into a typed failure, and expose the per-model retry count as a quality metric",
+        "Add a test asserting no repair-call path exists",
+        "Record the endpoint host and the model identity and version on every assessment — enough to know what produced a result, nothing that authenticates as anyone"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D4 Triage] Triage Agent runner — one rendering in, two labels out",
+      "description": "The Triage Agent takes a bounded rendering and nothing else, has no tools, performs no lookups and no waiting, and emits `normal` or `suspicious` and nothing else. A context triage could not assess is a typed failure, not a third label. A `normal` triage decision returns verdict and confidence only.",
+      "steps": [
+        "Implement the triage runner binding no tools at all and asserting that at the call site",
+        "Constrain the result schema to the triage root set and reject any other root as a schema violation",
+        "Return verdict and confidence only on `normal`, and require citations on `suspicious`",
+        "Write the triage prompt as a versioned file, with the untrusted rendering clearly framed as data",
+        "Add a test that a model returning `malicious` or `unknown` produces a schema violation and then a typed failure, never a third label",
+        "Add a test that a triage failure does not escalate, since failing closed is safe only because deterministic escalation is independent"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D4 Policy] Composition rule engine — scope before severity",
+      "description": "An evidence-level classification about a contacted indicator does not become the context verdict. The composition rule lives as explicit, testable policy rather than in the model's judgement: the model classifies, the policy constrains what evidence can support what verdict. This is where over-alerting will come from if it is wrong.",
+      "steps": [
+        "Implement the rule as deterministic policy code taking (context verdict, cited evidence, per-entity traffic) and returning permitted or constrained",
+        "Encode the address cases: a C2 hit with actual bidirectional traffic supports `malicious.c2`; the same hit with one failed connection and no bytes returned supports at most `suspicious`",
+        "Encode that a phishing domain contacted means the user was targeted, not that the host is compromised",
+        "Encode that a malicious indicator on shared infrastructure — CDN, cloud tenant, resolver, shared subdomain — transfers nothing without corroboration",
+        "Encode that `normal` on contacted indicators never establishes `normal` for the context on its own",
+        "Record the honest limitation as a first-class policy outcome: the scope test works on address entities and not on domain ones, so domain-only support is downgraded and the reason is recorded as a gap",
+        "Write a table-driven test suite, one case per rule, and document where the rule is enforced relative to the prompt"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D4 Policy] Deterministic escalation evaluator independent of triage",
+      "description": "The enrichment evidence escalates on its own — a Tier A, or a high-confidence Tier B, malicious classification whose traffic characteristics support it — regardless of the triage verdict. An LLM returning `normal` may not bury a high-confidence match, which is why this is evaluated by code rather than inside the prompt. Thresholds are policy, not constants in a branch.",
+      "steps": [
+        "Implement the evaluator over enrichment evidence plus per-entity traffic, returning an escalation decision with the evidence ids that caused it",
+        "Load per-source confidence thresholds from a versioned policy file rather than from code constants",
+        "Apply the composition rule so a hit whose traffic does not support it does not escalate as `malicious`",
+        "Do not count an aggregator as multiple independent sources when raising confidence",
+        "Add a test that a triage verdict of `normal` cannot suppress a Tier A match",
+        "Add a test that escalation is computed even when triage produced a typed failure",
+        "Record the policy version on every assessment"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D5 Tools] MCP provider tool framework with credential ownership",
+      "description": "Every API connector is exposed as an MCP tool whose layer — deterministic project code, not the model — owns credentials, tenant scoping, what may be sent, disclosure recording and response validation. The agent sees a tool, never an HTTP client and never a key. Every string in a response is data, never instruction.",
+      "steps": [
+        "Define the provider tool base: typed input, typed output, typed error, declared emit subset, tier and entity types",
+        "Hold provider credentials in the tool layer's configuration, injected at construction, never reachable from agent-visible state",
+        "Scope every call by tenant from the request, refusing an unscoped call",
+        "Validate every response against the source's declared subset, emitting a typed error on failure and no taxonomy object",
+        "Retain the native payload for audit while returning the compact normalized object to the agent",
+        "Add a test asserting no agent-visible object exposes a credential, a URL or an HTTP client",
+        "Decide and document whether MCP servers are self-hosted wrappers per provider, and what their failure behaviour looks like as the agent sees it"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D5 Tools] Cache-first lookup where the cache is the evidence store",
+      "description": "Every provider tool is cache-first: it looks for a valid, unexpired record for its source, endpoint and indicator and returns it without touching the network, querying only on a miss or an expiry. The cache is the evidence store, not a second store beside it — a separate opaque cache was rejected because an assessment could then cite something the cache had already evicted. Retention is configured per source and per endpoint.",
+      "steps": [
+        "Store cache entries as enrichment-evidence records tagged tier `analyst`, with provenance, retrieval time and expiry",
+        "Configure retention per source and per endpoint, since a registration date never changes while risk scores move",
+        "Implement cache-key normalization deliberately, because inconsistent keys quietly halve the hit rate, and test the normalization",
+        "Decide and document whether negative results are cached — most lookups miss, and this decides whether caching helps at all",
+        "Decide and document whether an expired entry is offered as explicitly stale when the provider is unreachable",
+        "Store the response before it is evaluated, cited by stable identifier, so a lookup-dependent assessment can be replayed",
+        "Record that a cache hit discloses nothing, making caching a privacy control as much as a cost control"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D5 Tools] Budget guards enforced at the tool boundary",
+      "description": "Four dimensions enforced per agent run by orchestration code, each mapping to a distinct real limit: step/tool-call count (the unbounded tool loop), token budget (model rate limits), wall-clock timeout (stream latency) and live external query count (provider quotas). Budgets are enforced at the tool boundary so an agent cannot reason its way around them, and the wall-clock and live-query budgets must be set against each other — at a few lookups per minute, an analyst run checking six indicators spends over a minute on the rate limit alone.",
+      "steps": [
+        "Implement a per-run budget object carrying all four dimensions and the amount consumed",
+        "Enforce steps and live queries inside the tool dispatch, not in the prompt",
+        "Enforce the wall-clock timeout across the whole run including provider waits",
+        "Load budget values from the versioned policy file, and derive an initial live-query budget from the configured provider rate limit and the wall-clock budget together",
+        "Emit a `budget_exhausted` gap and degrade the verdict rather than aborting silently",
+        "Add a test that a budget-truncated run can return `unknown` but can never return `normal`",
+        "Record budgets consumed, latency, tokens and derived monetary cost on the assessment rather than capping cost separately"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D5 Tools] Disclosure recording and send policy",
+      "description": "Querying an external source discloses the indicator to that source. Two obligations follow: what may be sent to which source is governed policy, and what was disclosed is recorded on the assessment — source, query, cache hit or live, disclosed-to, and when. Model inference discloses too, because inference is hosted.",
+      "steps": [
+        "Define a send policy per source declaring which entity types and which fields may be sent",
+        "Enforce the policy in the tool layer before any request leaves, refusing rather than trimming",
+        "Write a disclosure row per outbound call with source, query, cache-hit-or-live, disclosed-to and timestamp",
+        "Record model-call disclosure on the same footing, since prompts and rendered context leave the monitored network",
+        "Add a test that a cache hit records no new disclosure",
+        "Add a test that a policy-forbidden field cannot reach a request body"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D5 Tools] First live provider tool — verify the query surface before building",
+      "description": "The primary live provider is the same publisher's hunting API: POST, JSON or CSV per request, authenticated with a header rather than a credential in the path. No per-indicator lookup endpoint appears in the public documentation, and asking about an indicator is the analyst tier's core operation. Check the artifact, not the page — every wrong source record in this project was written from a documentation page or a guessed convention and propagated before anyone fetched the thing it described.",
+      "steps": [
+        "Confirm the query surface against the authenticated documentation and record the confirmed endpoints, request shapes and credential name in a source record before writing the tool",
+        "Settle the credential variable name by asking rather than guessing, since two guessed names each propagated across six documents",
+        "Implement the tool over the confirmed surface with header authentication and the shared key held by the tool layer",
+        "Map responses deterministically into the declared emit subset, preserving contradictions",
+        "Handle down, rate-limited and slow mid-analysis as typed errors the agent can see, never as `no_match`",
+        "Design how the publisher's false-positive list enters — as evidence about evidence, where a claim is never deleted, suppression is explicit policy and a suppressed match is still recorded as having matched",
+        "Record the retrieval confound in the source record: for indicators already in the tables the analyst mostly re-confirms what triage saw"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D5 Analyst] Analyst Agent runner with budgeted tool loop and citations",
+      "description": "The Analyst Agent is a larger tool-calling model answering 'what is it?' over the rendering plus live retrieval, emitting `normal`, `suspicious`, `unknown` or `malicious` with a classification path, citations, an evidence package, a retrieval trace and gaps. It writes nothing — it proposes. It does not inherit the triage rationale by default, because the analyst's `normal` verdict is the direct measurement of triage precision and that measurement is worthless if the analyst was anchored on triage's framing.",
+      "steps": [
+        "Implement the plain tool loop bound to the approved MCP tools and the budget object, with no agent-selects-agent behaviour",
+        "Require an evidence package on every non-`normal` verdict: indicators, patterns, missing information, narrative",
+        "Require citations marked supporting or contradicting, exempting only `unknown`, where the gaps list is mandatory",
+        "Enforce the distinction between `unknown` (unassessable — enrichment entirely failed, rendering truncated past usefulness, budget exhausted before evidence) and `suspicious` (analysis ran and could not settle it)",
+        "Make triage-rationale inheritance a configuration switch defaulting to off, so the other arm stays measurable without a contract change",
+        "Apply the composition rule policy to the returned verdict and downgrade with a recorded reason when the evidence does not support it",
+        "Add a test that the analyst can see both `enrichment` and `analyst` tier evidence while triage sees only `enrichment`"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D5 Security] Untrusted-text isolation, implemented and tested",
+      "description": "External text and model-visible fields are data, never instructions, and isolation is implemented and tested rather than asserted. The concrete surfaces are advisory and report text, provider descriptions, engine names, category labels, feed tags and comment fields, and registration records — which in a malicious case are written by the adversary.",
+      "steps": [
+        "Define a single wrapping function that frames every externally sourced string as delimited untrusted data in any prompt",
+        "Route all feed tags, provider descriptions, category labels and retrieved text through that wrapper with no bypass",
+        "Add a lint/boundary test that no externally sourced field is interpolated into a prompt outside the wrapper",
+        "Build an injection corpus of adversarial strings placed in feed tags, provider descriptions and registration-style fields",
+        "Assert for each case that the verdict, the tool calls made and the citations are unchanged relative to a benign control",
+        "Record the test suite as the evidence for the isolation claim, since asserting it is explicitly not enough"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D5 Tools] Replay mode — read stored responses, never re-query",
+      "description": "A replay that calls the provider again is not a replay; it is a new investigation with a different answer. Under a few-hundred-per-day quota this stops being an efficiency property and becomes the enabling one: the first pass spends the quota and every re-run is free.",
+      "steps": [
+        "Add a replay mode to the tool layer that resolves every lookup from stored responses by stable identifier",
+        "Make a missing stored response a typed failure in replay rather than a live call",
+        "Add a hard guard that raises if any network call is attempted while replay mode is active",
+        "Record per result in the retrieval trace whether it was a cache hit or a live query, and the retrieval time of the underlying record",
+        "Add a test that two runs differing only in cache state are distinguishable afterwards",
+        "Add a test that a full replay makes zero outbound requests"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D6 Orchestration] Deterministic routing and the escalation branch",
+      "description": "Orchestration is deterministic project code: it renders agent input, routes on the triage result and on independently escalating evidence, enforces budgets, validates output and persists assessments. No agent selects, invokes, sequences or terminates another, and no model output determines control flow. Routing is an `if`.",
+      "steps": [
+        "Implement the router exactly as specified: deterministic escalation first with trigger `deterministic_signal`, then triage `suspicious` with trigger `triage_suspicious`, else finish",
+        "Compute deterministic escalation before and independently of the triage call",
+        "Pass the trigger through the request contract so the stored assessment records why analysis ran",
+        "Assert no graph framework, workflow engine or checkpoint store is imported",
+        "Add a test that model output cannot change which agent runs next",
+        "Document what would reverse the orchestration choice — a measured need for resumability, human-in-the-loop interrupts, or a third agent whose routing is not a branch"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D6 Orchestration] Assessment persistence as typed rows with citation joins",
+      "description": "Agent output is stored as typed, queryable rows, never as an opaque document. The fields anyone would filter, join, group or aggregate on are typed columns; narrative stays a text column. Evidence citations are join rows `(assessment, evidence, role)` — not an array buried in JSON, because citations are the thing most queries follow and an array is where a query goes to die. Agents propose; code writes.",
+      "steps": [
+        "Create the assessment table with typed columns: host, tenant, context reference and version, window bounds, verdict and classification, confidence, timestamps, the full version set, budgets consumed, latency, tokens, derived cost, cache-hit versus live-query counts, endpoint host and model identity",
+        "Create the citation join table `(assessment, evidence, role)` with role in supporting/contradicting",
+        "Create the gaps table with the typed gap kinds: missing, stale, in-flight, failed, found-nothing, truncated, budget-exhausted",
+        "Create the retrieval trace and disclosure tables keyed to the assessment",
+        "Persist typed failures as assessment rows carrying the failure and no verdict — never a verdict, never a silent drop",
+        "Write every row from deterministic code, validating agent proposals against the schema first",
+        "Add a test that no free-text agent note is persisted as a record anywhere"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D6 Orchestration] Ephemeral in-process state and re-run recovery",
+      "description": "Framework and in-process state — scratchpads, tool-loop transcripts, planning state, any framework's virtual files — is working memory for one assessment. An assessment is one function call over one versioned context snapshot; an interrupted run is simply re-run, because the versioned context already makes that correct rather than a fallback.",
+      "steps": [
+        "Confine all working memory to the run's function scope with no durable backend configured",
+        "Disable or assert-absent any framework file-backed memory or virtual filesystem feature",
+        "Implement re-run of an interrupted assessment keyed by (context reference, context version, trigger)",
+        "Add a test asserting no durable in-flight state exists outside the engine after a killed run",
+        "Add a test that re-running an interrupted assessment over the same versioned snapshot is well-defined",
+        "Document that framework conveniences must be checked against the single-store, agents-propose and ephemeral-state rules rather than enabled because they are one flag away"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D6 Replay] Assessment replay from stored versioned inputs",
+      "description": "Replay validates a stored assessment against the version that assessment recorded, never against current code — migrating old rows forward is rejected, because a migration that reshapes a field changes what the assessment says the agent saw. Replay joins the feed snapshot that was current then, not today's, and reads stored provider responses rather than re-querying.",
+      "steps": [
+        "Implement `helena replay-assessment <id>` reconstructing the request from the stored context version, rendering version and version set",
+        "Deserialize the stored result against the frozen schema module the assessment recorded",
+        "Select the enrichment snapshot current at event time and the stored provider responses",
+        "Produce a structured diff between the original and the replayed result across verdict, path, confidence and citations",
+        "Add a test that a schema version no longer current still replays",
+        "Add a test that replay performs zero live provider queries",
+        "Record replayability as a goal rather than a claim while the silent-record-loss hazard at a catch-up boundary stands"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D7 Emit] Sink view and the field-level output message shape",
+      "description": "The sink is a view joining the enriched context, the terminal verdict and the cited evidence. It is egress, not a store: nothing may be recoverable only from it. The payload becomes an interface the moment anything consumes it, and it duplicates state by construction — the same assessment exists as rows and as a message — so the two can disagree if the view is edited carelessly.",
+      "steps": [
+        "Define the emitted message shape field by field: context identity and version, host and window, entity rows with traffic characteristics and enrichment evidence, verdict and path, citations, retrieval and disclosure trace, and the full version set",
+        "Keep `no_match`, `stale`, `failed` and `missing` distinguishable in the emitted evidence",
+        "Write the sink view joining enriched context, terminal verdict and citation join rows",
+        "Add a test asserting every field in the message is recoverable from the engine rows, so nothing exists only in the topic",
+        "Version the message shape and treat a change as an interface change with a recorded decision",
+        "Document the redaction inheritance: the payload contains internal addresses, hostnames and retrieved external text, and any consumer forwarding it off-site inherits the redaction, minimization and disclosure obligations"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D7 Emit] At-least-once emission of every terminal outcome, counted engine-side",
+      "description": "Every assessed context is emitted, exactly once per terminal outcome — including `normal` verdicts and typed failures. A context that was escalated is emitted once, carrying the analyst's verdict and the triage decision that led to it. Delivery is at-least-once so consumers deduplicate; exactly-once is not attempted. Emission must be observable from the engine side, because the broker discards its queue on restart and a message emitted with no consumer attached is simply gone.",
+      "steps": [
+        "Create the sink from the sink view to the output topic over the Kafka wire protocol, addressed by configuration only",
+        "Emit exactly one message per terminal outcome, including `normal` and typed failures",
+        "For an escalated context, emit once carrying the analyst verdict and the triage decision that led to it",
+        "Add an engine-side counter of rows the sink view produced, so 'nothing arrived' can be told apart from 'nothing was assessed'",
+        "Document the deduplication contract for consumers",
+        "Record the output-volume hazard: emitting `normal` means the topic carries the full context volume, intended at prototype scale and needing revisiting at real rates"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D7 Observability] Metrics and reconciliation over the whole pipeline",
+      "description": "What must be observable: latency, cost, staleness, error, escalation and model-quality metrics; end-to-end provenance; record counts reconciled between produced and materialized; the retention boundary's rejection rate; and emission counted from the engine side. The audit record is the stored assessment, not a trace UI — it already carries the retrieval trace, disclosure, cost, latency and versions as typed columns.",
+      "steps": [
+        "Write analytical views over the assessment tables for latency, derived cost, escalation rate, typed-failure rate, schema-retry rate per model, and cache-hit versus live-query ratio",
+        "Write a staleness view over feed snapshots exposing per-source snapshot age against its schedule",
+        "Write a reconciliation view comparing capture record count, normalized rows, quarantined rows, context rows and emitted rows",
+        "Expose the retention rejection rate so a misconfigured horizon shows up as a rejection rate rather than as missing evidence nobody knows is missing",
+        "Add a `helena status` command rendering these from plain SQL",
+        "Document that these are queryable in a way a trace UI is not, and that no hosted tracer is adopted"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D8 Guardrails] Conformance suite for 'behaviour that must be impossible'",
+      "description": "Each row of the concept's must-never-happen table is a plausible implementation that would produce a pipeline which runs and lies. Turn the table into an executable suite so the guarantees are tested rather than asserted, and so a regression is caught by CI rather than by a reader.",
+      "steps": [
+        "Write one named test per row: unrefreshed feed returning `no_match`; a timeout, quota exhaustion or auth failure becoming `no_match`; a budget-truncated run returning `normal`; triage `normal` suppressing a Tier A match",
+        "Continue: an indicator classification becoming the host verdict alone; invisible truncation; an agent writing a fact, claim or memory entry; model output determining which agent runs next",
+        "Continue: an agent holding a key or calling a provider directly; a replay re-querying a provider; an assessment stored as an opaque document; a persisted free-text agent note",
+        "Continue: a per-invocation free-text task field; retrieved external text treated as instruction; a token in a prompt, evidence row, log, trace or repository; analyst-tier data in a triage rendering",
+        "Continue: a stored assessment validated against current code on replay; a cited context evicted rather than frozen",
+        "Map each test back to its concept row by identifier in the test name",
+        "Wire the suite as a required gate and document that adding a row to the table means adding a test"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D8 Guardrails] Architectural boundary tests over dependencies and stores",
+      "description": "The concept rejects a second store, a graph framework, a workflow engine and hosted tracing, and defers higher-level agent frameworks. Those rejections are architectural commitments, so they need tests rather than prose — a framework's conveniences must be checked against the rules rather than enabled because they are one flag away.",
+      "steps": [
+        "Add a test asserting no relational profile store, vector store or checkpoint store client is importable from the package",
+        "Add a test asserting no graph framework, workflow engine or hosted tracing SDK is imported",
+        "Add a test asserting the only persistence targets are the streaming engine and the two topics",
+        "Add a test asserting no component codes against a broker-specific API beyond the Kafka protocol",
+        "Document that reversing any of these requires a decision record, not an incidental dependency"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D8 Guardrails] Secrets hygiene and key-in-URL redaction tests",
+      "description": "The same provider secret has two exposure profiles: the bulk export carries the key in the URL path where it reaches proxy logs, shell history, exceptions carrying the request URL and pasted links, while the API carries it in a header where it does not. Only one of them needs the redaction rule, and it is not hypothetical — a live key reached a project conversation inside a pasted link.",
+      "steps": [
+        "Add a test that the loader's fetch trace, stored for provenance, contains no credential",
+        "Add a test that an exception raised during a loader fetch carries a redacted URL",
+        "Add a test that the secret wrapper never yields its value through str, repr, JSON serialization or a Pydantic dump",
+        "Add a repository scan test for credential-shaped strings in committed files, including fixtures",
+        "Add a test that no prompt, evidence row or emitted message can contain a credential",
+        "Document the two exposure profiles in the runbook so the asymmetry is understood rather than uniformly assumed"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D9 Integration] End-to-end fixture run and the acceptance definition",
+      "description": "'The prototype works' means the stages compose and cite — never that the verdicts are right, because the measurement that would establish that needs a labelled evaluation corpus the project does not have. Build the run that demonstrates exactly the claimable properties and nothing more.",
+      "steps": [
+        "Write an integration harness that starts the broker and engine, applies migrations, loads a feed snapshot, replays a fixture capture and drains the output topic",
+        "Assert every verdict and explanation cites stored evidence",
+        "Assert source outages, stale evidence, invalid model responses and partial context are visible rather than absorbed",
+        "Assert no autonomous remediation occurs — there is no write path to any external system",
+        "Assert a new enrichment source can be added without changing identity, provenance or assessment contracts, by adding a trivial second source in the test",
+        "Write the acceptance checklist into the repository, stating the claimable properties and, beside them, the explicitly not-claimable ones: accuracy, recall, false-positive rate, escalation rate, latency, cost and identical replay"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D9 Operations] Durability, backup and single-store correctness",
+      "description": "Findings and evidence exist only in the streaming engine, which makes durability and backup for the single store a correctness concern rather than an ops detail. The broker retains nothing that can be relied on and the output topic is egress only, so the engine plus the retained captures are the whole durable record.",
+      "steps": [
+        "Document the durability model: retained captures plus engine state, with the broker and the output topic explicitly excluded",
+        "Implement a backup procedure for the engine's durable tables and test a restore against a throwaway instance",
+        "Verify that a restore plus a capture replay reconstructs the pipeline state",
+        "Add a startup check that the capture store is reachable and its hashes verify",
+        "Record the residual risk and the recovery time in the runbook"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D9 Research] Evaluation corpus requirements and provider quota sizing",
+      "description": "A labelled, multi-host, time-correct corpus containing genuine malicious and multi-stage activity does not exist, and it gates every measurement: the comparative research questions, the evaluation harness, model selection, threshold calibration, budget values, window-coherence measurement and the base-rate check. It does not block building the pipeline — it blocks the claim that the pipeline is right. The live provider's daily quota must be sized against the corpus before the corpus is chosen.",
+      "steps": [
+        "Write the corpus requirements specification: labelling scheme, host and time coverage, multi-stage activity, and time correctness",
+        "Compute the live-query budget the corpus would consume against the provider's daily quota, and record the ceiling that places on any evaluation",
+        "State the base-rate hazard explicitly: coverage is sparse, most contexts have no hit, and a classifier that always answers `normal` will score well on accuracy and be worthless",
+        "State the retrieval confound: one organisation feeds both tiers, so know what the experiment is measuring before it runs, not after it produces a number",
+        "List each research question with the measurement that would answer it and the blocker that currently prevents it",
+        "Keep the evaluation harness itself marked deferred rather than partially building it"
+      ],
+      "done": false
+    },
+    {
+      "title": "[D9 Governance] Decision records, deferred register and open-question closure",
+      "description": "Important knowledge lives in the repository, not only in conversation history. Every deferred component must stay labelled deferred, or the maturity labels start lying — and the blocking open questions are answered inside the stage that needs them, so their answers belong beside the code that settled them.",
+      "steps": [
+        "Create `docs/decisions/` with a short record per settled question: enrichment status representation, port qualification, compromised-flag carriage, snapshot scheme, TLS parameter selection, rendering bounds, per-source thresholds, budget values and retry count, negative caching, cache-key normalization, and who decides 'the analyst is unsure'",
+        "Create `docs/deferred.md` listing every deferred capability — analyst feedback loop, agent memory, demonstration UI, finding store, evidence graph, query API, evaluation harness, detection tier, further feeds, retention and freezing, cloud Investigation Agent and its redaction gate, multi-tenancy enforcement — each with its re-entry test: an experiment or a measured need, not a gap in a diagram",
+        "Create `docs/hazards.md` recording the accepted risks: the measurement gap, silent record loss, the retrieval confound, concentration risk, the domain scope-test gap, the base rate, the hardening output interface, framework defaults and output volume",
+        "Create `docs/sources/` with one record per source, each stating it was written from a fetched artifact rather than a documentation page",
+        "Add a test or CI check that every module marked deferred has an entry in the deferred register",
+        "Record that failed and inconclusive experiments are valid results, kept with their reasons rather than rewritten or hidden"
+      ],
+      "done": false
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+# Overrides for the local engine. One key, one reason.
+#
+# RisingWave reports usage to telemetry.risingwave.dev by default. HELENA's
+# automatic pipeline is local end to end (concept/06-technology.md) and a second
+# outbound channel is a decision, not a default - so it is off here.
+[server]
+telemetry_enabled = false

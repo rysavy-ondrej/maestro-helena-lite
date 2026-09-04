@@ -1,0 +1,35 @@
+-- 0002  The aggregation version: the engine's copy of helena.versions.AGGREGATION_VERSION.
+--
+-- Two copies of a version that can drift apart are worse than none
+-- (concept/07-principles.md), so this file is the only place the value appears
+-- in SQL, and tests/test_versions.py asserts it equals the Python constant by
+-- SELECTing it from a real engine -- grepping this file would find the value in
+-- the comment that explains it.
+--
+-- A plain VIEW, not a materialized view and not a table. There is no state
+-- here: one constant, one row, no writer. A table would be state nobody
+-- maintains and would let an UPDATE rewrite the version under rows that already
+-- recorded it; a materialized view would be disk for a literal. Read by
+-- tests/test_versions.py, by `uv run scripts/migrate.py` users asking which
+-- aggregation version this store's schema was built for, and by nothing on the
+-- stream path -- see the measurement below.
+--
+-- Bumping it is a NEW migration, never an edit to this one. The runner refuses
+-- an applied file whose checksum changed (docs/decisions/0007-sql-migrations.md),
+-- so on this side the rule "a revision is a new version, never an edit" is
+-- structural rather than a convention. The new file drops this view and creates
+-- it again with the new value, and every aggregation view carrying the literal
+-- has to change in the same file.
+--
+-- Measured against RisingWave 3.0.3, and it constrains how the D2 aggregation
+-- views record the version: **a streaming query cannot read this view.**
+--   CREATE MATERIALIZED VIEW m AS
+--       SELECT t.x, v.aggregation_version FROM t CROSS JOIN helena_aggregation_version v;
+-- is rejected with "Not supported: streaming nested-loop join", and so are the
+-- same thing written as JOIN ... ON true and as a scalar subquery. A batch
+-- SELECT over it is fine. So an aggregation view stamps the literal itself and
+-- its own test asserts the rows it produces carry
+-- helena.versions.AGGREGATION_VERSION; tests/test_versions.py pins the engine
+-- behaviour so an engine version that lifts the restriction is noticed rather
+-- than assumed.
+CREATE VIEW helena_aggregation_version AS SELECT 'v1' AS aggregation_version;

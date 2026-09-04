@@ -1,0 +1,57 @@
+{
+  "task_index": 1,
+  "title": "[D0 Foundations] Fail-loud configuration and secret handling",
+  "status": "completed",
+  "summary": "`helena.config` now exists: a `Settings.load()` that reads the process environment layered over an uncommitted `.env`, resolves model settings agent-specific → general → fail, and raises `ConfigurationError` naming every missing variable at once — with empty and whitespace-only counting as missing and no default anywhere (asserted structurally: no field has a default and the module holds no `://` literal). Credentials are a `Secret` wrapper that renders `***redacted***` in `str`, `repr`, `model_dump()` and `model_dump_json()`. `.env.example` lists all fifteen variable names with empty values and a test holds it identical to the loader's set.",
+  "assumption_validated": "That fail-loud resolution works against the real environment rather than only against a fixture, and that per-agent resolution actually keeps the two agents apart. Verified by execution against the live endpoint in .env: both agents resolved to HTTP 200 on /models, each agent's configured model was among the 33 the endpoint offers, and the resolution sources came out triage=LLM_MODEL_TRIAGE, analyst=LLM_MODEL_ANALYST with different model ids and no cross-wiring. The provider-credential section was checked the same way: the resolved abuse.ch key returned 200 through the Auth-Key header while the identical request without it returned 401. A second, negative result: Pydantic echoes the offending input in a ValidationError, so a bare credential string passed where a `Secret` belongs would have leaked into a traceback — confirmed by running it, and closed with `hide_input_in_errors=True` plus a test that asserts the value is absent from the message.",
+  "makes_buildable": "Every later task reads configuration through one path instead of `os.environ`: task 2 (structured logging) has `Secret` and the `REDACTED` constant to build credential redaction around, and the URL-path case is explicitly left to it; task 3 (broker and engine) has `settings.infrastructure.risingwave_dsn` and `.kafka_bootstrap_servers`; the D1 normalizer has `settings.identity.tenant/sensor`, which is the identity the flow record does not carry; and the first increment that calls a model has `settings.triage` / `settings.analyst` carrying endpoint, token and model, with `ModelSettings.source` recording which variable each value came from so cross-wiring is detectable in a stored assessment.",
+  "files_changed": [
+    "src/helena/config.py",
+    "tests/test_config.py",
+    "tests/test_package_layout.py",
+    ".env.example",
+    ".env",
+    ".gitignore",
+    "README.md",
+    "docs/decisions/0004-configuration-variables.md"
+  ],
+  "verification": {
+    "command": "make check  (uv lock --check; uv run python -m compileall -q src tests; uv run pytest -q)",
+    "passed": true,
+    "detail": "65 passed, 0 skipped (was 21 before this task). The suite includes three tests that load the real .env — they assert on shapes only, never on a value, and skip if the file is absent. Beyond the suite, three things were checked by execution against live services and recorded above: the model endpoint (200 for both agents, configured model present in the 33 offered), the abuse.ch credential (200 with the key, 401 without), and the Pydantic input-echo leak. A whole-tree scan for any value from .env across 41 files outside .venv/bin/data/prds found none. No SQL in this task."
+  },
+  "escalations": [
+    {
+      "kind": "configuration-scope",
+      "detail": "VIRUSTOTAL_AUTH_KEY is REQUIRED, although VirusTotal is a deferred provider that nothing calls. Reasoning in docs/decisions/0004: deferring the call is not deferring the configuration, the concept requires the example to document every variable name, and the key is live in the operator's .env. The cost is that a deployment without a VirusTotal key cannot start. Making it optional would create the first optional non-override variable, which is a decision rather than an edit — flagged here so it is a choice someone made and not an accident.",
+      "blocking": false
+    },
+    {
+      "kind": "test-enforcement",
+      "detail": "tests/test_package_layout.py asserted the module set equalled the seven architecture components exactly, so adding config.py failed it. Rather than pretending configuration is an eighth component, the test now subtracts a named SUPPORT_MODULES = {\"config\"} set; an unexpected module still fails the assertion, so the friction task 0 built is intact. concept/03-architecture.md lists the environment as an interface, not a component, which is why config is not in COMPONENT_MODULES.",
+      "blocking": false
+    },
+    {
+      "kind": "local-file",
+      "detail": "HELENA_TENANT and HELENA_SENSOR did not exist in .env — the operator's file carries the nine variables CONTEXT.md §3 lists, none of them the ingestion identity. Two non-secret lines were appended to the local .env (values 'local-lab' and 'local-sensor-01') so the loader resolves on this machine. No existing line was read or modified. If the operator wants different identifiers, changing them is a one-line edit; nothing in the code knows those values.",
+      "blocking": false
+    }
+  ],
+  "invariant_conflicts": [],
+  "deferred": [
+    "\"Commit .env.example\" — the file is written, but there is still no git repository (task 0 deliberately did not `git init`), so nothing was committed. It is not matched by the .gitignore `.env` pattern, and a comment in .gitignore now says so.",
+    "Redaction of a credential that travels inside a URL string (the abuse.ch bulk-export path). `Secret` keeps a value out of str/repr/serialization, which does not help when the key is a substring of a URL. That is task 2, structured logging with credential redaction, and docs/decisions/0004 records it as that task's.",
+    "A network test in the pytest suite. The live checks above were run by hand so the suite stays runnable with no infrastructure and no quota spend, which is where CONTEXT.md §3 and task 0 put that boundary.",
+    "Per-agent variables for the Investigation agent, topic names, and any engine or broker setting beyond the two addresses — each belongs to the increment that first needs it."
+  ],
+  "lessons": [
+    "task 01: `from pydantic_core import core_schema` FAILS tests/test_dependency_boundary.py — pydantic-core is a separate distribution and only 'pydantic' is in APPROVED_RUNTIME_DISTRIBUTIONS. Build custom Pydantic behaviour from the `pydantic` namespace instead: Annotated[T, PlainSerializer(...)] plus ConfigDict(arbitrary_types_allowed=True) covers a wrapper type without __get_pydantic_core_schema__.",
+    "task 01: Pydantic echoes the rejected input in a ValidationError ('input_value=...'), so a credential passed to the wrong field leaks into a traceback. Verified by running it. Every settings model sets ConfigDict(hide_input_in_errors=True); any later model that holds a Secret must do the same.",
+    "task 01: The live model endpoint offers 33 models and both LLM_MODEL_TRIAGE and LLM_MODEL_ANALYST are among them; the two agents currently share one LLM_URL and one LLM_TOKEN and differ only by model. GET {LLM_URL}/models with a Bearer token is a cheap way to check a model id exists before spending a completion on finding out.",
+    "task 01: ThreatFox API v1 (https://threatfox-api.abuse.ch/api/v1/) requires the key as an `Auth-Key` HEADER — the same request without it returns HTTP 401. But {\"query\": \"get_ioc\", \"id\": \"41\"} came back 200 with query_status 'unknown_operation', so that operation name is wrong for the current API. The feed-loader task must fetch the current query vocabulary rather than assume one; only the auth mechanism is confirmed here.",
+    "task 01: The local .env now also carries HELENA_TENANT and HELENA_SENSOR (added by this task). Anything that needs tenant or sensor reads settings.identity, never os.environ.",
+    "task 01: Settings.load(environ=..., env_file=...) takes both by keyword so tests are hermetic; passing env_file=None skips the file entirely. A test that resolves settings without passing environ would read the machine's real environment — do not write one."
+  ],
+  "failed_approaches": [],
+  "next_session_should_know": "Read configuration through `helena.config.Settings.load()` and nothing else — no os.environ, no dotenv call, no second loader. The typed sections are settings.identity (tenant, sensor), settings.providers (abusech_auth_key, virustotal_auth_key — both Secret), settings.infrastructure (risingwave_dsn, kafka_bootstrap_servers) and settings.triage / settings.analyst (agent, endpoint_url, token, model, source). Adding a variable means adding it to helena.config.VARIABLES AND to .env.example, or tests/test_config.py fails — that is deliberate. A credential is a Secret; call .reveal() at the point of use and never anywhere near a log line, and if you put a Secret in a new Pydantic model, copy the ConfigDict (frozen, arbitrary_types_allowed, extra='forbid', hide_input_in_errors). Two things this task did NOT do and the next sessions own: redacting a key that travels inside a URL (task 2), and the RISINGWAVE_DSN, which is typed as a plain str because a RisingWave DSN is an address — if a deployment ever puts a password in it, that type is wrong and it should become a Secret. Still open from task 0 and untouched here: the concept/05 vs data/netify tension, and bin/README.md's dangling reference to scripts/build-binaries.sh."
+}

@@ -1,0 +1,138 @@
+{
+  "currentIteration": 15,
+  "currentTaskIndex": 10,
+  "elapsedTimeSeconds": 25231,
+  "lastUpdateTime": 1788458201805,
+  "startTime": 1788432970645,
+  "statistics": {
+    "averageDurationMs": 733657,
+    "completedIterations": 11,
+    "failedIterations": 3,
+    "iterationTimings": [
+      {
+        "durationMs": null,
+        "endTime": null,
+        "iteration": 1,
+        "startTime": 1788432970654
+      },
+      {
+        "durationMs": 503,
+        "endTime": 1788434523187,
+        "iteration": 2,
+        "startTime": 1788434522684,
+        "status": "failed",
+        "task": 0
+      },
+      {
+        "durationMs": 528,
+        "endTime": 1788434577258,
+        "iteration": 3,
+        "startTime": 1788434576730,
+        "status": "failed",
+        "task": 0
+      },
+      {
+        "durationMs": 767703,
+        "endTime": 1788435712890,
+        "iteration": 4,
+        "startTime": 1788434945186,
+        "status": "completed",
+        "task": 0
+      },
+      {
+        "durationMs": 584095,
+        "endTime": 1788436875518,
+        "iteration": 5,
+        "startTime": 1788436291422,
+        "status": "completed",
+        "task": 1
+      },
+      {
+        "durationMs": 697021,
+        "endTime": 1788437573540,
+        "iteration": 6,
+        "startTime": 1788436876518,
+        "status": "completed",
+        "task": 2
+      },
+      {
+        "durationMs": 1922458,
+        "endTime": 1788439496984,
+        "iteration": 7,
+        "startTime": 1788437574525,
+        "status": "completed",
+        "task": 3
+      },
+      {
+        "durationMs": 897499,
+        "endTime": 1788440395690,
+        "iteration": 8,
+        "startTime": 1788439498190,
+        "status": "completed",
+        "task": 4
+      },
+      {
+        "durationMs": 723464,
+        "endTime": 1788441120176,
+        "iteration": 9,
+        "startTime": 1788440396711,
+        "status": "completed",
+        "task": 5
+      },
+      {
+        "durationMs": 217793,
+        "endTime": 1788446750261,
+        "iteration": 10,
+        "startTime": 1788446532467,
+        "status": "failed",
+        "task": 6
+      },
+      {
+        "durationMs": 852995,
+        "endTime": 1788450033694,
+        "iteration": 11,
+        "startTime": 1788449180698,
+        "status": "completed",
+        "task": 6
+      },
+      {
+        "durationMs": 674012,
+        "endTime": 1788451222371,
+        "iteration": 12,
+        "startTime": 1788450548359,
+        "status": "completed",
+        "task": 7
+      },
+      {
+        "durationMs": 1043857,
+        "endTime": 1788453294638,
+        "iteration": 13,
+        "startTime": 1788452250781,
+        "status": "completed",
+        "task": 8
+      },
+      {
+        "durationMs": 817844,
+        "endTime": 1788455509529,
+        "iteration": 14,
+        "startTime": 1788454691684,
+        "status": "completed",
+        "task": 9
+      },
+      {
+        "durationMs": 1805091,
+        "endTime": 1788458201805,
+        "iteration": 15,
+        "startTime": 1788456396713,
+        "status": "completed",
+        "task": 10
+      }
+    ],
+    "successRate": 0.7333,
+    "successfulIterations": 11,
+    "totalDurationMs": 11004863,
+    "totalIterations": 15
+  },
+  "status": "running",
+  "totalIterations": 15
+}

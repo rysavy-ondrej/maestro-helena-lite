@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Bring the pinned streaming engine and broker up on the configured addresses.
+#
+#   scripts/dev-up      start both, wait until both answer
+#   scripts/dev-down    stop both again
+#
+# This does NOT download anything. The binaries are third-party artifacts the
+# project runs, not builds (prds/CONTEXT.md §3); dev-up verifies the ones on
+# disk against docs/versions.md and refuses to start anything that does not
+# match. If bin/ is empty, docs/versions.md says where the files come from.
+#
+# Addresses come from RISINGWAVE_DSN and KAFKA_BOOTSTRAP_SERVERS through
+# helena.config, so what this binds is exactly what the pipeline connects to.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+# shellcheck source=../bin/env.sh
+. bin/env.sh
+
+started_one() {  # name pidfile
+    if [ -f "$2" ] && kill -0 "$(cat "$2")" 2>/dev/null; then
+        echo "dev-up: $1 is already running (pid $(cat "$2")); run scripts/dev-down first" >&2
+        exit 1
+    fi
+}
+
+uv run scripts/dev_check.py --binaries-only
+eval "$(uv run scripts/dev_check.py --addresses)"
+
+started_one engine "$ROOT/.run/risingwave.pid"
+started_one broker "$ROOT/.run/blink.pid"
+
+# The engine writes a temp-secret directory into its working directory, so it
+# gets one of its own rather than dropping `secrets/` at the project root.
+mkdir -p "$ROOT/.run/engine" "$ROOT/.run/broker"
+
+(
+    cd "$ROOT/.run/engine"
+    exec "$ROOT/bin/risingwave" single_node \
+        --store-directory "$ROOT/.rwdata" \
+        --listen-addr "$RW_LISTEN_ADDR" \
+        --config-path "$ROOT/scripts/risingwave.toml"
+) >"$ROOT/.run/risingwave.log" 2>&1 &
+echo $! >"$ROOT/.run/risingwave.pid"
+echo "dev-up: engine starting on $RW_LISTEN_ADDR (pid $(cat "$ROOT/.run/risingwave.pid")), log .run/risingwave.log"
+
+# Blink takes its settings from the environment, not from the settings file -
+# see docs/runbook.md. The file is still required by the binary.
+(
+    cd "$ROOT/.run/broker"
+    BROKER_PORTS="$BLINK_BROKER_PORTS" KAFKA_HOSTNAME="$BLINK_KAFKA_HOSTNAME" \
+        exec "$ROOT/bin/blink" --settings "$ROOT/scripts/blink.yaml"
+) >"$ROOT/.run/blink.log" 2>&1 &
+echo $! >"$ROOT/.run/blink.pid"
+echo "dev-up: broker starting on $BLINK_KAFKA_HOSTNAME:$BLINK_BROKER_PORTS (pid $(cat "$ROOT/.run/blink.pid")), log .run/blink.log"
+
+if ! uv run scripts/dev_check.py --wait 180; then
+    echo "dev-up: an endpoint never answered; leaving both running so the logs in .run/ can be read" >&2
+    exit 1
+fi

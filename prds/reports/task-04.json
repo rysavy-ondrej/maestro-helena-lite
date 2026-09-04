@@ -1,0 +1,63 @@
+{
+  "task_index": 4,
+  "title": "[D0 Foundations] SQL migration runner over numbered files",
+  "status": "completed",
+  "summary": "The engine's schema is now project source: `sql/migrations/NNNN_name.sql` applied in order by `helena.migrations`, which records every application in `helena_schema_migrations` in the engine and otherwise only refuses — on a gap, a duplicate number, a missing file, a rename, any checksum change to an applied file, a recorded `failed`, or a connection that is not in autocommit. `scripts/migrate.py` runs it by hand, `tests/conftest.py::migrated_engine` runs it for the suite, and 25 new tests execute all of it against a real RisingWave, including the half-migrated failure path. No new dependency: psycopg was already here, and no SQL transformation framework was introduced.",
+  "assumption_validated": "That plain numbered .sql files applied by a small runner are sufficient for this project's schema — no transformation framework needed. Validated as far as one migration set and every failure path goes; the runner is ~250 lines, most of it refusal, and nothing about it wanted a framework. Four engine behaviours were measured rather than inferred, and two of them changed the design: (1) RisingWave has NO transaction around DDL — `CREATE TABLE a; CREATE TABLE a` in one statement leaves `a` behind and then raises — so rollback is impossible and a partial application is a stored `failed` row instead; (2) psycopg sends a multi-statement string to RisingWave successfully, so a migration file may hold several statements, which is precisely why (1) matters; (3) `CREATE SCHEMA` / `SET search_path` / `DROP SCHEMA ... CASCADE` all work, which gives per-test isolation on the one engine a machine can run; (4) an INSERT onto an existing PRIMARY KEY is an upsert, not an error, and a row is unreadable until `FLUSH`.",
+  "makes_buildable": "Task 5 (version registry) can put the aggregation version in `sql/migrations/0002_*.sql` and assert the engine's copy equals the Python constant by taking the `migrated_engine` fixture — the pattern is already demonstrated for `LEDGER_TABLE`. Task 9 (quarantine table), task 12 (flatten-layer views) and everything downstream get the same: write the next numbered file, take `migrated_engine`, and query. `engine_schema` is the same fixture without migrations, for anything that needs an empty store. The deployment ordering rule (migrate before ingest, because a later view starts empty) is recorded in three places so the D1 ingest tasks inherit it.",
+  "files_changed": [
+    "sql/migrations/0001_schema_migrations.sql",
+    "src/helena/migrations.py",
+    "scripts/migrate.py",
+    "tests/test_migrations.py",
+    "tests/conftest.py",
+    "tests/test_package_layout.py",
+    "docs/decisions/0007-sql-migrations.md",
+    "docs/runbook.md",
+    "README.md",
+    "Makefile"
+  ],
+  "verification": {
+    "command": "uv run pytest -q",
+    "passed": true,
+    "detail": "155 passed in 12.6 s from cold (130 before this task), with the engine fixture starting its own in-memory RisingWave. All 13 new integration tests execute SQL against it: the full migration set applied from empty, applied twice, an edited applied file refused, a migration whose second statement fails (asserting the first statement's table is still there, that the ledger holds a `failed` row, that a re-run refuses, and that the runner moves again once the row is deleted), a failing 0001 reporting that it could NOT be recorded, and a non-autocommit connection refused. `make check` is green (lockfile in sync, sources compile, suite passes). `scripts/migrate.py` was also run by hand against a throwaway in-memory engine: --status showed one pending, apply applied it, a second apply reported nothing to do, appending a comment to the applied file made it exit 1 naming both checksums, and with no engine running it exits 1 saying the engine did not answer."
+  },
+  "escalations": [
+    {
+      "kind": "layout",
+      "detail": "`helena.migrations` was added as a third SUPPORT_MODULE in tests/test_package_layout.py, beside `config` and `observability`. That test invites the edit deliberately ('a deliberate edit rather than a new file appearing unnoticed') and it is not an architecture component, so this is recorded rather than escalated: applying the schema belongs to no single stage, and concept/03-architecture.md makes the engine's view and model definitions project source. Reasoning is in docs/decisions/0007-sql-migrations.md.",
+      "blocking": false
+    },
+    {
+      "kind": "documentation-tension",
+      "detail": "Still open and untouched by this task, carried forward from tasks 0-3: concept/05-threat-intelligence.md records Netify as commercial-only and out of scope while data/netify/ ships a million rows of application identification. Wiring it in as a source needs a decision recorded first.",
+      "blocking": false
+    }
+  ],
+  "invariant_conflicts": [
+    {
+      "step": "'Add a pytest fixture that spins a throwaway engine instance, applies every migration, and tears it down'",
+      "resolution": "The throwaway *engine* already exists — task 3's session-scoped `engine_dsn` fixture starts an in-memory RisingWave when nothing answers — and task 3 measured why a second one cannot be started per test: `single_node` binds fixed meta and compute ports (5690, 5688), so only one engine runs per machine. The new fixtures therefore make the throwaway unit a SCHEMA on that engine: `engine_schema` does CREATE SCHEMA / SET search_path / DROP SCHEMA ... CASCADE, and `migrated_engine` applies every migration into it. The engine is still throwaway (in-memory, gone at the end of the run) and the migrations still really execute; what is not per-test is the process. Rebuilding per-test process management would also have violated CONTEXT.md §3 ('use it, don't rebuild it')."
+    }
+  ],
+  "deferred": [
+    "Down migrations. Nothing has needed one, and a reverse script that has never run is a claim rather than a capability; a throwaway engine is the prototype's undo. Recorded in docs/decisions/0007.",
+    "Any domain schema. sql/migrations/ holds the ledger and nothing else, because at D0 there is no view to create: the version registry is task 5, the quarantine table is task 9, the flatten layer is task 12. Creating them now would be building ahead of the increment that validates them.",
+    "Structured logging from the runner. `helena.migrations` returns what it applied and raises with a precise message; `scripts/migrate.py` prints. Giving the runner a logger would make it need Settings (tenant and sensor) to apply a schema, which is a dependency the increment does not need. The increment that runs migrations as part of a pipeline start-up owns that.",
+    "Schema-qualifying the migration files. They are unqualified so they land in `search_path`, which is exactly what lets a test isolate them; a deployment gets `public`.",
+    "A `helena migrate` entry point on the package. The CLI is scripts/migrate.py, matching scripts/dev_check.py; there is no console-script surface yet and adding one for a single command is structure ahead of the need."
+  ],
+  "lessons": [
+    "task 04: RisingWave 3.0.3 has NO transaction around DDL, and psycopg happily sends a multi-statement string to it. Measured: `CREATE TABLE a; CREATE TABLE a` as one execute() creates `a`, then raises DuplicateObject — and `a` is still there afterwards. Any migration file with more than one statement can therefore leave the store half-migrated, which is why the ledger carries a `failed` status rather than pretending a file is atomic.",
+    "task 04: RisingWave supports CREATE SCHEMA, `SET search_path TO <s>`, `current_schema()`, `information_schema.tables` (with table_schema, and it lists views and materialized views too) and DROP SCHEMA ... CASCADE. That is the way to get an isolated empty store per test on the ONE engine a machine can run — tests/conftest.py::engine_schema does it. `rw_catalog.rw_tables` also works but has no `relation_name`/`relation_type` columns; `rw_catalog.rw_relations` rejects both.",
+    "task 04: An INSERT onto an existing PRIMARY KEY in RisingWave is an UPSERT — it overwrites the row and raises nothing. Do not rely on a primary key to reject a duplicate write; if a duplicate must be refused, the code has to refuse it. And a row inserted into a RisingWave table is not readable until `FLUSH` (confirmed again here: without it the ledger reports a just-applied migration as pending).",
+    "task 04: Selecting from a table that does not exist in RisingWave raises psycopg UndefinedObject with sqlstate 42704, not the PostgreSQL 42P01 UndefinedTable. Test the catalog (`information_schema.tables WHERE table_schema = current_schema()`) rather than catching an exception class or a sqlstate.",
+    "task 04: `uv run scripts/dev_check.py --wait N` waits for the engine AND the broker. Waiting on it with only the engine running blocks for the full N seconds and then still succeeds if a stray broker is up. To wait for just the engine, connect with psycopg in a loop.",
+    "task 04: The migration ledger `helena_schema_migrations` is migration 0001 itself, not a bootstrap constant in Python — so the engine's schema has one home. The consequence, and it is in the error text: if 0001 fails there is nowhere to record that it failed, and `MigrationFailed.recorded_in_ledger` is False for exactly that case."
+  ],
+  "failed_approaches": [
+    "task 04: Bootstrapping the ledger table from a `CREATE TABLE IF NOT EXISTS` string inside the runner was considered and rejected before it was written: it gives the engine's schema two homes, one of them a Python string no migration describes, and concept/06-technology.md makes the SQL project source. The one thing it would have bought — being able to record a failure of the very first migration — is worth less than the split, and the error message says outright when a failure could not be recorded.",
+    "task 04: Splitting a migration file into statements in Python was considered and rejected: a naive split on ';' breaks on semicolons inside string literals and dollar-quoted bodies, and it turned out to be unnecessary — RisingWave executes a multi-statement string sent through psycopg in one execute()."
+  ],
+  "next_session_should_know": "Write your schema as the next numbered file, `sql/migrations/0002_<name>.sql`, and take the `migrated_engine` fixture from tests/conftest.py — it gives you a psycopg connection (autocommit, its own throwaway schema) with every migration applied, and `engine_schema` is the same thing without them. Do not create tables in a test by hand: a view a test queries should be the view a deployment gets, from the same file. Four things will bite otherwise. (1) Editing an applied migration is refused by checksum — including a whitespace or comment change — so amend by adding the next file, never by editing 0001. (2) RisingWave has no transaction around DDL, measured this session, so a file whose third statement fails leaves the first two behind and gets a `failed` ledger row that blocks every later run until a human clears it; keep migration files small. (3) A row is unreadable until `FLUSH`, and an INSERT onto an existing primary key silently overwrites. (4) The runner needs `autocommit=True` and says so rather than half-applying. `uv run scripts/migrate.py --status` / `uv run scripts/migrate.py` (or `make migrate`) is the by-hand path against the configured engine; docs/runbook.md §5 covers it, including the rule that matters for D1 onward: **migrate before data flows**, because the broker is consume-once and a view created after ingestion starts begins empty with no backlog to fill it from — only a replayed capture. sql/migrations/ deliberately holds nothing but the ledger; task 5's aggregation version is the first domain migration, and `test_the_ledger_constant_names_the_table_the_migration_creates` is the pattern for asserting a SQL constant equals its Python copy by asking the engine rather than by grepping the file. Still open and untouched: the concept/05 vs data/netify tension, bin/README.md's dangling reference to scripts/build-binaries.sh, and there is still no git repository, so nothing here was committed."
+}

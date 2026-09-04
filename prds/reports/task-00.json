@@ -1,0 +1,82 @@
+{
+  "task_index": 0,
+  "title": "[D0 Foundations] Bootstrap the single Python package and toolchain",
+  "status": "completed",
+  "summary": "The repository skeleton now exists: a uv project pinned to Python 3.12 exactly with a committed uv.lock, one package `helena` in a src/ layout with one documented module per architecture component, one pytest suite of 21 tests mirroring it, a Makefile, three decision records and a README that names concept/ as authoritative. Lint and typecheck tooling was NOT added — it is a dev dependency beyond the approved set, so it is recorded as an escalation and the two Makefile targets fail loud pointing at the decision record.",
+  "assumption_validated": "That the two wire-protocol client choices actually work against the pinned binaries, rather than against their documentation. Checked on 2026-09-03: psycopg 3.3.5 connects to bin/risingwave 3.0.3 in playground mode (reports PostgreSQL 13.14.0-RisingWave-3.0.3) and completes CREATE TABLE / INSERT / FLUSH / SELECT / CREATE VIEW / SELECT / DROP. confluent-kafka 2.15.0 talks to bin/blink 0.2.0: metadata, AdminClient.create_topics, and produce with delivery confirmation all worked, and consume worked via manual assign() with OFFSET_BEGINNING. One negative result: consume via subscribe() (consumer-group coordination) returned nothing in the same probe, and is therefore unverified rather than assumed. Produce to a topic that does not exist yet also silently left the message in the queue through flush(10) — the topic had to be created first.",
+  "makes_buildable": "Task 1 (fail-loud configuration) has a package, a module layout and python-dotenv already locked. Task 3 (pin and run the broker and engine) has two verified client facts and a working blink invocation to start from. Task 4 (SQL migration runner) has a verified psycopg path to a throwaway engine instance. Every later task has a dependency boundary test that turns an unapproved import into a test failure, and a maturity-label test that turns an unlabelled module into one.",
+  "files_changed": [
+    "pyproject.toml",
+    "uv.lock",
+    ".python-version",
+    ".gitignore",
+    "Makefile",
+    "README.md",
+    "src/helena/__init__.py",
+    "src/helena/normalizer.py",
+    "src/helena/context.py",
+    "src/helena/enrichment.py",
+    "src/helena/agents.py",
+    "src/helena/tools.py",
+    "src/helena/orchestration.py",
+    "src/helena/sink.py",
+    "tests/test_dependency_boundary.py",
+    "tests/test_package_layout.py",
+    "tests/test_normalizer.py",
+    "tests/test_context.py",
+    "tests/test_enrichment.py",
+    "tests/test_agents.py",
+    "tests/test_tools.py",
+    "tests/test_orchestration.py",
+    "tests/test_sink.py",
+    "docs/decisions/0001-repository-layout-and-toolchain.md",
+    "docs/decisions/0002-dependency-set.md",
+    "docs/decisions/0003-lint-and-typecheck-tooling.md"
+  ],
+  "verification": {
+    "command": "uv run pytest -q  (and: make check)",
+    "passed": true,
+    "detail": "21 passed. `make check` runs `uv lock --check` (lockfile in sync), `python -m compileall src tests`, then the suite — all clean. The boundary and layout tests were verified by making them fail: a probe module importing langchain and carrying no maturity label produced 4 failures (unapproved top-level import, deliberately-absent model client, component module set, missing maturity label), and the probe was removed. No SQL is introduced by this task, but the psycopg path was executed against a real ./bin/risingwave playground instance and the confluent-kafka path against a real ./bin/blink instance; both engines were stopped afterwards and the throwaway probe scripts lived in /tmp, not the repository."
+  },
+  "escalations": [
+    {
+      "kind": "dependency",
+      "detail": "Lint and typecheck tooling. The task step asked for lint and typecheck targets; a linter and a type checker are dev dependencies beyond the approved set (CONTEXT.md §3: Pydantic, dotenv, a Kafka client, a PostgreSQL driver, pytest — anything else is an escalation). Not added. `make lint` and `make typecheck` exist and exit 1 naming docs/decisions/0003-lint-and-typecheck-tooling.md, which states what a decision needs to settle. `make check` covers what needs no new dependency: lockfile sync, compileall, the suite.",
+      "blocking": false
+    },
+    {
+      "kind": "dependency",
+      "detail": "Kafka client choice within the already-approved slot. `confluent-kafka` was chosen over `kafka-python`, on the basis of a probe against the pinned bin/blink binary rather than on reputation. Recorded in docs/decisions/0002-dependency-set.md. Flagged because 'a Kafka client' was approved generically and a later session may want the specific choice revisited — in particular if consumer-group subscribe() turns out to be needed and blink does not support it.",
+      "blocking": false
+    }
+  ],
+  "invariant_conflicts": [
+    {
+      "detail": "Task step 3 ('a justfile/Makefile with lint, test and typecheck targets') conflicts with prds/CONTEXT.md §3 and concept/instruction.md §3, which make any dependency beyond the baseline an escalation. The higher rule was followed: the targets exist and fail loud rather than the tools being added or the targets being silently omitted.",
+      "resolution": "Escalated, not improvised. See docs/decisions/0003."
+    },
+    {
+      "detail": "Minor, and resolved conservatively: task step 1 says 'commit uv.lock'. There is no git repository in the tree and CONTEXT.md §5 says not to create commits unless the task says to. 'Commit' was read as 'uv.lock is a committed artifact, not a generated one' — it exists, is not gitignored, and `uv lock --check` is part of `make check`. No `git init` and no commit was made. If the operator meant a literal git repository, that is a one-command follow-up, but the choice of what belongs in an initial commit (prds/, implement.sh, data/) is theirs, not a session's."
+    }
+  ],
+  "deferred": [
+    "Lint and typecheck tooling — escalated, see above. The Makefile targets are present and fail loud.",
+    "`git init` and an initial commit — deliberately not done, see invariant_conflicts.",
+    "Tests that need a running engine or broker. The suite runs with no infrastructure; the engine and broker were exercised by hand this session and by the suite from task 3/4 onward, which is where CONTEXT.md puts them.",
+    "A `helena.config` module. Configuration and secret handling is task 1, so no config module was created — creating an empty one now would have been structure ahead of the increment that fills it."
+  ],
+  "lessons": [
+    "The two earlier task-00 sessions failed at 0 s with exit 1 and wrote nothing to disk. The cause is in prds/logs/*.stderr: '--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons'. It was a runner invocation problem, not a code problem — nothing had been half-built.",
+    "bin/blink starts from a settings YAML containing just `{}`. Defaults observed: broker ports 9094 and 9092 (metadata advertises 9094), REST port 30004, retention 5m, 1 partition per topic, kafka_hostname 'localhost'. It prints a large ANSI banner to stdout — pipe it to a file, not into a terminal you are reading.",
+    "confluent-kafka against blink 0.2.0: produce to a non-existent topic silently stays queued through flush(10). Create the topic with AdminClient first. Consumption works with assign(TopicPartition(topic, 0, OFFSET_BEGINNING)); subscribe() returned nothing.",
+    "psycopg 3 needs autocommit=True for RisingWave DDL to be usable in the same session, and `FLUSH` after an INSERT before the row is readable from a table.",
+    "requires-python is pinned '>=3.12,<3.13', not '>=3.12'. RisingWave links libpython3.12.so.1.0 and the ABI does not survive a minor bump; the upper bound turns that into a resolution error instead of a silent runtime failure.",
+    "The maturity-label test reads the docstring with ast, not by importing the module, so a module with a broken import fails the import test rather than confusing the label test.",
+    "pytest is configured with filterwarnings = [\"error\"] — a new dependency that emits a DeprecationWarning on import will break the suite. That is deliberate (fail loud), but worth knowing before blaming the test."
+  ],
+  "failed_approaches": [
+    "confluent-kafka Consumer.subscribe() against bin/blink 0.2.0 — polled 30 s, got nothing, no error. Not investigated further because wiring the broker is task 3; do not assume consumer groups work, and do not spend the time rediscovering this.",
+    "Producing to a blink topic without creating it first — the message never left the producer queue and flush(10) returned 1 outstanding. No error was raised until the producer's TERMINATE warning."
+  ],
+  "next_session_should_know": "The skeleton is in place and `uv run pytest -q` is green (21 tests). Work through `uv run` and `uv add` against the existing .venv; `make check` is the gate. Two tests will police you: tests/test_dependency_boundary.py derives the approved import set from pyproject.toml and fails on any unapproved top-level import in src/helena (langchain, openai, httpx, requests, sqlalchemy and kafka-python are on an explicit absent list — the model client enters in the increment that first CALLS a model, not the one that mentions it), and tests/test_package_layout.py requires exactly one 'Maturity: <label>' line in every module docstring and that the module set equals the seven architecture components. Adding an eighth module means editing COMPONENT_MODULES in that test, which is intentional friction — a new component is an architecture decision. Every module is currently labelled 'Maturity: deferred — placeholder'; the task that implements one must change its label. Note also: bin/README.md references ../.gitignore and scripts/build-binaries.sh — the .gitignore now exists (this task wrote it), but scripts/build-binaries.sh does not, so that reference is still dangling. And an unrelated `secrets/` directory appeared at the project root during the session (not created by this task); it has been added to .gitignore defensively and its contents were not read. The concept/05 vs data/netify tension noted in CONTEXT.md §3 was not touched by this task and remains open."
+}

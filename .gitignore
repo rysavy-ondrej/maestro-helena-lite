@@ -1,0 +1,25 @@
+# The environment is disposable; uv.lock is the contract.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Live credentials. Never committed, and no example file carries a value.
+# `.env.example` is committed deliberately and is not matched by this pattern.
+.env
+secrets/
+
+# Third-party binaries the project runs, not builds (see bin/README.md).
+bin/blink
+bin/risingwave
+bin/lib/
+
+# Engine state, process ids and logs from a local run (scripts/dev-up).
+.rwdata/
+.run/
+
+# Intelligence snapshots stay out of the repository - fair-use terms bind them.
+# A small extract committed as a test fixture is fine; the full files are not.
+data/threatfox/
+data/netify/

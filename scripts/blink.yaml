@@ -1,0 +1,4 @@
+# Blink requires a settings file, and then reads its settings from the
+# environment instead - see docs/runbook.md. Ports and hostname are exported by
+# scripts/dev-up from helena.config; this file stays empty on purpose.
+{}
