@@ -183,7 +183,7 @@
         "Add tests asserting one row per entity per context, and that layer flags survive to the row",
         "Record the coverage gaps in the migration comments: JA4 has no public blocklist, and URL feeds have narrow reach because TLS yields SNI not a URL"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D2 Context] Registrable-domain normalization via the Public Suffix List",
