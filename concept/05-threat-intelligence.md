@@ -56,8 +56,10 @@ easier one.
 
 ### The catalogue
 
-The first two rows are **accepted**. Everything below them is **deferred**, and
-kept because it is where the next feed comes from.
+**ThreatFox** and **Netify** are accepted. The **Public Suffix List** is *built* —
+it is reference data for normalization, not a feed: it produces no claims, never
+escalates, and its tier is therefore **N/A** rather than unassigned. Everything
+else is **deferred**, and kept because it is where the next feed comes from.
 
 | Feed | Indicators | Access | Maps to | Tier |
 | --- | --- | --- | --- | --- |
@@ -71,8 +73,8 @@ kept because it is where the next feed comes from.
 | Emerging Threats compromised IPs | address | Free | Compromised host | C — aggregated, no per-entry evidence |
 | Tor exit list | address | Free | Anonymization infrastructure | C–D |
 | Cloud and CDN IP ranges | address range | Free, no auth | Cloud hosting | — |
-| Public Suffix List | — | Free | **Registrable-domain normalization** — needed for scope correctness, not enrichment |
-| Domain popularity list | domain | Free | A popularity prior, **not identity** |
+| **Public Suffix List** — *built*, `sql/migrations/0008` | — | Free, no auth | **Registrable-domain normalization** — needed for scope correctness, **not enrichment**. Makes no claim about any entity | **N/A** |
+| Domain popularity list | domain | Free | A popularity prior, **not identity** | **N/A** |
 
 Some sources are simply **not available**: several commercial-grade blocklists
 need a datafeed or subscription agreement. Application-identification data is
