@@ -25,6 +25,8 @@ Everything else it does is refusal:
 | an object is dropped that nothing created | the file is undoing something no file did |
 | an object is dropped while a live object still reads it | the engine refuses that drop; the dependents come first |
 | a drop says `CASCADE` | it takes objects the file does not name, and a file whose effect is larger than its text cannot be reviewed |
+| a replaced definition does not declare `Superseded by:` | the `CREATE` left behind is one the engine never holds, and editing it changes nothing anywhere |
+| a `Superseded by:` names a migration that does not recreate the object | it sends a reader to a definition that is not there |
 
 None of those touch the engine before they fire, except the ones that have to
 read the ledger.
@@ -69,6 +71,16 @@ exists at that point. `sql/migrations/0010_entity_value_null_guard.sql` is the
 first file to use this, and it drops seven objects by name rather than one with
 `CASCADE`, which this module refuses for the reason the declaration blocks exist
 at all.
+
+The `CREATE` left behind in the earlier file is then a definition the engine does
+not hold, and the trap that sets is a person opening it, fixing something, and
+changing nothing anywhere. **`Superseded by:` is the fifth declared field and the
+only optional one**: it names the migration that replaced this definition, it is
+checked in both directions by the walk, and `superseded()` returns the replaced
+definitions. Writing a superseding migration therefore means editing the file it
+supersedes — an applied file, whose checksum changes — which is a real cost and
+is the same one task 17's declaration retrofit paid. `docs/runbook.md`, "Editing
+a migration that has already been applied", says what it does to a store.
 
 Reads: `sql/migrations/*.sql` and the `helena_schema_migrations` table.
 Writes: whatever the migration files write, plus one ledger row per file.
@@ -394,6 +406,23 @@ TABLE_TYPES = {
 
 DECLARED_FIELDS = ("Layer", "Object", "Reads", "Read by")
 
+# One optional field, and the only one. It names the migration that drops this
+# definition and creates the object again, which is how a view is changed here --
+# RisingWave has no `CREATE OR REPLACE VIEW`.
+#
+# It exists because the alternative is a trap. After 0010 supersedes it, the
+# `CREATE VIEW helena_signal_entity_observations` in 0007 is a definition the
+# engine never uses: editing it to fix something silently does nothing, and
+# nothing in 0007 says so. This is what says so, in the file a person would open.
+#
+# It is checked in both directions rather than believed (`declarations()`), so it
+# cannot drift: a definition that declares it must actually be superseded by that
+# migration, and a definition that *is* superseded must declare it. That second
+# direction is what makes writing a superseding migration a retrofit of the file
+# it supersedes -- see `docs/runbook.md`, "Editing a migration that has already
+# been applied", for what that costs a store that has applied it.
+SUPERSEDED_BY = "Superseded by"
+
 _CREATE = re.compile(
     r"^CREATE\s+(TABLE|MATERIALIZED\s+VIEW|VIEW)\s+"
     r"(?:IF\s+NOT\s+EXISTS\s+)?([a-z][a-z0-9_]*)",
@@ -415,7 +444,9 @@ _DROP = re.compile(
     r"(?:IF\s+EXISTS\s+)?([a-z][a-z0-9_]*)\s*(CASCADE)?",
     re.MULTILINE,
 )
-_DECLARED_FIELD = re.compile(r"^--\s(Layer|Object|Reads|Read by):\s+(\S.*)$")
+_DECLARED_FIELD = re.compile(
+    r"^--\s(Layer|Object|Reads|Read by|Superseded by):\s+(\S.*)$"
+)
 _CONTINUATION = re.compile(r"^--\s{4,}(\S.*)$")
 _DECLARED_KIND = re.compile(r"(?:plain\s+)?(MATERIALIZED\s+VIEW|VIEW|TABLE)\b", re.I)
 # `Reads:` is a list and is parsed as one, so any relation name is recognised
@@ -453,6 +484,9 @@ class Declaration:
     readers_outside_the_engine: frozenset[str]
     migration: str
     line: int
+    # The migration that drops this definition and creates the object again, or
+    # None for a definition the engine still holds. See `SUPERSEDED_BY`.
+    superseded_by: str | None = None
 
     @property
     def materialized(self) -> bool:
@@ -493,8 +527,37 @@ def declarations(
       arrives before anything touched the engine, which is the whole shape of
       this module.
     """
+    found, _ = _walk(discover() if migrations is None else migrations)
+    return found
+
+
+def superseded(
+    migrations: Sequence[Migration] | None = None,
+) -> list[Declaration]:
+    """Every definition a later migration dropped and replaced, in the order it went.
+
+    These are the `CREATE`s in the tree that the engine does not hold: 0010
+    supersedes seven of 0007's, 0008's and 0009's, so editing one of those seven
+    where it was first written changes nothing anywhere. Each one carries the
+    `Superseded by:` naming what replaced it, checked by the walk rather than
+    trusted, and `superseded_by` here is that label.
+
+    A definition dropped and *not* replaced is not in this list. It was removed,
+    which is a different thing, and it declares no `Superseded by:`.
+    """
+    _, retired = _walk(discover() if migrations is None else migrations)
+    return retired
+
+
+def _walk(
+    migrations: Sequence[Migration],
+) -> tuple[dict[str, Declaration], list[Declaration]]:
+    """The live objects and the replaced definitions, from one pass in order."""
     found: dict[str, Declaration] = {}
-    for migration in discover() if migrations is None else migrations:
+    # Definitions that have been dropped, newest last, keyed by relation. A
+    # relation can appear more than once over a long enough history.
+    retired: list[Declaration] = []
+    for migration in migrations:
         lines = migration.sql.splitlines()
         for match in _statements(migration.sql):
             number = migration.sql.count("\n", 0, match.start()) + 1
@@ -524,7 +587,7 @@ def declarations(
                         f"{', '.join(still_reading)} still reads it. The engine "
                         f"refuses that drop; drop the readers first."
                     )
-                del found[relation]
+                retired.append(found.pop(relation))
                 continue
             if relation in found:
                 raise DeclarationError(
@@ -532,6 +595,31 @@ def declarations(
                     f"{found[relation].migration} created it already and "
                     f"nothing has dropped it"
                 )
+            replaced = next(
+                (d for d in reversed(retired) if d.relation == relation), None
+            )
+            if replaced is not None:
+                # This CREATE is what supersedes the dropped definition, so this
+                # is where its claim can be checked -- and where its silence can
+                # be caught.
+                if replaced.superseded_by is None:
+                    raise DeclarationError(
+                        f"{where}: {relation} is created again here, so the "
+                        f"definition in {replaced.migration} (line "
+                        f"{replaced.line}) is one the engine no longer holds "
+                        f"and nothing there says so. Add `-- {SUPERSEDED_BY}: "
+                        f"{migration.label}` to its declaration block. That is "
+                        f"an edit to an applied migration -- see docs/runbook.md, "
+                        f"\"Editing a migration that has already been applied\"."
+                    )
+                if replaced.superseded_by != migration.label:
+                    raise DeclarationError(
+                        f"{where}: {relation} is created again here, and the "
+                        f"definition in {replaced.migration} (line "
+                        f"{replaced.line}) says it is superseded by "
+                        f"{replaced.superseded_by!r} instead of "
+                        f"{migration.label!r}"
+                    )
             found[relation] = _declaration(
                 relation=relation,
                 kind=kind,
@@ -539,7 +627,21 @@ def declarations(
                 migration=migration.label,
                 line=number,
             )
-    return found
+    # A definition that claims to be superseded and never was is the same drift
+    # from the other side: the file points at a migration that does not replace
+    # it, and a reader would go looking for a definition that is not there.
+    for declaration in [*found.values(), *retired]:
+        if declaration.superseded_by is None:
+            continue
+        replacement = found.get(declaration.relation)
+        if replacement is None or replacement.migration != declaration.superseded_by:
+            raise DeclarationError(
+                f"{declaration.migration} line {declaration.line}: "
+                f"{declaration.relation} declares itself superseded by "
+                f"{declaration.superseded_by!r}, and no such migration creates "
+                f"it again"
+            )
+    return found, retired
 
 
 def _statements(sql: str) -> list[re.Match[str]]:
@@ -652,7 +754,28 @@ def _declaration(
         readers_outside_the_engine=outside,
         migration=migration,
         line=line,
+        superseded_by=_superseding_migration(fields, where),
     )
+
+
+def _superseding_migration(fields: Mapping[str, str], where: str) -> str | None:
+    """The migration label in `Superseded by:`, or None if the field is absent.
+
+    Only the first word is the label; a note may follow it, the way a note may
+    follow the list in `Reads:`. A block that named the migration and stopped
+    would be correct and unhelpful -- the useful sentence is the one saying that
+    the definition below it is not what the engine holds.
+    """
+    if SUPERSEDED_BY not in fields:
+        return None
+    label = fields[SUPERSEDED_BY].split(maxsplit=1)[0].rstrip(".")
+    if not FILENAME.match(label):
+        raise DeclarationError(
+            f"{where} declares `{SUPERSEDED_BY}: {label}`, which is not a "
+            f"migration file name. Name the file that drops this object and "
+            f"creates it again, as NNNN_name.sql."
+        )
+    return label
 
 
 def _kind(declared: str) -> str | None:

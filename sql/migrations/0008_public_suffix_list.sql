@@ -279,6 +279,9 @@ GROUP BY source_url, status, failure_reason;
 -- Read by:  helena_signal_domain_public_suffix and
 --           helena_signal_domain_registrable, below. tests/test_enrichment.py
 --           reads it to check the candidate set of a name directly.
+-- Superseded by: 0010_entity_value_null_guard.sql. That file drops this
+--               object and creates it again, so the definition below is
+--               not what the engine holds and editing it changes nothing.
 --
 -- The `GROUP BY` is the distinct-name step: a name observed in fifty contexts is
 -- normalized once. The row where `candidate_label_count = 0` is the anchor row
@@ -326,6 +329,9 @@ FROM (
 --           materialized view below and nothing else.
 -- Reads:    helena_signal_domain_suffix_candidates, helena_reference_public_suffix
 -- Read by:  helena_signal_domain_registrable, below.
+-- Superseded by: 0010_entity_value_null_guard.sql. That file drops this
+--               object and creates it again, so the definition below is
+--               not what the engine holds and editing it changes nothing.
 --
 -- This is the algorithm's steps 2 to 4 as one aggregate. The `CASE` on
 -- `bool_or(is_exception)` is step 2's "an exception rule wins outright": where
@@ -370,6 +376,9 @@ GROUP BY c.observed_name, r.snapshot_version;
 -- Reads:    helena_signal_domain_suffix_candidates,
 --           helena_signal_domain_public_suffix
 -- Read by:  helena_signal_context_domains, below, and tests/test_enrichment.py.
+-- Superseded by: 0010_entity_value_null_guard.sql. That file drops this
+--               object and creates it again, so the definition below is
+--               not what the engine holds and editing it changes nothing.
 --
 -- The join is a LEFT join and the four statuses are why. A name reaches this
 -- view whatever happened to it, and `registrable_domain_status` says which of
@@ -434,6 +443,9 @@ WHERE n.candidate_label_count = 0;
 --           (D3), which needs the name as observed to match a feed and the
 --           registrable domain to compare scope, and for the triage rendering,
 --           which needs both for the same reason a reader does.
+-- Superseded by: 0010_entity_value_null_guard.sql. That file drops this
+--               object and creates it again, so the definition below is
+--               not what the engine holds and editing it changes nothing.
 --
 -- The join is an INNER join on the entity value, and it cannot drop a row:
 -- helena_signal_domain_registrable is derived from these same values, one row

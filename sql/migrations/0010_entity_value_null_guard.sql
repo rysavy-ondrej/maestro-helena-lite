@@ -57,6 +57,17 @@
 -- three new ones came with it: a drop of something nothing created, a drop of
 -- something still read, and a CASCADE. See `helena.migrations.declarations`.
 --
+-- It also gained a fifth declared field, `Superseded by:`, and this file is why.
+-- The seven `CREATE`s in 0007, 0008 and 0009 that this one replaces are now
+-- definitions the engine does not hold: editing one of them to fix something
+-- would change nothing anywhere, and nothing in those files said so. Each now
+-- carries the field, naming this file, and the walk checks the claim in both
+-- directions -- so adding it was an edit to three applied migrations and their
+-- checksums moved. `docs/runbook.md` says what that does to a store that has
+-- already migrated. That cost is the point: it is paid when the superseding file
+-- is written, by the person who knows, instead of by whoever opens the dead
+-- definition a year later.
+--
 -- ## What it does not do
 --
 -- Nothing backfills. A deployment that already stored the null-valued rows has

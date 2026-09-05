@@ -344,8 +344,18 @@ both hashes, and it is correct: the engine does not hold what the file says.
 
 A store that has had the migrations applied before task 17 (which retrofitted the
 declaration comments into 0001–0004 and 0008) has to be dropped and re-migrated.
-There is no in-place repair short of writing the new checksums into the ledger by
-hand, which is the same act with the evidence removed.
+The same holds for a store migrated before `0010_entity_value_null_guard.sql`,
+which retrofitted `Superseded by:` into the seven definitions it replaces, in
+0007, 0008 and 0009. There is no in-place repair short of writing the new
+checksums into the ledger by hand, which is the same act with the evidence
+removed.
+
+**This is the standing cost of `Superseded by:`, and it is deliberate.** A
+migration that drops and recreates an object has to go back and mark the
+definition it replaced, because the alternative is leaving a `CREATE` in the tree
+that the engine never holds with nothing saying so. `helena.migrations` refuses
+the migration until the mark is there, so the choice is made when the file is
+written rather than discovered by whoever edits the dead definition later.
 
 ### Bumping the aggregation version
 
