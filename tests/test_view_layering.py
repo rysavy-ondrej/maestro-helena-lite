@@ -322,6 +322,110 @@ CREATE {create} probe_thing AS SELECT 1 AS a;
     )["probe_thing"].read_by == frozenset()
 
 
+# --- Dropping, which is the only way to change a view ------------------------
+#
+# RisingWave has no `CREATE OR REPLACE VIEW`, so changing one is dropping it and
+# creating it again -- what sql/migrations/0010_entity_value_null_guard.sql does.
+# `declarations()` therefore walks the statements in the order they run instead
+# of collecting every `CREATE`, and these are the four things that walk can see.
+
+_DECLARED = """-- Layer:    signal
+-- Object:   VIEW (plain).
+-- Reads:    {reads}
+-- Read by:  tests/test_view_layering.py.
+CREATE VIEW {name} AS SELECT 1 AS a;
+"""
+
+
+def _view(name: str, reads: str = "nothing.") -> str:
+    return _DECLARED.format(name=name, reads=reads)
+
+
+def test_a_view_recreated_after_a_drop_is_the_later_declaration(tmp_path: Path):
+    """The whole point: a migration may change a view by replacing it.
+
+    Before this, `declarations()` refused any relation created twice anywhere in
+    the sequence, which made the pattern sql/migrations/0009's own head
+    prescribes -- "a new migration that drops and recreates every object here" --
+    impossible to carry out.
+    """
+    declared = migrations.declarations(
+        synthetic(
+            tmp_path,
+            _view("probe_thing")
+            + "\nDROP VIEW probe_thing;\n\n"
+            + _DECLARED.format(name="probe_thing", reads="probe_other.").replace(
+                "-- Layer:    signal", "-- Layer:    analytical"
+            ),
+        )
+    )
+    assert declared["probe_thing"].layer == "analytical"
+    assert declared["probe_thing"].reads == frozenset({"probe_other"})
+
+
+def test_a_view_created_twice_without_a_drop_is_still_refused(tmp_path: Path):
+    with pytest.raises(DeclarationError, match="created twice"):
+        migrations.declarations(
+            synthetic(tmp_path, _view("probe_thing") + "\n" + _view("probe_thing"))
+        )
+
+
+def test_dropping_something_no_migration_created_is_refused(tmp_path: Path):
+    with pytest.raises(DeclarationError, match="nothing has created it"):
+        migrations.declarations(synthetic(tmp_path, "DROP VIEW probe_thing;\n"))
+
+
+def test_dropping_something_still_read_is_refused(tmp_path: Path):
+    """The engine refuses this drop; refusing it here is refusing it earlier.
+
+    Nothing has touched the engine when this fires, which is the shape of every
+    other refusal in `helena.migrations`.
+    """
+    sql = (
+        _view("probe_thing")
+        + "\n"
+        + _view("probe_reader", reads="probe_thing.")
+        + "\nDROP VIEW probe_thing;\n"
+    )
+    with pytest.raises(DeclarationError, match="probe_reader still reads it"):
+        migrations.declarations(synthetic(tmp_path, sql))
+
+
+def test_a_cascading_drop_is_refused(tmp_path: Path):
+    """A file whose effect is larger than its text cannot be reviewed.
+
+    `DROP ... CASCADE` on the entity view takes six objects it does not name.
+    0010 drops all seven by name and in order instead, which is why the order is
+    checkable at all.
+    """
+    sql = _view("probe_thing") + "\nDROP VIEW probe_thing CASCADE;\n"
+    with pytest.raises(DeclarationError, match="CASCADE"):
+        migrations.declarations(synthetic(tmp_path, sql))
+
+
+def test_the_repository_drops_nothing_it_does_not_recreate():
+    """Over the real migrations, and not a synthetic one.
+
+    0010 drops seven objects and creates seven; a file that dropped one and
+    forgot it would leave a relation other declarations still name as a reader,
+    which `layering_violations` reports from the other side. This asserts the
+    count directly so the failure names the missing object rather than its
+    readers.
+    """
+    declared = migrations.declarations()
+    for name in (
+        "helena_signal_entity_observations",
+        "helena_signal_context_entities",
+        "helena_signal_context_entities_retained",
+        "helena_signal_domain_suffix_candidates",
+        "helena_signal_domain_public_suffix",
+        "helena_signal_domain_registrable",
+        "helena_signal_context_domains",
+    ):
+        assert name in declared, f"{name} is dropped and never recreated"
+        assert declared[name].migration == "0010_entity_value_null_guard.sql"
+
+
 def test_a_declaration_that_disagrees_with_its_own_create_is_refused(tmp_path: Path):
     """The field says materialized, the SQL says plain. That is the drift."""
     with pytest.raises(DeclarationError, match="declares itself a MATERIALIZED VIEW"):

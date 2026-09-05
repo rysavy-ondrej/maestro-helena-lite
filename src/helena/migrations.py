@@ -21,6 +21,10 @@ Everything else it does is refusal:
 | the connection is not in autocommit | RisingWave DDL outside autocommit is not visible to the next statement |
 | an object has no declaration block, or one missing a field | a view that does not say what it is and what reads it is how a layer boundary rots |
 | a materialized view names nobody who reads it | that is a streaming job and its state, paid for rows nothing looks at |
+| an object is created while one of that name is live | the engine refuses it, and the file believes it created something |
+| an object is dropped that nothing created | the file is undoing something no file did |
+| an object is dropped while a live object still reads it | the engine refuses that drop; the dependents come first |
+| a drop says `CASCADE` | it takes objects the file does not name, and a file whose effect is larger than its text cannot be reviewed |
 
 None of those touch the engine before they fire, except the ones that have to
 read the ledger.
@@ -55,6 +59,16 @@ only place that block can live, and this module is where it is read:
 says, and `reads_the_engine_records()` is how what it says is checked against
 `rw_catalog.rw_depend` rather than believed. See `tests/test_view_layering.py`
 and `docs/decisions/0016-view-layering-and-materialization-policy.md`.
+
+**Changing a view means dropping it and creating it again**, because RisingWave
+has no `CREATE OR REPLACE VIEW` — and dropping it means dropping everything
+standing on it first. `declarations()` therefore reports what the schema holds
+*after every migration has run* rather than every `CREATE` any of them contains:
+it walks the statements in the order they execute and checks each against what
+exists at that point. `sql/migrations/0010_entity_value_null_guard.sql` is the
+first file to use this, and it drops seven objects by name rather than one with
+`CASCADE`, which this module refuses for the reason the declaration blocks exist
+at all.
 
 Reads: `sql/migrations/*.sql` and the `helena_schema_migrations` table.
 Writes: whatever the migration files write, plus one ledger row per file.
@@ -385,6 +399,22 @@ _CREATE = re.compile(
     r"(?:IF\s+NOT\s+EXISTS\s+)?([a-z][a-z0-9_]*)",
     re.MULTILINE,
 )
+# A migration may take an object away as well as add one. RisingWave has no
+# `CREATE OR REPLACE VIEW` (measured: "Feature is not yet implemented"), so
+# *changing* a view is dropping it and creating it again, which is what
+# sql/migrations/0009_retention_boundary.sql's head means by "a new migration
+# that drops and recreates every object here".
+#
+# `CASCADE` is deliberately not in this pattern, and a migration in this
+# repository must not use it. A cascading drop takes objects the file does not
+# name -- seven of them, for the entity views -- and a file whose effect is
+# larger than its text is exactly the thing the declaration blocks exist to
+# prevent. Drop dependents first, by name, and the file says what it destroys.
+_DROP = re.compile(
+    r"^DROP\s+(TABLE|MATERIALIZED\s+VIEW|VIEW)\s+"
+    r"(?:IF\s+EXISTS\s+)?([a-z][a-z0-9_]*)\s*(CASCADE)?",
+    re.MULTILINE,
+)
 _DECLARED_FIELD = re.compile(r"^--\s(Layer|Object|Reads|Read by):\s+(\S.*)$")
 _CONTINUATION = re.compile(r"^--\s{4,}(\S.*)$")
 _DECLARED_KIND = re.compile(r"(?:plain\s+)?(MATERIALIZED\s+VIEW|VIEW|TABLE)\b", re.I)
@@ -439,31 +469,90 @@ def declarations(
 ) -> dict[str, Declaration]:
     """Every object the migrations create, keyed by relation name.
 
+    The result is what the schema holds **after every migration has run**, not
+    every `CREATE` any of them contains. The two differ once a migration drops an
+    object and creates it again, which is the only way to change a view here:
+    RisingWave has no `CREATE OR REPLACE VIEW`. So the statements are walked in
+    order -- in file order within a migration, in version order across them --
+    and each one is checked against what exists at that point.
+
     Raises `DeclarationError` when an object has no declaration block, when a
-    block is missing a field, when `Reads:` is not a list of relations, or when
-    a materialized view names nobody who reads it -- a materialized view with no
+    block is missing a field, when `Reads:` is not a list of relations, when a
+    materialized view names nobody who reads it -- a materialized view with no
     reader is the 42 % `concept/03-architecture.md` measures, paid for rows
-    nothing looks at.
+    nothing looks at -- and for the three things a walk in order can see that a
+    set of `CREATE`s cannot:
+
+    * an object created while one of that name already exists. This is the check
+      that was here before, and it now means what it says rather than "created
+      twice anywhere in the sequence": a recreation after a drop is legal.
+    * an object dropped that does not exist at that point -- a file undoing
+      something no file did.
+    * an object dropped while a surviving object still declares that it reads
+      it. RisingWave refuses that drop, and refusing it here means the refusal
+      arrives before anything touched the engine, which is the whole shape of
+      this module.
     """
     found: dict[str, Declaration] = {}
     for migration in discover() if migrations is None else migrations:
         lines = migration.sql.splitlines()
-        for match in _CREATE.finditer(migration.sql):
+        for match in _statements(migration.sql):
             number = migration.sql.count("\n", 0, match.start()) + 1
+            where = f"{migration.label} line {number}"
             relation = match.group(2)
+            kind = " ".join(match.group(1).split()).upper()
+            if match.re is _DROP:
+                if match.group(3):
+                    raise DeclarationError(
+                        f"{where}: {relation} is dropped with CASCADE, which "
+                        f"takes objects this file does not name. Drop the "
+                        f"dependents first, by name, so the file says what it "
+                        f"destroys."
+                    )
+                if relation not in found:
+                    raise DeclarationError(
+                        f"{where}: {relation} is dropped, and nothing has "
+                        f"created it"
+                    )
+                still_reading = sorted(
+                    name for name, declaration in found.items()
+                    if name != relation and relation in declaration.reads
+                )
+                if still_reading:
+                    raise DeclarationError(
+                        f"{where}: {relation} is dropped while "
+                        f"{', '.join(still_reading)} still reads it. The engine "
+                        f"refuses that drop; drop the readers first."
+                    )
+                del found[relation]
+                continue
             if relation in found:
                 raise DeclarationError(
-                    f"{migration.label} line {number}: {relation} is created "
-                    f"twice; {found[relation].migration} created it already"
+                    f"{where}: {relation} is created twice; "
+                    f"{found[relation].migration} created it already and "
+                    f"nothing has dropped it"
                 )
             found[relation] = _declaration(
                 relation=relation,
-                kind=" ".join(match.group(1).split()).upper(),
+                kind=kind,
                 block=_block_above(lines, number),
                 migration=migration.label,
                 line=number,
             )
     return found
+
+
+def _statements(sql: str) -> list[re.Match[str]]:
+    """Every `CREATE` and `DROP` in one migration, in the order it runs.
+
+    Two patterns over one string, merged by position, because the order the
+    statements appear in is the order the engine applies them and a drop that
+    was checked out of order would be checked against a schema that never
+    existed.
+    """
+    return sorted(
+        [*_CREATE.finditer(sql), *_DROP.finditer(sql)], key=lambda m: m.start()
+    )
 
 
 def _block_above(lines: Sequence[str], number: int) -> list[str]:
