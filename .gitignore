@@ -13,7 +13,7 @@ secrets/
 # Third-party binaries the project runs, not builds (see bin/README.md).
 bin/blink
 bin/risingwave
-bin/lib/
+bin/lib
 
 # Engine state, process ids and logs from a local run (scripts/dev-up).
 .rwdata/
@@ -23,6 +23,13 @@ bin/lib/
 # A small extract committed as a test fixture is fine; the full files are not.
 data/threatfox/
 data/netify/
+
+# Flow captures held for demonstration and measurement. Unlike
+# data/ingest/flow-sample.jsonl - 62 records of the maintainer's own host, with a
+# recorded clearance and a datasheet - these carry whole networks of traffic and
+# no such clearance is recorded for them. Measure against them in place; commit
+# an extract only once one is.
+data/demo
 
 # The runner budget cache: transient state, rewritten on every run.
 # Tracking it makes the linear-history gate fire on its own churn.

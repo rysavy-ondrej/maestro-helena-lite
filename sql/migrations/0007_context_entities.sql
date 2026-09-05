@@ -166,6 +166,9 @@
 --           helena_flatten_http_requests
 -- Read by:  helena_signal_context_entities, below. tests/test_context.py reads
 --           it directly to check the extraction rules one branch at a time.
+-- Superseded by: 0010_entity_value_null_guard.sql. That file drops this
+--               object and creates it again, so the definition below is
+--               not what the engine holds and editing it changes nothing.
 --
 -- Each branch of the union names one place an entity value is observed and sets
 -- the one flag that says so. The branch set is the table in
@@ -335,6 +338,9 @@ JOIN (
 --           (D3), which joins these rows against the enrichment reference
 --           tables, and for the triage rendering, which needs per-domain and
 --           per-address records rather than arrays.
+-- Superseded by: 0010_entity_value_null_guard.sql. That file drops this
+--               object and creates it again, so the definition below is
+--               not what the engine holds and editing it changes nothing.
 --
 -- Two levels of aggregation, and both are load-bearing:
 --

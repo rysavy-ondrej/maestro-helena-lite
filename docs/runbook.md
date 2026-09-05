@@ -344,8 +344,18 @@ both hashes, and it is correct: the engine does not hold what the file says.
 
 A store that has had the migrations applied before task 17 (which retrofitted the
 declaration comments into 0001–0004 and 0008) has to be dropped and re-migrated.
-There is no in-place repair short of writing the new checksums into the ledger by
-hand, which is the same act with the evidence removed.
+The same holds for a store migrated before `0010_entity_value_null_guard.sql`,
+which retrofitted `Superseded by:` into the seven definitions it replaces, in
+0007, 0008 and 0009. There is no in-place repair short of writing the new
+checksums into the ledger by hand, which is the same act with the evidence
+removed.
+
+**This is the standing cost of `Superseded by:`, and it is deliberate.** A
+migration that drops and recreates an object has to go back and mark the
+definition it replaced, because the alternative is leaving a `CREATE` in the tree
+that the engine never holds with nothing saying so. `helena.migrations` refuses
+the migration until the mark is there, so the choice is made when the file is
+written rather than discovered by whoever edits the dead definition later.
 
 ### Bumping the aggregation version
 
@@ -398,13 +408,20 @@ records a capture held is a fact about the retained file;
 `helena.normalizer.Quarantine.counts(capture)` brings the two together and
 refuses a total that does not reconcile.
 
-**A rising `contract_violation` rate is the number to watch.** Field requiredness
-in this contract was measured from one capture of one host over 130.8 seconds
-(`docs/decisions/0010-capture-identity.md`), so a producer that omits a field
-marked required here is quarantined rather than accepted. The answer to a high
-rate is a **new observation of the input** — `detail` names the field and
-`payload` is the record — not a field loosened on a hunch. Loosening one is a
-contract change and gets its own increment.
+**A rising `contract_violation` rate is the number to watch**, and it has already
+been collected on once. Field requiredness was measured from one capture of one
+host over 130.8 seconds; a second capture — a day of one network — was then
+refused **in its entirety**, a rate of 100 %, and requiredness was re-derived
+over both (`docs/decisions/0010-capture-identity.md`, addendum). So a producer
+that omits a field marked required here is still quarantined rather than
+accepted, and the answer to a high rate is still a **new observation of the
+input** — `detail` names the field and `payload` is the record — not a field
+loosened on a hunch. Loosening one is a contract change and gets its own
+increment, which is exactly what that addendum records.
+
+What that episode is worth operationally: a 100 % rate with every row naming the
+same handful of fields is a producer the contract has never seen, not a broken
+sensor. Read the fields before reading the number.
 
 Re-ingesting a capture rewrites the same rows rather than doubling them: the key
 is the ingestion identity plus the capture and offset, and an `INSERT` onto an

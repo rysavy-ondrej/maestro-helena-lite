@@ -14,12 +14,14 @@ capture can reach the event id.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
 import re
 import subprocess
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -63,7 +65,9 @@ from helena.normalizer import (
     QuarantineCounts,
     QuarantinedRecord,
     RawRecordReference,
+    TcpSegment,
     TlsObservation,
+    UdpDatagram,
     adapter_for,
     consume_ingest_topic,
     describe_capture,
@@ -152,6 +156,96 @@ def test_every_fixture_record_validates_and_round_trips(
     assert FlowRecord.model_validate_json(line).as_supplied() == json.loads(line)
 
 
+# The day capture is the second observation the contract's requiredness rests on
+# (see `helena.normalizer`, "Which fields are required"). It is not in the
+# repository: 239 850 records of a whole network's traffic, carrying no clearance
+# of the kind `data/ingest/README.md` records for the sample, kept out by
+# `.gitignore` and measured where it lies. So these tests skip when it is absent
+# rather than failing, and the
+# second one exists so that a *present* capture cannot quietly stop being
+# evidence for the fields the first one made optional.
+DAY_CAPTURE = PROJECT_ROOT / "data" / "demo" / "20250920"
+day_capture_present = pytest.mark.skipif(
+    not DAY_CAPTURE.is_dir(),
+    reason=f"{DAY_CAPTURE} is not present; it is deliberately not committed",
+)
+
+
+def _day_capture_records() -> Iterator[tuple[Path, int, bytes]]:
+    for path in sorted(DAY_CAPTURE.glob("*.ndjson.gz")):
+        with gzip.open(path, "rb") as handle:
+            for offset, line in enumerate(handle):
+                yield path, offset, line.rstrip(b"\n")
+
+
+@day_capture_present
+def test_every_day_capture_record_validates_and_round_trips():
+    """The whole second capture, parsed and compared against its own JSON.
+
+    One test rather than 239 850 parametrized ones, so it reports the first few
+    failures and how many there were instead of flooding the run. This is the
+    same statement `test_every_real_record_validates_and_round_trips` makes about
+    the 62-record sample, at four orders of magnitude more traffic: the contract
+    invented no field, dropped none and coerced no type.
+
+    It ran at 100 % refusal before the requiredness was re-measured over both
+    captures, and that number is why this test exists rather than a note saying
+    the capture was checked once.
+    """
+    refused: list[str] = []
+    drifted: list[str] = []
+    records = 0
+    for path, offset, line in _day_capture_records():
+        records += 1
+        try:
+            parsed = FlowRecord.model_validate_json(line)
+        except ValidationError as error:
+            if len(refused) < 5:
+                refused.append(f"{path.name}:{offset}: {error.errors()[0]}")
+            continue
+        if parsed.as_supplied() != json.loads(line) and len(drifted) < 5:
+            drifted.append(f"{path.name}:{offset}")
+    assert records > 0, f"{DAY_CAPTURE} holds no records"
+    assert refused == [], f"{len(refused)}+ of {records} records refused: {refused}"
+    assert drifted == [], f"records that did not round-trip: {drifted}"
+
+
+@day_capture_present
+def test_the_day_capture_exercises_what_it_made_optional():
+    """The capture still carries the observations the contract was widened for.
+
+    Without this, replacing the directory with a capture that happens to omit
+    `udp.dgms` would leave the widening in place with nothing behind it, and the
+    module docstring's measurements would be describing a file nobody has.
+    """
+    seen: set[str] = set()
+    for _, _, line in _day_capture_records():
+        record = FlowRecord.model_validate_json(line)
+        if record.tx is not None:
+            seen.add("tx")
+        if record.udp is not None and record.udp.dgms:
+            seen.add("udp.dgms")
+        if record.tcp is not None and record.tcp.segs:
+            seen.add("tcp.segs")
+        if record.tls is not None:
+            if any(rec.dir is not None for rec in record.tls.recs):
+                seen.add("tls.recs.dir")
+            if record.tls.sni is None:
+                seen.add("tls without a handshake")
+            if record.tls.ja4s is None:
+                seen.add("tls.ja4s absent")
+        for exchange in (record.http, record.http2):
+            for message in (exchange.req or []) if exchange else []:
+                if message.rnum is not None:
+                    seen.add("rnum")
+        if seen >= {
+            "tx", "udp.dgms", "tcp.segs", "tls.recs.dir",
+            "tls without a handshake", "tls.ja4s absent", "rnum",
+        }:
+            return
+    raise AssertionError(f"the day capture no longer exercises: {seen}")
+
+
 def _contract_models(root: type[BaseModel] = FlowRecord) -> set[type[BaseModel]]:
     """Every model reachable from `root`, including the nested ones.
 
@@ -176,9 +270,15 @@ def _contract_models(root: type[BaseModel] = FlowRecord) -> set[type[BaseModel]]
 
 
 def test_the_contract_reaches_every_nested_model():
-    """The absence tests below are only as good as this walk."""
-    assert len(_contract_models()) == 15
+    """The absence tests below are only as good as this walk.
+
+    Seventeen since the day capture: `TcpSegment` and `UdpDatagram` are reached
+    only through an optional list on an optional layer, which is exactly the
+    shape a walk that stopped at required fields would miss.
+    """
+    assert len(_contract_models()) == 17
     assert {DnsObservation, TlsObservation, HttpObservation} <= _contract_models()
+    assert {TcpSegment, UdpDatagram} <= _contract_models()
 
 
 @pytest.mark.parametrize("model", sorted(_contract_models(), key=lambda m: m.__name__))

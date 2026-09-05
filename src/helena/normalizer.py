@@ -69,33 +69,66 @@ from. The datasheet in
 identifiers, GUIDs, user-agent strings) and confirms what it does not (no
 credentials, tokens, cookies or authorization headers).
 
-## Which fields are required, and the assumption in that
+## Which fields are required, and how that was measured
 
-**Open assumption, and the likeliest source of a false quarantine.** The field
-set and the requiredness of every field were measured against
-`data/ingest/flow-sample.jsonl` — 62 records, one host, 130.8 s — and that is
-the only flow-record corpus that exists. The rule applied:
+The field set and the requiredness of every field are measured against every
+flow-record capture this project holds, by one mechanical rule:
 
 - a key is **present in the contract** only if it was observed (no invented
   fields);
-- it is **required** if it was present in every observation of its kind;
-- it is **optional** if the sample shows it absent at least once — including
-  when the counter-example comes from the other HTTP version, because an HTTP
-  response's `content_type` is the same fact whether it was observed over
-  HTTP/1.1 or HTTP/2.
+- it is **required** only if it was present in **every** observation of its
+  kind, in **every** capture;
+- it is **optional** otherwise — including when the counter-example comes from
+  the other HTTP version, because an HTTP response's `content_type` is the same
+  fact whether it was observed over HTTP/1.1 or HTTP/2.
 
-`data/ingest/README.md` warns in as many words that this capture's ratios
-describe the capture and not the schema, so **a field that is required here
-because 15 observations all had it may be optional in reality**, and a producer
-that omits it will be quarantined rather than accepted. That is the intended
-direction of the error — drift surfaces, countable, with the raw record kept —
-but the quarantine rate is the number to watch when a second capture arrives,
-and the fix is a new observation of the input, not a loosened field.
+Two captures have been measured:
 
-HTTP/1 and HTTP/2 are separate models because their observed key sets are
-disjoint in a way that is structural rather than incidental: `num` (the
-request/response ordering within the flow) and `content_len` appear on HTTP/1
-observations and never on HTTP/2 ones.
+| Capture | Records | Sources | Span |
+| --- | --- | --- | --- |
+| `data/ingest/flow-sample.jsonl` | 62 | 1 host | 130.8 s |
+| `data/demo/20250920/` (143 files) | 239 850 | 3 199 addresses | 23.97 h |
+
+**The second refused 100 % of its records against the contract measured from the
+first**, which is the outcome the first measurement predicted in as many words.
+What those 239 850 quarantined records were made of is worth writing down,
+because two different things were wrong and only one of them was drift.
+
+*Observations the earlier producer did not send at all* — `tx` on the flow (all
+239 850 records, and on its own enough to refuse every one under
+`extra="forbid"`), `udp.dgms` (192 724), `tcp.segs` (47 126) and
+`tls.recs[].dir` (23 354). `dgms` and `segs` are per-packet arrays shaped
+exactly like the `tls.recs` this contract already carried, so there was a place
+to put them. A field with no place here would have been the conversation the
+adapter boundary exists to force rather than an addition to this list.
+
+*Requiredness measured too tightly* — `tls.ja4s` was required and this producer
+never sends it; the other fourteen TLS handshake keys sit at about 64 % (64.2 to
+64.4, depending on the key) because a flow captured mid-connection has records
+but no handshake. `dns.rcode`,
+`dns.responses`, `dns.queries`, `dns.responses[].ttl`, `http.req`, `http.res`
+and `http2.res` are the same error at smaller scale. None of this was drift: it
+was 62 records of one host mistaken for the schema.
+
+And one **rename**: `http.req[].num` and `http.res[].num` arrive as `rnum` from
+this producer, which also puts `rnum` on HTTP/2, where no ordering field had
+been seen before. Both spellings are in the contract and both are optional,
+each being absent from one capture. Neither is mapped onto the other — that
+would make the stored record no longer the record as read.
+
+**What this cost.** Twenty-eight fields moved from required to optional (and
+fifteen new ones arrived; none was removed and none tightened), so a producer
+that stops sending one of the twenty-eight is now accepted where it would once
+have been quarantined. That is a real loss of drift detection, and it is the price of
+the rule above rather than a concession to convenience: requiredness is a claim
+about every capture, and a claim two captures contradict was never true. The
+direction of a fix is a further observation of the input, never a field
+tightened back on a hunch.
+
+HTTP/1 and HTTP/2 remain separate models. Their key sets are no longer disjoint
+— `rnum` is on both — but `content_len` still appears only on HTTP/1, and the
+two versions stay apart because a reader that merged them would have to invent a
+rule for which spelling of the ordering field it meant.
 
 ## Absence is not emptiness
 
@@ -107,6 +140,12 @@ them: a record with no application layer at all leaves `dns`, `tls`, `http` and
 was not negotiated. Nothing here defaults a missing list to `[]`, and
 `FlowRecord.as_supplied()` is the round trip that proves it, field by field,
 against all 62 real records.
+
+The day capture adds a third state one level down, and it is the one to be
+careful with: `dns` observed but `dns.responses` absent is not `responses == []`
+and not a flow without DNS. Optional-and-absent, observed-and-empty, and
+layer-not-observed are three different facts, and this contract keeps them
+three.
 
 ## One adapter per format, and what that boundary is holding back
 
@@ -197,12 +236,15 @@ Maturity: experimental — the contract, the capture registry, the adapters,
 identity stamping, quarantine and the ingest path are exercised by
 `tests/test_normalizer.py`, against all 62 real records, the committed capture
 fixtures, a real engine and the pinned broker. What has been demonstrated is
-one capture published to a topic, consumed back, normalized and stored, with the
-counters reconciling against the file; what has not is a live producer, a
-capture still being written, or any broker but this one. The field-requiredness
-claim above rests on one capture from one host. The second adapter demonstrates
-that the boundary holds for a format that renames and re-nests; it is not
-evidence about a format that carries something this contract has no place for.
+captures published to a topic, consumed back, normalized and stored, with the
+counters reconciling against the files — at both scales, 62 records and 239 850;
+what has not is a live producer, a capture still being written, or any broker but
+this one. The field-requiredness claim above now rests on two captures from two
+producers, one of them a day of a whole network; it is a much better-supported
+claim than it was, and it is still a claim about two captures. The second adapter
+demonstrates that the boundary holds for a format that renames and re-nests; it
+is not evidence about a format that carries something this contract has no place
+for.
 """
 
 from __future__ import annotations
@@ -286,8 +328,10 @@ __all__ = [
     "QuarantinedRecord",
     "RawRecordReference",
     "TcpObservation",
+    "TcpSegment",
     "TlsObservation",
     "TlsRecord",
+    "UdpDatagram",
     "UdpObservation",
     "adapter_for",
     "consume_ingest_topic",
@@ -332,25 +376,68 @@ class IpObservation(Observed):
     precv: int
 
 
+class TcpSegment(Observed):
+    """One TCP segment: when it went, which way, how big, and its flags.
+
+    Observed on the day capture only (1 481 439 segments), where every segment
+    carries all four keys. `dir` is a string here (`'>'` / `'<'`) while
+    `TlsRecord.dir` is a signed integer — two producers' ways of writing the
+    same idea, and neither is normalized into the other because this contract
+    stores the record as supplied.
+
+    `ts` is a float that arrives as an integer on whole-second segments, which
+    strict mode widens (an integer epoch second is still a time).
+    """
+
+    ts: float
+    dir: str
+    len: int
+    flags: str
+
+
 class TcpObservation(Observed):
-    """The TCP port pair. Present on 31 of the 62 sampled records."""
+    """The TCP port pair, and the per-segment detail when the producer sends it.
+
+    The ports were present on all 31 TCP records of `flow-sample.jsonl` and all
+    47 126 of the day capture. `segs` is absent from the first and present on
+    every record of the second, which is what makes it optional.
+    """
 
     srcport: int
     dstport: int
+    segs: list[TcpSegment] | None = None
+
+
+class UdpDatagram(Observed):
+    """One UDP datagram: when it went, which way, and how big.
+
+    The UDP counterpart of `TcpSegment`, minus the flags a datagram does not
+    have. Observed on the day capture only (566 182 datagrams), all three keys
+    on every one.
+    """
+
+    ts: float
+    dir: str
+    len: int
 
 
 class UdpObservation(Observed):
-    """The UDP port pair. Present on the other 31."""
+    """The UDP port pair, and the per-datagram detail when the producer sends it.
+
+    The ports were present on all 31 UDP records of `flow-sample.jsonl` and all
+    192 724 of the day capture; `dgms` only on the second.
+    """
 
     srcport: int
     dstport: int
+    dgms: list[UdpDatagram] | None = None
 
 
 class DnsQuery(Observed):
     """One question in the flow's DNS traffic: the name and the query type."""
 
     qn: str
-    qt: str
+    qt: str | None = None
 
 
 class DnsResponse(Observed):
@@ -366,32 +453,42 @@ class DnsResponse(Observed):
     rr: str
     qn: str
     rt: str
-    ttl: int
     rv: str
+    ttl: int | None = None
 
 
 class DnsObservation(Observed):
     """The DNS observed inline on the flow.
 
-    `responses == []` is an answered-with-nothing lookup and is not the same
-    thing as a flow with no `dns` at all, which is `None`.
+    There are three states here and they are all different. `responses == []` is
+    an answered-with-nothing lookup; `responses is None` is a flow whose DNS was
+    observed without an answer section at all (100 records of the day capture);
+    and a flow with no `dns` key is one where no DNS was observed. Nothing
+    defaults one into another.
     """
 
-    rcode: int
-    responses: list[DnsResponse]
-    queries: list[DnsQuery]
+    rcode: int | None = None
+    responses: list[DnsResponse] | None = None
+    queries: list[DnsQuery] | None = None
 
 
 class TlsRecord(Observed):
-    """One TLS record: version, content type, and a signed length.
+    """One TLS record: version, a signed length, and — later — an explicit direction.
 
-    The sign of `len` is the direction (175 of the 500 sampled records are
-    negative), which is why it is an `int` and not a size.
+    The sign of `len` is the direction (175 of `flow-sample.jsonl`'s 500 records
+    are negative), which is why it is an `int` and not a size. The day capture's
+    producer also sends `dir` as `+1`/`-1` alongside it, saying the same thing
+    twice; both are kept as supplied, because collapsing them here would make
+    the stored record no longer the record as read.
+
+    `ct` is absent from 4.0 % of the day capture's 426 566 records, so it is
+    optional even though `flow-sample.jsonl` had it on all 500.
     """
 
     ver: str
-    ct: int
     len: int
+    ct: int | None = None
+    dir: int | None = None
 
 
 class TlsObservation(Observed):
@@ -399,28 +496,37 @@ class TlsObservation(Observed):
 
     The `c*` fields are the client's offer and the `s*` fields the server's
     selection; `ja3`/`ja4` fingerprint the client, `ja3s`/`ja4s` the server.
-    Every one of the sixteen keys was present on all 25 sampled TLS
-    observations, and several arrive **observed but empty** — `alpn == []` where
-    no protocol was negotiated, `ssvers == []` where the server sent no
-    supported-versions extension. Empty is not absent.
+    Several arrive **observed but empty** — `alpn == []` where no protocol was
+    negotiated, `ssvers == []` where the server sent no supported-versions
+    extension. Empty is not absent.
+
+    Only `recs` is required, and the reason the other fifteen are not is worth
+    keeping apart from ordinary absence. All sixteen keys were present on all 25
+    of `flow-sample.jsonl`'s TLS observations; on the day capture's 23 362 they
+    run at 64.4 %, because **a flow captured mid-connection carries records but
+    no handshake** — there is nothing to fingerprint and no SNI to read. `ja4s`
+    is a third case again: this producer never emits it at all. So an absent
+    `sni` means "no handshake was seen", not "no name was sent", and a reader
+    that treated the two alike would be counting the capture's start time as a
+    property of the traffic.
     """
 
     recs: list[TlsRecord]
-    cver: str
-    cciphers: list[str]
-    cexts: list[str]
-    sni: str
-    alpn: list[str]
-    csigs: list[str]
-    csvers: list[str]
-    ja3: str
-    ja4: str
-    sver: str
-    scipher: str
-    sexts: list[str]
-    ssvers: list[str]
-    ja3s: str
-    ja4s: str
+    cver: str | None = None
+    cciphers: list[str] | None = None
+    cexts: list[str] | None = None
+    sni: str | None = None
+    alpn: list[str] | None = None
+    csigs: list[str] | None = None
+    csvers: list[str] | None = None
+    ja3: str | None = None
+    ja4: str | None = None
+    sver: str | None = None
+    scipher: str | None = None
+    sexts: list[str] | None = None
+    ssvers: list[str] | None = None
+    ja3s: str | None = None
+    ja4s: str | None = None
 
 
 class HttpRequest(Observed):
@@ -433,9 +539,10 @@ class HttpRequest(Observed):
     """
 
     method: str
-    uri: str
-    agent: str
-    num: int
+    uri: str | None = None
+    agent: str | None = None
+    num: int | None = None
+    rnum: int | None = None
     content_type: str | None = None
     content_len: str | None = None
 
@@ -448,44 +555,59 @@ class HttpResponse(Observed):
     """
 
     code: str
-    num: int
+    num: int | None = None
+    rnum: int | None = None
     content_type: str | None = None
     content_len: str | None = None
     server: str | None = None
 
 
 class HttpObservation(Observed):
-    """The HTTP/1 exchanges observed inline on the flow."""
+    """The HTTP/1 exchanges observed inline on the flow.
 
-    req: list[HttpRequest]
-    res: list[HttpResponse]
+    Both sides are optional: the day capture has 2 flows with responses and no
+    requests and 26 with requests and no responses, which is what a flow caught
+    part-way through an exchange looks like.
+    """
+
+    req: list[HttpRequest] | None = None
+    res: list[HttpResponse] | None = None
 
 
 class Http2Request(Observed):
     """One HTTP/2 request observed on the flow.
 
-    No `num` and no `content_len`: neither was observed on any of the 21 sampled
-    HTTP/2 requests, and inventing them would be inventing fields.
+    No `content_len`: it was observed on neither capture's HTTP/2 requests, and
+    inventing it would be inventing a field. `num` is absent too, but `rnum` —
+    the ordering field HTTP/1 spells `num` on one producer and `rnum` on the
+    other — is present on all 2 832 of the day capture's HTTP/2 requests and on
+    none of `flow-sample.jsonl`'s 21.
     """
 
     method: str
     uri: str
     agent: str
+    rnum: int | None = None
 
 
 class Http2Response(Observed):
     """One HTTP/2 response observed on the flow."""
 
     code: str
+    rnum: int | None = None
     content_type: str | None = None
     server: str | None = None
 
 
 class Http2Observation(Observed):
-    """The HTTP/2 exchanges observed inline on the flow."""
+    """The HTTP/2 exchanges observed inline on the flow.
+
+    `res` is absent on 845 of the day capture's 944 HTTP/2 observations — a
+    request seen with no response in the same flow — so only `req` is required.
+    """
 
     req: list[Http2Request]
-    res: list[Http2Response]
+    res: list[Http2Response] | None = None
 
 
 class FlowRecord(Observed):
@@ -502,6 +624,15 @@ class FlowRecord(Observed):
     (`concept/02-concepts-and-taxonomy.md`), so the pair is kept as supplied
     rather than turned into an interval here.
 
+    `tx` is a third time the day capture's producer sends and the earlier one
+    does not. Measured over that capture: it falls on a strict 60-second grid,
+    ten distinct values per ten-minute file, and `tx >= ts + td` on every one of
+    the 239 850 records — so it is when the producer exported the flow, never
+    earlier than the flow ended, and it is a fact about the *export batch*
+    rather than about the traffic. Nothing reads it. It is carried because it
+    was observed, and a flow is still windowed on `ts`: windowing on an export
+    time would bin flows by when the sensor happened to flush.
+
     Every application layer is optional and defaults to `None` — unobserved, not
     empty. `tcp` and `udp` are optional for the same reason: the sample has one
     of the two on every record and `ip.proto` agrees with which, but that is a
@@ -512,6 +643,7 @@ class FlowRecord(Observed):
     id: str
     ts: float
     td: float
+    tx: float | None = None
     ip: IpObservation
     tcp: TcpObservation | None = None
     udp: UdpObservation | None = None

@@ -322,6 +322,216 @@ CREATE {create} probe_thing AS SELECT 1 AS a;
     )["probe_thing"].read_by == frozenset()
 
 
+# --- Dropping, which is the only way to change a view ------------------------
+#
+# RisingWave has no `CREATE OR REPLACE VIEW`, so changing one is dropping it and
+# creating it again -- what sql/migrations/0010_entity_value_null_guard.sql does.
+# `declarations()` therefore walks the statements in the order they run instead
+# of collecting every `CREATE`, and these are the four things that walk can see.
+
+_DECLARED = """-- Layer:    signal
+-- Object:   VIEW (plain).
+-- Reads:    {reads}
+-- Read by:  tests/test_view_layering.py.
+CREATE VIEW {name} AS SELECT 1 AS a;
+"""
+
+
+def _view(name: str, reads: str = "nothing.") -> str:
+    return _DECLARED.format(name=name, reads=reads)
+
+
+def test_a_view_recreated_after_a_drop_is_the_later_declaration(tmp_path: Path):
+    """The whole point: a migration may change a view by replacing it.
+
+    Before this, `declarations()` refused any relation created twice anywhere in
+    the sequence, which made the pattern sql/migrations/0009's own head
+    prescribes -- "a new migration that drops and recreates every object here" --
+    impossible to carry out.
+    """
+    replaced = _view("probe_thing").replace(
+        "-- Read by:  tests/test_view_layering.py.",
+        "-- Read by:  tests/test_view_layering.py.\n"
+        "-- Superseded by: 0001_synthetic.sql",
+    )
+    declared = migrations.declarations(
+        synthetic(
+            tmp_path,
+            replaced
+            + "\nDROP VIEW probe_thing;\n\n"
+            + _DECLARED.format(name="probe_thing", reads="probe_other.").replace(
+                "-- Layer:    signal", "-- Layer:    analytical"
+            ),
+        )
+    )
+    assert declared["probe_thing"].layer == "analytical"
+    assert declared["probe_thing"].reads == frozenset({"probe_other"})
+    # The surviving declaration is the live one, so it is not superseded.
+    assert declared["probe_thing"].superseded_by is None
+
+
+def test_a_view_created_twice_without_a_drop_is_still_refused(tmp_path: Path):
+    with pytest.raises(DeclarationError, match="created twice"):
+        migrations.declarations(
+            synthetic(tmp_path, _view("probe_thing") + "\n" + _view("probe_thing"))
+        )
+
+
+def test_dropping_something_no_migration_created_is_refused(tmp_path: Path):
+    with pytest.raises(DeclarationError, match="nothing has created it"):
+        migrations.declarations(synthetic(tmp_path, "DROP VIEW probe_thing;\n"))
+
+
+def test_dropping_something_still_read_is_refused(tmp_path: Path):
+    """The engine refuses this drop; refusing it here is refusing it earlier.
+
+    Nothing has touched the engine when this fires, which is the shape of every
+    other refusal in `helena.migrations`.
+    """
+    sql = (
+        _view("probe_thing")
+        + "\n"
+        + _view("probe_reader", reads="probe_thing.")
+        + "\nDROP VIEW probe_thing;\n"
+    )
+    with pytest.raises(DeclarationError, match="probe_reader still reads it"):
+        migrations.declarations(synthetic(tmp_path, sql))
+
+
+def test_a_cascading_drop_is_refused(tmp_path: Path):
+    """A file whose effect is larger than its text cannot be reviewed.
+
+    `DROP ... CASCADE` on the entity view takes six objects it does not name.
+    0010 drops all seven by name and in order instead, which is why the order is
+    checkable at all.
+    """
+    sql = _view("probe_thing") + "\nDROP VIEW probe_thing CASCADE;\n"
+    with pytest.raises(DeclarationError, match="CASCADE"):
+        migrations.declarations(synthetic(tmp_path, sql))
+
+
+def test_a_superseded_definition_says_so(tmp_path: Path):
+    """Both directions, because a field nobody checks is a field that drifts."""
+    superseding = _DECLARED.format(name="probe_thing", reads="nothing.")
+    replaced = _DECLARED.format(name="probe_thing", reads="nothing.").replace(
+        "-- Read by:  tests/test_view_layering.py.",
+        "-- Read by:  tests/test_view_layering.py.\n"
+        "-- Superseded by: 0001_synthetic.sql. A note may follow the name.",
+    )
+    declared = migrations.declarations(
+        synthetic(tmp_path, replaced + "\nDROP VIEW probe_thing;\n\n" + superseding)
+    )
+    assert declared["probe_thing"].superseded_by is None
+
+    retired = migrations.superseded(
+        synthetic(tmp_path, replaced + "\nDROP VIEW probe_thing;\n\n" + superseding)
+    )
+    assert [(d.relation, d.superseded_by) for d in retired] == [
+        ("probe_thing", "0001_synthetic.sql")
+    ]
+
+
+def test_a_replaced_definition_that_does_not_say_so_is_refused(tmp_path: Path):
+    """The trap this field exists for, caught where it is introduced.
+
+    Without it, the `CREATE` left behind in the earlier migration is a definition
+    the engine never holds, and a person editing it to fix something would change
+    nothing anywhere.
+    """
+    view = _DECLARED.format(name="probe_thing", reads="nothing.")
+    with pytest.raises(DeclarationError, match="nothing there says so"):
+        migrations.declarations(
+            synthetic(tmp_path, view + "\nDROP VIEW probe_thing;\n\n" + view)
+        )
+
+
+def test_a_superseded_by_naming_the_wrong_migration_is_refused(tmp_path: Path):
+    replaced = _DECLARED.format(name="probe_thing", reads="nothing.").replace(
+        "-- Read by:  tests/test_view_layering.py.",
+        "-- Read by:  tests/test_view_layering.py.\n"
+        "-- Superseded by: 0099_somewhere_else.sql",
+    )
+    with pytest.raises(DeclarationError, match="instead of"):
+        migrations.declarations(
+            synthetic(
+                tmp_path,
+                replaced
+                + "\nDROP VIEW probe_thing;\n\n"
+                + _DECLARED.format(name="probe_thing", reads="nothing."),
+            )
+        )
+
+
+def test_a_superseded_by_on_something_never_replaced_is_refused(tmp_path: Path):
+    """Pointing at a migration that does not recreate it sends a reader nowhere."""
+    view = _DECLARED.format(name="probe_thing", reads="nothing.").replace(
+        "-- Read by:  tests/test_view_layering.py.",
+        "-- Read by:  tests/test_view_layering.py.\n"
+        "-- Superseded by: 0099_somewhere_else.sql",
+    )
+    with pytest.raises(DeclarationError, match="no such migration creates it"):
+        migrations.declarations(synthetic(tmp_path, view))
+
+
+def test_a_superseded_by_that_is_not_a_migration_name_is_refused(tmp_path: Path):
+    view = _DECLARED.format(name="probe_thing", reads="nothing.").replace(
+        "-- Read by:  tests/test_view_layering.py.",
+        "-- Read by:  tests/test_view_layering.py.\n"
+        "-- Superseded by: a later migration, probably",
+    )
+    with pytest.raises(DeclarationError, match="not a migration file name"):
+        migrations.declarations(synthetic(tmp_path, view))
+
+
+def test_the_repository_records_every_definition_the_engine_does_not_hold():
+    """Seven, all of them 0010's, and each one says so where it was written.
+
+    This is the assertion that keeps `Superseded by:` honest over the real tree
+    rather than a synthetic one: `superseded()` is derived from the walk and the
+    field is checked against it, so a mismatch fails in `declarations()` and an
+    omission fails here.
+    """
+    retired = migrations.superseded()
+    assert {d.relation for d in retired} == {
+        "helena_signal_entity_observations",
+        "helena_signal_context_entities",
+        "helena_signal_context_entities_retained",
+        "helena_signal_domain_suffix_candidates",
+        "helena_signal_domain_public_suffix",
+        "helena_signal_domain_registrable",
+        "helena_signal_context_domains",
+    }
+    assert all(
+        d.superseded_by == "0010_entity_value_null_guard.sql" for d in retired
+    )
+    assert not set(migrations.declarations()) & {d.relation for d in retired} - {
+        d.relation for d in retired
+    }
+
+
+def test_the_repository_drops_nothing_it_does_not_recreate():
+    """Over the real migrations, and not a synthetic one.
+
+    0010 drops seven objects and creates seven; a file that dropped one and
+    forgot it would leave a relation other declarations still name as a reader,
+    which `layering_violations` reports from the other side. This asserts the
+    count directly so the failure names the missing object rather than its
+    readers.
+    """
+    declared = migrations.declarations()
+    for name in (
+        "helena_signal_entity_observations",
+        "helena_signal_context_entities",
+        "helena_signal_context_entities_retained",
+        "helena_signal_domain_suffix_candidates",
+        "helena_signal_domain_public_suffix",
+        "helena_signal_domain_registrable",
+        "helena_signal_context_domains",
+    ):
+        assert name in declared, f"{name} is dropped and never recreated"
+        assert declared[name].migration == "0010_entity_value_null_guard.sql"
+
+
 def test_a_declaration_that_disagrees_with_its_own_create_is_refused(tmp_path: Path):
     """The field says materialized, the SQL says plain. That is the drift."""
     with pytest.raises(DeclarationError, match="declares itself a MATERIALIZED VIEW"):

@@ -269,6 +269,9 @@ FROM helena_signal_host_context_retained c;
 -- Reads:    helena_signal_context_entities, helena_signal_host_context_retained
 -- Read by:  tests/test_context.py, and the enriched-context view (D3), which is
 --           what the entity rows exist for.
+-- Superseded by: 0010_entity_value_null_guard.sql. That file drops this
+--               object and creates it again, so the definition below is
+--               not what the engine holds and editing it changes nothing.
 --
 -- The boundary is taken **by joining the retained context** rather than by
 -- repeating the temporal predicate on the entity row's own `window_end`. That is
