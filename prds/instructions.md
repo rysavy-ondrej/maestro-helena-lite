@@ -19,7 +19,7 @@ unbuildable**.
 ## 0. Before you write anything
 
 1. **Read the concept notes for the area you are touching.** At minimum
-   [07 — Principles](07-principles.md), which is the list of rules an
+   [07 — Principles](../concept/07-principles.md), which is the list of rules an
    implementation may not break, and the note covering your stage.
 2. **Answer two questions in writing, in the increment's own record:**
    - *What assumption does this increment let us validate?* If the answer is

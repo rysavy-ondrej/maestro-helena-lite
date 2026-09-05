@@ -43,6 +43,12 @@ records and every record of both capture fixtures**, one test per record. A
 field the contract invented shows up on the left, a field it dropped or renamed
 is missing from it, and a coerced type comes back as a different value.
 
+Since the addendum below, the same assertion also runs over **all 239 850
+records of the day capture** when that capture is present — one test rather than
+239 850, reporting the first few failures and how many there were. Four orders of
+magnitude more traffic makes it a much stronger statement than it was, and not a
+different one.
+
 Three configuration choices carry the invariants, each measured against Pydantic
 2.13 rather than assumed:
 
