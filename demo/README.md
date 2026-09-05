@@ -1,14 +1,26 @@
-# Demo — ingest and context, end to end
+# Demos
 
-One script that puts `data/ingest/flow-sample.jsonl` through the pipeline as it
-exists today and prints what came out the other side.
+Two scripts, both running the pipeline as it exists today rather than narrating
+it. They answer different questions and the second is not a bigger version of the
+first.
+
+| | Script | Input | The question it answers |
+| --- | --- | --- | --- |
+| 1 | `ingest_and_context.py` | `data/ingest/flow-sample.jsonl` — 62 records, one host, 130.8 s | *what happens to a record*, at a size where every number can be checked by eye |
+| 2 | `context_over_a_day.py` | `data/demo/20250920/` — 143 captures, 239 850 records, 3 199 sources, 23.97 h | *what a context looks like* when there is enough traffic for the answer to be interesting |
 
 ```bash
-demo/run-demo            # start the engine and broker, then run it
+demo/run-demo            # start the engine and broker, then run demo 1
 demo/run-demo --down     # ... and stop them again afterwards
 
-uv run demo/ingest_and_context.py    # if scripts/dev-up already ran
+uv run demo/ingest_and_context.py           # demo 1, if scripts/dev-up already ran
+uv run demo/context_over_a_day.py           # demo 2, the whole day (~20 min)
+uv run demo/context_over_a_day.py --files 12   # demo 2, the first two hours
 ```
+
+---
+
+# Demo 1 — ingest and context, end to end
 
 ## What it actually does
 
@@ -85,3 +97,125 @@ The pinned binaries in `bin/` and a populated `.env` — the same two things the
 test suite needs. `demo/run-demo` calls `scripts/dev-up`, which verifies both
 binaries against `docs/versions.md` and refuses to start anything that does not
 match. It downloads nothing.
+
+
+---
+
+# Demo 2 — context computation over a day of a network
+
+`uv run demo/context_over_a_day.py`. Seven stages, the same real code paths,
+against 143 ten-minute captures of one network's traffic for 2025-09-20 —
+239 850 records, 3 199 source addresses, 23.97 hours.
+
+## Where the capture is, and why it is not here
+
+**`data/demo/` is in `.gitignore` and the capture is not in this repository.**
+`data/ingest/flow-sample.jsonl` is 62 records of the maintainer's own host,
+assessed by them as carrying nothing sensitive and cleared for publication with
+a datasheet (`data/ingest/README.md`). This capture is a whole network for a
+whole day and carries no such record. That is a reason to leave it in place, not
+a claim about it: it is measured where it lies and nothing copies it into the
+tree — not the demo, and not the test suite, which skips its two day-capture
+tests when the directory is absent rather than depending on it. Committing an
+extract is a decision for whoever can make it, and this branch does not make
+it.
+
+`--captures DIR` points the script somewhere else.
+
+## What it does that demo 1 does not
+
+**143 captures, not one file.** Each ten-minute archive is decompressed into a
+capture named by its own sha256, and the directory is then read back through
+`scan_captures`, which re-checks every name against its bytes. The capture
+contract is not bent to fit a compressed file: the digest is over the records as
+written out, so two archives that decompress to the same bytes are one capture.
+
+**Reconciliation that can actually fail — and did.** `consumed` is a property of
+the run, and a batch carries several captures, so there is no per-capture
+consumed count and `ingest_counts` is not asked to invent one. What is checked
+per capture is `normalized + quarantined == records`, read out of the engine's
+own two counter views; the run-level check is `consumed == records`.
+
+The first full run failed that check, and it is the most useful thing this demo
+has produced. Publishing all 239 850 records up front takes 7.6 s; draining them
+through one INSERT per record takes 11 minutes; the broker's `RETENTION` default
+is **5 minutes**. 43 858 records — 18 % — were obliterated before the consumer
+reached them, and the run said `INCOMPLETE` and named the number.
+
+The fix is not a longer retention. `docs/runbook.md` §3 says not to reach for it
+— "a longer retention would make a topic look like a store for a while" — and
+`concept/03-architecture.md` is what that protects: the broker is consume-once
+and restart-volatile, and a backlog on it is a durability assumption the design
+does not make. A sensor produces while the normalizer consumes; it does not hand
+over a day in one go. So the demo publishes and drains in batches of at most
+25 000 records, each on its own topic — about 70 s of ingestion against a
+5-minute window. A capture is never split across batches, because a capture is
+the unit a record's provenance is expressed in.
+
+The general point is worth keeping: **at 62 records this failure mode does not
+exist, and at 239 850 it is the default outcome.** Nothing about the pipeline
+changed between the two; the backlog did.
+
+**Scale changes what the numbers mean.** 62 records made two contexts; this day
+makes 12 089, over 3 199 hosts and 287 five-minute windows — 1.3 % of that grid,
+because a context exists only where a host actually sent something. The demo
+prints the shape of the day by hour, the busiest hosts, and the in/out ratios
+that separate a host pulling a download from one broadcasting into a network
+that never answers.
+
+**The Public Suffix List, on names worth normalizing.** The day's 2 490 distinct
+names collapse to 726 registrable domains — and the table is worth reading for
+the suffixes that are themselves registrable domains in it, like a CDN's
+`com.akadns.net`, where every name underneath belongs to a different customer.
+That is the difference between a feed that lists a name and one that lists a
+domain. The list is fetched over the network; `--no-suffix-list` skips it.
+
+## What it found
+
+A pipeline built and measured against 62 records of one host met a day of a whole
+network. What broke is more useful than what worked, and this is the rest of it —
+the broker-retention loss above belongs on the same list.
+
+**The retention boundary drops all of it.** The horizon is 24 hours and the
+capture is from 2025-09-20, so every context is outside it: the retained view is
+empty, `helena_signal_retention_rejections` reports the rate, and nothing here
+can be frozen or cited. That is the boundary working — the signal layer computed
+every context and the layer above it dropped them all — and it is the only half
+of the boundary an archived capture can demonstrate. Showing it pass traffic
+through needs a capture from today.
+
+**Multicast and broadcast senders are hosts.** `helena_signal_host_context`
+groups by `src_address` and filters nothing, so `224.0.0.251` and
+`255.255.255.255` are near the top of the busiest-hosts table. With one Windows
+endpoint that never came up; on a LAN it is most of the table, and any reader of
+that view has to know it.
+
+**1 043 entities had no value at all** — until `sql/migrations/0010_entity_value_null_guard.sql`.
+Four branches of `helena_signal_entity_observations` read `tls.sni`, `tls.ja3`,
+`tls.ja4` and a request `uri` with no NULL guard, which was safe only while the
+flow-record contract required all four. It does not any more: a flow captured
+mid-connection has TLS records and no handshake, so there is no name and no
+fingerprint to extract. Because `helena_signal_context_entities` groups by
+`entity_value`, every handshake-less flow in a context collapsed into one
+phantom row carrying their combined traffic and joinable to no feed.
+
+Fixing it cost more than four predicates. RisingWave has no `CREATE OR REPLACE
+VIEW`, so changing a view means dropping it and everything standing on it —
+seven objects — and recreating all seven. And `migrations.declarations()` refused
+any relation created twice anywhere in the migration set, which made the
+recreate-to-change pattern that 0009's own header prescribes impossible. It now
+walks the `CREATE`s and `DROP`s in the order they run and refuses a create only
+when something of that name is live, which brought three more refusals with it: a
+drop of something nothing created, a drop of something still read, and `CASCADE`
+— because a drop that takes six objects the file does not name cannot be
+reviewed. 0010 drops all seven by name, in order.
+
+The demo still prints the NULL count; it is zero now, and the note says what it
+used to be.
+
+## What it does not show
+
+The same two things demo 1 does not: **no enrichment and no assessment**, and
+**nothing about verdict quality**. There is still no labelled corpus, and a day
+of unlabelled traffic is not one — it is a great deal more input, which is a
+different thing from evidence about output.
