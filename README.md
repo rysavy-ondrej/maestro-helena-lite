@@ -187,6 +187,27 @@ cannot be validated is a different thing from one that fails.
 inside such a package, because a shared helper in there is a file every frozen
 version imports and therefore a way to edit `v1` through a side door.
 
+**Every source declares what it may say.** [`helena.enrichment`](src/helena/enrichment.py)
+holds the registry: a source's **tier** (A–D, describing the *source* and never
+the entry — which is what makes "deterministic signals escalate independently" a
+testable rule rather than a judgement call), the entity types it is about, and
+the taxonomy subset it may emit, versioned. `check_claim` refuses a path outside
+that subset, so a mapping drifting from its published declaration is caught where
+it happens. ThreatFox is tier B and the SSLBL JA3 list tier C, both as
+`concept/05-threat-intelligence.md`'s catalogue rates them, and the JA3 caveat —
+under a hundred fingerprints, static since 2021, untested against known-good
+traffic by its own publisher — is recorded on the descriptor rather than in prose
+a consumer may never open. The Public Suffix List is **deliberately not
+registered**: its tier is N/A rather than unassigned, because it makes no claim
+about any entity.
+
+`source_diversity` counts how many *independent* sources a set of claims
+represents, over retained origins rather than over source names — so one source
+making forty claims is one, an aggregator republishing forty rows with no origin
+retained is one, and the same origin arriving directly and through an aggregator
+is one. That last case is the correlated-source double-count
+`concept/02-concepts-and-taxonomy.md` names.
+
 **Two levels, and the vocabulary each one closes over.** The *evidence* level
 classifies an indicator — what a source says about an address, domain, URL or
 fingerprint — over the roots `no_match`, `normal`, `suspicious`, `malicious` and
