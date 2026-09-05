@@ -21,7 +21,18 @@ component that does not exist. `sql/migrations/0008_public_suffix_list.sql`
 carries the argument and the derivation; this file is the writer.
 
 The enrichment tier proper — ThreatFox first, per `concept/05` — is still
-deferred, and so is every part of this module that maps anything to the taxonomy.
+deferred, and so is every part of this module that *maps* anything to the
+taxonomy.
+
+**What does exist is the registry**: which sources this deployment knows, what
+tier each one is, and the taxonomy subset each may emit. `concept/05`'s first
+rule for every source adapter is *declare the subset it can emit, publish it,
+version it, and test it*, and a declaration is worth having before the mapping
+that has to satisfy it — the loader is then written against a published subset
+rather than the subset being read back off whatever the loader happened to
+produce. `SOURCES` is that declaration, `check_claim` is the test rule 1 asks
+for, and `source_diversity` is normalization rule 2: an aggregator is never
+counted as many votes.
 
 Reads: an HTTP(S) or `file:` URL supplied by the caller, through the standard
 library. Writes: `helena_reference_public_suffix` and
@@ -29,8 +40,9 @@ library. Writes: `helena_reference_public_suffix` and
 
 Maturity: experimental — the Public Suffix List loader and its failure paths are
 exercised by `tests/test_enrichment.py`, against a real engine and against the
-live list. Nothing has been enriched, no feed loader exists, and no snapshot
-version has reached an assessment.
+live list; the source registry and the diversity count by `tests/test_sources.py`.
+Nothing has been enriched, no feed loader exists, no claim has been made by
+anything, and no snapshot version has reached an assessment.
 """
 
 from __future__ import annotations
@@ -41,10 +53,12 @@ import urllib.request
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 
 import psycopg
 from pydantic import BaseModel, ConfigDict
 
+from helena import taxonomy
 from helena.observability import Redactor
 
 __all__ = [
@@ -57,11 +71,23 @@ __all__ = [
     "PUBLIC_SUFFIX_LOAD_TABLE",
     "PUBLIC_SUFFIX_TABLE",
     "PublicSuffixListError",
+    "ENTITY_TYPES",
+    "NO_MATCH",
+    "SOURCES",
+    "Claim",
     "PublicSuffixLoad",
     "PublicSuffixRule",
+    "SourceDescriptor",
+    "SourceError",
+    "Tier",
+    "UndeclaredClaim",
+    "check_claim",
     "fetch_public_suffix_list",
     "load_public_suffix_list",
+    "origins",
     "parse_public_suffix_list",
+    "source",
+    "source_diversity",
 ]
 
 # The two tables migration 0008 creates. Named here so the loader and the tests
@@ -479,3 +505,316 @@ def _columns(load: PublicSuffixLoad) -> Sequence[object]:
         load.failure_reason,
         load.failure_detail,
     )
+
+
+# --- The source registry: what a source is, and what it may say --------------
+#
+# `concept/02-concepts-and-taxonomy.md`: **the tier describes the source, not the
+# entry.** It is what makes "deterministic signals escalate independently" a
+# testable rule rather than a judgement call -- an escalation path that read a
+# per-entry confidence would be a judgement about one row, and this is a standing
+# statement about where the evidence comes from.
+#
+# `concept/05-threat-intelligence.md` §"What every source adapter must do" is the
+# other half, and rule 1 is what this section implements: **declare the subset it
+# can emit, publish it, version it, and test it.** Complete taxonomy coverage is
+# explicitly not required -- "a source that only identifies phishing maps a hit to
+# phishing, an explicit absence to `no_match`, and nothing else."
+#
+# **The Public Suffix List is deliberately not registered here**, and its absence
+# is a statement rather than an omission. `concept/05` gives it an empty "Maps to"
+# cell and a tier of **N/A rather than unassigned**: it is normalization needed for
+# scope correctness, it makes no claim about any entity, and it can neither
+# escalate nor suppress. A registry of claim-emitting sources is exactly what it is
+# not in. The loader for it is in this module because the *mechanism* is shared;
+# the registry is about claims, and it makes none.
+
+
+class Tier(str, Enum):
+    """Source tiers A-D, from `concept/02-concepts-and-taxonomy.md`.
+
+    A `str` enum because a tier is written onto rows and read back out of them,
+    and a second spelling of the same value is the drift the version rules exist
+    to prevent.
+    """
+
+    #: "Direct behaviour or authoritative curated role -- confirmed payload
+    #: delivery, C2, phishing page, validated malware configuration." May
+    #: establish `malicious` by itself if scope and freshness are adequate, and
+    #: **escalates independently of triage**.
+    A = "A"
+    #: "Explicit provider verdict or high-quality curated listing without full
+    #: direct evidence." Usually malicious when high confidence, and
+    #: **high-confidence B escalates independently**.
+    B = "B"
+    #: "Aggregated reputation, predictive risk, community report, one scanner,
+    #: heuristic anomaly." Normally `suspicious`; two independent sources may
+    #: raise confidence -- which is what `source_diversity` below counts.
+    C = "C"
+    #: "Passive DNS, certificate transparency, scan telemetry, co-occurrence."
+    #: Context only: never escalates on its own.
+    D = "D"
+
+    @property
+    def escalates_independently(self) -> bool:
+        """Whether a claim from this tier may escalate without triage agreeing.
+
+        `concept/instruction.md`: "Deterministic escalation is independent of
+        triage. A `normal` from a model may not suppress a high-confidence
+        match." The tier is what decides which claims that applies to, and it is
+        a property here rather than a table elsewhere so the rule has one home.
+
+        B is included and the condition on it -- *high* confidence -- is not
+        expressible on a descriptor, because confidence belongs to the entry and
+        the tier belongs to the source. The caller applies it; this says which
+        tiers can reach the question at all.
+        """
+        return self in (Tier.A, Tier.B)
+
+
+# The entity types an indicator can be about, from
+# `concept/02-concepts-and-taxonomy.md` and matching the `entity_type` values
+# `helena_signal_context_entities` produces -- a descriptor that named a fifth
+# would declare coverage of something no context row can join to.
+ENTITY_TYPES = frozenset({"address", "domain", "url", "fingerprint"})
+
+# `concept/02`: "The source completed its query and returned no record. A lookup
+# outcome, never a statement of safety." Named once, because every declared
+# subset is required to contain it and two functions below compare against it.
+NO_MATCH = "no_match"
+
+
+class SourceError(Exception):
+    """A source descriptor or a claim is not what the catalogue says one is."""
+
+
+class UndeclaredClaim(SourceError):
+    """A source emitted a path outside its declared subset.
+
+    Its own error, because it means the mapping and the declaration have drifted
+    apart -- not that the path is invalid. `concept/05` rule 1 requires the
+    subset to be published, versioned and **tested**, and this is what a test has
+    to be able to catch.
+    """
+
+
+@dataclass(frozen=True)
+class SourceDescriptor:
+    """One source: its tier, what it is about, and the subset it may emit.
+
+    Frozen and validated on construction, so a descriptor that claims a taxonomy
+    path its version does not have fails where it is written rather than where
+    something tries to emit it.
+    """
+
+    source_id: str
+    tier: Tier
+    #: Which kinds of indicator this source is about. A claim about anything else
+    #: is refused: a JA3 list has nothing to say about a domain.
+    entity_types: frozenset[str]
+    #: The evidence-level taxonomy paths this source may emit. `no_match` belongs
+    #: in every subset -- `concept/05` rule 1 makes an explicit absence part of
+    #: what a source reports, and `concept/02` is emphatic that `no_match` is a
+    #: lookup outcome and never a statement of safety.
+    emits: frozenset[str]
+    #: The taxonomy version `emits` is drawn from. A subset is only meaningful
+    #: against the vocabulary it was declared against.
+    taxonomy_version: str
+    #: The version of this declaration. It moves when the subset moves, so a
+    #: stored claim can be read against the subset that was declared when it was
+    #: made -- the same rule as every other version in this project.
+    emit_subset_version: str
+    #: True where this source republishes other sources' evidence.
+    #: `concept/02`: "Evidence copied through an aggregator is not an independent
+    #: vote; retain the origin and count source diversity. An aggregator is never
+    #: counted as many votes."
+    aggregator: bool = False
+    #: What a reader has to know before trusting this source, recorded on the
+    #: descriptor rather than in prose somewhere else. Empty where there is none.
+    caveat: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.source_id or self.source_id != self.source_id.strip():
+            raise SourceError(f"{self.source_id!r} is not a source id")
+        outside = self.entity_types - ENTITY_TYPES
+        if outside:
+            raise SourceError(
+                f"{self.source_id}: entity types {sorted(outside)} are not among "
+                f"{sorted(ENTITY_TYPES)}"
+            )
+        if not self.entity_types:
+            raise SourceError(f"{self.source_id}: declares no entity types")
+        if not self.emit_subset_version.strip():
+            raise SourceError(f"{self.source_id}: the emit subset has no version")
+        # Every declared path has to exist in the taxonomy version it names. This
+        # is the join between `concept/05` rule 1 and `helena.taxonomy`: a
+        # published subset that named a path the vocabulary does not have would
+        # be a claim nothing could ever validate.
+        for path in sorted(self.emits):
+            taxonomy.resolve(path, level=taxonomy.EVIDENCE, version=self.taxonomy_version)
+        if NO_MATCH not in self.emits:
+            raise SourceError(
+                f"{self.source_id}: {NO_MATCH!r} is not in the declared subset. "
+                f"A source reports an explicit absence as well as a hit "
+                f"(concept/05, 'What every source adapter must do', rule 1)."
+            )
+
+    def declares(self, path: str) -> bool:
+        return path in self.emits
+
+
+# The registry. Two entries, and both are in `concept/05`'s catalogue with the
+# tier written there rather than chosen here.
+SOURCES: dict[str, SourceDescriptor] = {
+    "threatfox": SourceDescriptor(
+        source_id="threatfox",
+        tier=Tier.B,
+        entity_types=frozenset({"address", "domain", "url"}),
+        # `concept/05`: "C2 and malware delivery, by threat type". **By threat
+        # type** is the part v1 cannot express: the evidence level is roots-only
+        # there, because `concept/02` adopts it from a published indicator
+        # taxonomy it neither names nor reproduces (see `helena/taxonomy/v1.py`).
+        # So the declared subset is the root, which is a supported and true
+        # answer, and the threat-type children arrive with the loader that can
+        # say what they are -- in a taxonomy v2 and a new subset version here.
+        emits=frozenset({"malicious", NO_MATCH}),
+        taxonomy_version="v1",
+        emit_subset_version="v1",
+        aggregator=False,
+    ),
+    "sslbl-ja3": SourceDescriptor(
+        source_id="sslbl-ja3",
+        tier=Tier.C,
+        entity_types=frozenset({"fingerprint"}),
+        # `concept/05` maps it to "Malware, or a single low-confidence
+        # detection", and tier C is "normally `suspicious`". `malicious` is not
+        # in the subset and the caveat below is why: a list that its own
+        # publisher says is untested against known-good traffic cannot establish
+        # that a fingerprint performed malicious activity. A hit is a material
+        # risk signal, which is what `suspicious` means.
+        emits=frozenset({"suspicious", NO_MATCH}),
+        taxonomy_version="v1",
+        emit_subset_version="v1",
+        aggregator=False,
+        caveat=(
+            "Under a hundred fingerprints, first seen years ago and static since "
+            "2021, carrying the publisher's own statement that they are untested "
+            "against known-good traffic and may cause significant false "
+            "positives. A historical artifact rather than a feed: it cannot "
+            "improve by being refreshed, because it is not being refreshed. "
+            "Whether it earns its place is open, and the sharper half of that "
+            "question is what a no_match against it may be taken to mean "
+            "(concept/05-threat-intelligence.md)."
+        ),
+    ),
+}
+
+
+def source(source_id: str) -> SourceDescriptor:
+    """The descriptor for `source_id`, or a `SourceError` naming what is registered."""
+    try:
+        return SOURCES[source_id]
+    except KeyError:
+        raise SourceError(
+            f"no source {source_id!r} is registered; the catalogue holds "
+            f"{sorted(SOURCES)}. Adding one is a governed decision "
+            f"(concept/05-threat-intelligence.md), not a configuration change."
+        ) from None
+
+
+@dataclass(frozen=True)
+class Claim:
+    """One source's statement about one indicator, with its origin retained.
+
+    `origin` is `concept/05` rule 7 and `concept/02` normalization rule 2: where
+    the evidence actually came from, when this source is republishing somebody
+    else's. `None` means the source is speaking for itself, which is the only
+    thing a non-aggregator may do.
+    """
+
+    source_id: str
+    entity_type: str
+    entity_value: str
+    path: str
+    origin: str | None = None
+
+    @property
+    def attributed_to(self) -> str:
+        """Who this claim is evidence *from* -- the origin where there is one.
+
+        The one place the aggregator rule turns into a value. Two claims that
+        resolve to the same name are one vote however many sources carried them.
+        """
+        return self.origin or self.source_id
+
+
+def check_claim(claim: Claim) -> Claim:
+    """Refuse a claim a source did not declare it could make. Returns the claim.
+
+    The check `concept/05` rule 1 means by "test it": a mapping that starts
+    emitting a path outside the published subset is a drift between the mapping
+    and its declaration, and it is caught here rather than downstream where it
+    would look like a taxonomy question.
+    """
+    descriptor = source(claim.source_id)
+    if claim.entity_type not in descriptor.entity_types:
+        raise UndeclaredClaim(
+            f"{claim.source_id} claims about a {claim.entity_type!r} and declares "
+            f"{sorted(descriptor.entity_types)}"
+        )
+    # Valid in the taxonomy first, so an invalid path is a taxonomy error and a
+    # valid-but-undeclared one is a source error. Two facts, two errors.
+    taxonomy.resolve(
+        claim.path, level=taxonomy.EVIDENCE, version=descriptor.taxonomy_version
+    )
+    if not descriptor.declares(claim.path):
+        raise UndeclaredClaim(
+            f"{claim.source_id} emitted {claim.path!r}, which is outside its "
+            f"declared subset {sorted(descriptor.emits)} "
+            f"(subset {descriptor.emit_subset_version})"
+        )
+    if claim.origin is not None and not descriptor.aggregator:
+        raise UndeclaredClaim(
+            f"{claim.source_id} is not an aggregator and carries evidence "
+            f"attributed to {claim.origin!r}; a source that republishes another's "
+            f"evidence is declared as an aggregator or it is misattributing"
+        )
+    return claim
+
+
+def source_diversity(claims: Sequence[Claim]) -> int:
+    """How many independent sources these claims represent.
+
+    `concept/02` normalization rule 2: *"Do not double-count correlated sources.
+    Evidence copied through an aggregator is not an independent vote; retain the
+    origin and count source diversity. An aggregator is never counted as many
+    votes."*
+
+    So the count is over `attributed_to` and not over `source_id`, and three
+    consequences fall out of that rather than needing rules of their own:
+
+    * one source making forty claims is **one**;
+    * an aggregator republishing forty entries with no origin retained is
+      **one** -- it is one source's opinion however many rows it has;
+    * the same origin reaching us directly *and* through an aggregator is
+      **one**, which is the correlated-source case the rule is actually about.
+
+    This is the number tier C's "two independent sources may raise confidence"
+    is counted with. It is deliberately not a confidence, a score or a verdict:
+    it is a count, and what to do with it belongs to whatever is escalating.
+    """
+    return len({claim.attributed_to for claim in claims})
+
+
+def origins(claims: Sequence[Claim]) -> dict[str, list[Claim]]:
+    """The claims grouped by who they are evidence from, origin retained.
+
+    `source_diversity` is the count; this is what it counted, because a number
+    with no way to see what went into it cannot be argued with -- and
+    `concept/05` rule 6 requires contradictions to survive to the agent rather
+    than being collapsed on the way.
+    """
+    grouped: dict[str, list[Claim]] = {}
+    for claim in claims:
+        grouped.setdefault(claim.attributed_to, []).append(claim)
+    return grouped

@@ -246,7 +246,7 @@
         "Implement aggregator marking so evidence copied through an aggregator is never counted as many independent votes",
         "Implement source-diversity counting that retains the origin of each claim"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D3 Enrichment] Enrichment evidence schema with status distinct from no_match",
