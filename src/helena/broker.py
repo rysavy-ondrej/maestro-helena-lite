@@ -77,6 +77,7 @@ from helena.config import Settings
 __all__ = [
     "DEFAULT_IDLE_TIMEOUT_SECONDS",
     "DEFAULT_PARTITION",
+    "MAX_MESSAGE_BYTES",
     "BrokerConsumer",
     "BrokerError",
     "BrokerProducer",
@@ -103,6 +104,34 @@ DEFAULT_PARTITION = 0
 # final flush. Long enough that a slow local broker is not a failure, short
 # enough that a dead one is reported rather than waited on.
 _BROKER_TIMEOUT_SECONDS = 30.0
+
+# The largest ingest message this deployment will carry, on both sides of the
+# wire. It is set here rather than left at librdkafka's defaults because those
+# defaults are smaller than a real flow record and the failure they cause is the
+# worst kind available.
+#
+# One message is one flow record (`docs/decisions/0014-the-ingest-topic-message.md`)
+# and the flow-record contract puts no bound on a record's size: a long-lived TCP
+# flow carries one `tcp.segs` entry per segment, so the record grows with the
+# traffic it describes. Measured over `data/demo/20250920` — 239 850 records of a
+# day of one network — the median record is 470 bytes and the largest is
+# 4 382 610. librdkafka's producer default `message.max.bytes` is 1 000 000 and
+# its `max.partition.fetch.bytes` is 1 048 576, so two of those 239 850 records
+# could not cross the wire at all.
+#
+# That is not a record the pipeline refuses; it is a record the *transport*
+# refuses, and there is no quarantine for it — `Producer.produce` raises
+# `MSG_SIZE_TOO_LARGE` and takes the whole run down with it, mid-capture. In that
+# day both records sit in `capture_20250920T0051` — the sixth of 143 files — so a
+# run at librdkafka's defaults dies a few thousand records in with 138 captures
+# unpublished, and no counter says why, because the counters reconcile what was
+# stored against what the file holds and nothing was stored.
+#
+# 16 MiB is ~3.8x the largest record observed. It is a bound, not a promise: a
+# record larger than this still stops the run, and the number should move when a
+# capture says it must. The broker itself was measured carrying a 4 400 000-byte
+# message end to end, so this is a client-side ceiling, not a broker one.
+MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 
 
 class BrokerError(RuntimeError):
@@ -152,7 +181,12 @@ class BrokerProducer:
 
     def __init__(self, bootstrap_servers: str) -> None:
         self.bootstrap_servers = bootstrap_servers
-        self._producer = Producer({"bootstrap.servers": bootstrap_servers})
+        self._producer = Producer(
+            {
+                "bootstrap.servers": bootstrap_servers,
+                "message.max.bytes": MAX_MESSAGE_BYTES,
+            }
+        )
         self._admin = AdminClient({"bootstrap.servers": bootstrap_servers})
         self._failures: list[str] = []
 
@@ -283,6 +317,23 @@ class BrokerConsumer:
                 # so this names the client rather than coordinating anything.
                 "group.id": "helena",
                 "enable.auto.commit": False,
+                # `fetch.max.bytes` and `max.partition.fetch.bytes` bound what
+                # the consumer asks for; a message larger than either stalls the
+                # consumer on that offset rather than skipping it, which is why
+                # both are the transport limit rather than a fraction of it.
+                #
+                # `receive.message.max.bytes` is a different thing: the hard
+                # ceiling on a whole *fetch response*, which carries a batch of
+                # messages rather than one. librdkafka's own rule of thumb is
+                # `fetch.max.bytes + 512`, and it is not enough here — measured
+                # against blink 0.2.0, a 16 777 216-byte fetch bound came back
+                # with a 17 439 370-byte response and the consumer dropped the
+                # connection mid-run. The broker treats the fetch bound as
+                # advisory, so this is sized for a batch that overshoots it
+                # rather than for one that respects it.
+                "fetch.max.bytes": MAX_MESSAGE_BYTES,
+                "max.partition.fetch.bytes": MAX_MESSAGE_BYTES,
+                "receive.message.max.bytes": 4 * MAX_MESSAGE_BYTES,
             }
         )
 
