@@ -8,6 +8,7 @@ failure rather than a thing nobody notices.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,28 @@ SUPPORT_MODULES = {
     "broker",
 }
 
+# Subpackages, and the only kind there is one of. A versioned package holds
+# frozen version modules -- `v1.py`, `v2.py` -- rather than a component or a
+# support module, because `docs/decisions/0008-version-registry.md` makes a
+# revision "a new version module, never an edit": `v1` stays importable exactly
+# as it was, so the modules accumulate and a flat package would fill with
+# `taxonomy_v1`, `taxonomy_v2`, `schema_v1` and so on. ADR-0008 promises the same
+# shape for agent output schemas, prompts and renderings, so this is a category
+# rather than one exception.
+#
+# `taxonomy` is here rather than in COMPONENT_MODULES for the reason `versions`
+# is in SUPPORT_MODULES: `concept/02-concepts-and-taxonomy.md` has both agents
+# and the feed mapping views emitting classifications, so no single stage owns
+# the vocabulary.
+#
+# Adding one is a deliberate edit here, exactly as adding a support module is.
+VERSIONED_PACKAGES = {"taxonomy"}
+
+# What a file inside a versioned package may be called. Anything else -- a
+# helper, a shared base, a `common.py` -- is the thing that would let a later
+# edit reach a frozen version, so it is refused rather than reviewed.
+VERSION_MODULE = re.compile(r"^v[0-9]+$")
+
 MATURITY_LABELS = ("stable", "experimental", "hypothesis", "deferred", "deprecated")
 
 
@@ -65,9 +88,54 @@ def _module_paths() -> list[Path]:
     return sorted(PACKAGE_ROOT.rglob("*.py"))
 
 
+def _top_level_paths() -> list[Path]:
+    return sorted(PACKAGE_ROOT.glob("*.py"))
+
+
 def test_the_package_has_exactly_one_module_per_component():
-    found = {path.stem for path in _module_paths()} - {"__init__"} - SUPPORT_MODULES
+    found = {path.stem for path in _top_level_paths()} - {"__init__"} - SUPPORT_MODULES
     assert found == COMPONENT_MODULES
+
+
+def test_every_subpackage_is_a_declared_versioned_package():
+    """A subpackage cannot appear unnoticed either.
+
+    The component test above reads only the top level, so without this a new
+    directory under `helena/` would be invisible to it -- which is how the
+    package skeleton stops being a skeleton.
+    """
+    found = {
+        path.parent.name
+        for path in _module_paths()
+        if path.parent != PACKAGE_ROOT
+    }
+    assert found == VERSIONED_PACKAGES
+
+
+@pytest.mark.parametrize("package", sorted(VERSIONED_PACKAGES))
+def test_a_versioned_package_holds_only_version_modules(package: str):
+    """`__init__.py` and `vN.py`, and nothing else.
+
+    A shared helper inside one of these is a file every frozen version imports,
+    so editing it edits `v1` -- the in-place revision
+    `docs/decisions/0008-version-registry.md` forbids, arriving through a side
+    door. The machinery belongs in `__init__.py`, where the package docstring has
+    to say what happens if a future version needs different machinery.
+    """
+    stems = sorted(
+        path.stem for path in (PACKAGE_ROOT / package).glob("*.py")
+    )
+    offending = [
+        stem for stem in stems
+        if stem != "__init__" and not VERSION_MODULE.match(stem)
+    ]
+    assert offending == [], (
+        f"helena/{package}/ holds {offending}, and a versioned package holds "
+        f"only __init__.py and vN.py"
+    )
+    assert any(VERSION_MODULE.match(stem) for stem in stems), (
+        f"helena/{package}/ holds no version module"
+    )
 
 
 @pytest.mark.parametrize("path", _module_paths(), ids=lambda p: p.name)

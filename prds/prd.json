@@ -233,7 +233,7 @@
         "Add tests for each rule including an invalid root, a mismatched first segment and an unused-path lookup",
         "Document that emitting a new version means adding a module, and replay validates against the recorded version"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D3 Enrichment] Source tier registry and per-source declared emit subsets",

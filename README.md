@@ -175,6 +175,35 @@ migration runner's checksum makes editing the applied one impossible.
 [`docs/decisions/0008-version-registry.md`](docs/decisions/0008-version-registry.md)
 has the rule, what it costs and what was deliberately left out.
 
+The taxonomy is the first of these to exist. [`helena.taxonomy`](src/helena/taxonomy/__init__.py)
+holds the machinery and one module per version — `v1.py` is the first — and
+`helena.taxonomy.version("v1")` returns the frozen vocabulary that a row
+recording `v1` is replayed against. **Emitting a new version means adding a
+module**, never editing one: `v2` sits beside `v1`, `v1` keeps validating exactly
+what it validated, and a version whose module is absent raises `UnknownVersion`
+rather than silently falling back to the current vocabulary — a replay that
+cannot be validated is a different thing from one that fails.
+`tests/test_package_layout.py` refuses anything but `__init__.py` and `vN.py`
+inside such a package, because a shared helper in there is a file every frozen
+version imports and therefore a way to edit `v1` through a side door.
+
+**Two levels, and the vocabulary each one closes over.** The *evidence* level
+classifies an indicator — what a source says about an address, domain, URL or
+fingerprint — over the roots `no_match`, `normal`, `suspicious`, `malicious` and
+`unknown`. The *context* level classifies a host context, and its roots are
+closed **per emitter**: triage may emit only `normal` or `suspicious`, because a
+context triage could not assess is a typed failure rather than a third label,
+while the analyst adds `unknown` and `malicious`. `unknown` has no sub-paths at
+all — a child would claim a specificity the run does not have.
+
+**`v1`'s evidence level is roots-only, and that is a decision rather than an
+unfinished list.** `concept/02-concepts-and-taxonomy.md` adopts the evidence
+level "essentially unchanged from an existing published indicator taxonomy" and
+neither names that taxonomy nor reproduces it, so there is nothing in this
+repository to adopt sub-paths *from* — and inventing a plausible set is precisely
+what the note's own rule forbids ("emit the parent rather than guessing a child").
+They arrive with the first feed that needs them, in a `v2`.
+
 ## Ingest: the input contract, the captures, and the events
 
 The only input is **one flat JSON object per observed flow**, with inline DNS,

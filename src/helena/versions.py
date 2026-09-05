@@ -34,8 +34,12 @@ What this module does **not** do: choose the values. Only the aggregation versio
 is known here, because only the aggregation is defined here. The model version is
 the identity the model's *response* reported — not the configured name, which is
 the thing that can change beneath you — and the prompt, schema, rendering,
-taxonomy, enrichment snapshot and policy versions belong to the increments that
-first define one. A dimension without a value is a missing version, and a missing
+enrichment snapshot and policy versions belong to the increments that first
+define one. **The taxonomy version now has such an increment**: `helena.taxonomy`
+holds one module per version and `helena.taxonomy.version("v1")` is the frozen
+vocabulary a row recording `v1` is replayed against. Nothing here imports it — a
+version set records an identifier and does not resolve it, because resolving one
+is what replay does and this module is written by every stage. A dimension without a value is a missing version, and a missing
 version fails loudly at construction rather than defaulting to something plausible.
 
 Reads: nothing. Writes: nothing — it returns rows for a caller to write.
@@ -108,6 +112,12 @@ class VersionSet(BaseModel):
     # How the context was rendered for the agent — what triage saw is pinned by
     # this, not reconstructed from current code.
     rendering_version: Version
+    # The classification vocabulary. `helena.taxonomy` holds one module per
+    # version -- `v1` is the first -- and `helena.taxonomy.version(identifier)`
+    # returns the frozen vocabulary a row recorded. Replay validates a stored
+    # path against *that* module, so a `v2` that renames or drops a path cannot
+    # change what a `v1` row claims, and a version whose module is absent raises
+    # `UnknownVersion` rather than falling back to the current one.
     taxonomy_version: Version
     # The feed snapshot the enrichment join matched against. Replay joins the
     # snapshot that was current then, not today's.
