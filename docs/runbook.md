@@ -408,13 +408,20 @@ records a capture held is a fact about the retained file;
 `helena.normalizer.Quarantine.counts(capture)` brings the two together and
 refuses a total that does not reconcile.
 
-**A rising `contract_violation` rate is the number to watch.** Field requiredness
-in this contract was measured from one capture of one host over 130.8 seconds
-(`docs/decisions/0010-capture-identity.md`), so a producer that omits a field
-marked required here is quarantined rather than accepted. The answer to a high
-rate is a **new observation of the input** — `detail` names the field and
-`payload` is the record — not a field loosened on a hunch. Loosening one is a
-contract change and gets its own increment.
+**A rising `contract_violation` rate is the number to watch**, and it has already
+been collected on once. Field requiredness was measured from one capture of one
+host over 130.8 seconds; a second capture — a day of one network — was then
+refused **in its entirety**, a rate of 100 %, and requiredness was re-derived
+over both (`docs/decisions/0010-capture-identity.md`, addendum). So a producer
+that omits a field marked required here is still quarantined rather than
+accepted, and the answer to a high rate is still a **new observation of the
+input** — `detail` names the field and `payload` is the record — not a field
+loosened on a hunch. Loosening one is a contract change and gets its own
+increment, which is exactly what that addendum records.
+
+What that episode is worth operationally: a 100 % rate with every row naming the
+same handful of fields is a producer the contract has never seen, not a broken
+sensor. Read the fields before reading the number.
 
 Re-ingesting a capture rewrites the same rows rather than doubling them: the key
 is the ingestion identity plus the capture and offset, and an `INSERT` onto an

@@ -42,6 +42,15 @@ this contract requires will be **quarantined rather than accepted**. The
 quarantine rate is how that surfaces, and the raw payload is how it is
 diagnosed. That is durable evidence, not an operational aside.
 
+**This has since been demonstrated rather than argued.** A second capture — a
+day of one network, 239 850 records — was refused in its entirety, and what made
+it diagnosable was exactly what this ADR keeps: every refused record in the
+store, with its typed reason and its bytes as read. The refusals separated into
+four new fields the earlier producer never sent and twenty-eight that were marked
+required on the strength of 62 records, and neither of those could have been told
+from a counter alone. Requiredness was then re-derived over both captures
+(ADR-0010's addendum). The row is the evidence; the rate was only the alarm.
+
 ## What a row holds, and what it deliberately does not
 
 The columns are the ingestion identity (`tenant`, `sensor`), the raw-record
