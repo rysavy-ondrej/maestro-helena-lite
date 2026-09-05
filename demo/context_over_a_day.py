@@ -467,6 +467,37 @@ def main() -> int:
             note("such flow in a context collapsed into one phantom row carrying their")
             note("combined traffic and joinable to nothing.")
 
+        # How many entity rows one context holds, which is the question
+        # `concept/08-open-questions.md` records against "the rendering bounds":
+        # whatever renders a context to an agent has to survive the busiest one,
+        # not the average one. The percentiles are here rather than the mean
+        # because over a day the two answer differently by two orders of
+        # magnitude, and the mean is the one that would mislead.
+        # `percentile_cont` interpolates, so it returns a float and the ugly tail
+        # of one is noise rather than precision -- these are counts of rows.
+        spread = query(connection,
+            "SELECT round(percentile_cont(0.50) WITHIN GROUP (ORDER BY rows))::BIGINT AS p50,"
+            "       round(percentile_cont(0.90) WITHIN GROUP (ORDER BY rows))::BIGINT AS p90,"
+            "       round(percentile_cont(0.99) WITHIN GROUP (ORDER BY rows))::BIGINT AS p99,"
+            "       max(rows)::BIGINT AS peak, round(avg(rows), 1) AS mean,"
+            "       count(*) AS contexts"
+            "  FROM (SELECT context_id, count(*) AS rows"
+            "          FROM helena_signal_context_entities GROUP BY context_id) x")[0]
+        print(f"\n  {BOLD}entity rows in one context{RESET} "
+              f"{DIM}({thousands(spread['contexts'])} contexts with any){RESET}")
+        print_table(
+            [{"m": m, "v": v} for m, v in (
+                ("median", spread["p50"]), ("p90", spread["p90"]),
+                ("p99", spread["p99"]), ("max", spread["peak"]),
+                ("mean", spread["mean"]))],
+            [("m", "MEASURE"), ("v", "ROWS")], right={"v"})
+        note("the median context holds a row or two and the tail is enormous, so a")
+        note("bound taken from the mean would be wrong by orders of magnitude on")
+        note("exactly the contexts triage is for. Over the whole day: median 1, p90")
+        note("3, p99 441, max 1 822. Over six hours of it the peak is 795 — the tail")
+        note("is not visible in a slice, which is why this prints percentiles rather")
+        note("than an average, and why a subset run understates the maximum.")
+
         scope = query(connection,
             "SELECT count(*) FILTER (WHERE observed_as_flow_destination) AS contacted,"
             "       count(*) FILTER (WHERE NOT observed_as_flow_destination) AS named_only"
