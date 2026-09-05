@@ -163,6 +163,15 @@ prints the shape of the day by hour, the busiest hosts, and the in/out ratios
 that separate a host pulling a download from one broadcasting into a network
 that never answers.
 
+**And it prints how many entity rows one context holds**, which is the question
+`concept/08-open-questions.md` records against the rendering bounds. The answer
+is a distribution rather than a number: median 1, p90 3, p99 441, max 1 822.
+Most host-windows are nearly empty and a small tail is enormous, so whatever
+renders a context to an agent has to survive the busiest one — and a bound taken
+from the mean of 14.6 is wrong by two orders of magnitude on exactly the contexts
+triage is for. Six hours of this capture peaked at 795; the tail needs the whole
+day to see, which is why the demo prints the percentiles and not an average.
+
 **The Public Suffix List, on names worth normalizing.** The day's 2 490 distinct
 names collapse to 726 registrable domains — and the table is worth reading for
 the suffixes that are themselves registrable domains in it, like a CDN's
