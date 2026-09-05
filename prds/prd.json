@@ -259,7 +259,7 @@
         "Add tests asserting a timeout produces a typed error rather than `no_match` or `unknown`",
         "Add a test asserting `no_match` with confidence 1.0 is representable, since a definitive negative answer is a valid outcome"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D3 Enrichment] ThreatFox feed loader",
