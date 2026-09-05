@@ -85,6 +85,52 @@ structurally: `num` (ordering within the flow) and `content_len` appear on
 HTTP/1 observations and on none of the 21 HTTP/2 requests or 47 HTTP/2
 responses.
 
+### Addendum, 2026-09-05: the second capture arrived
+
+The paragraph above is kept as written, because what it predicted is what
+happened and the prediction is the useful part. `data/demo/20250920` — 143
+captures, 239 850 records, 3 199 source addresses, 23.97 hours of one network —
+was **refused in its entirety**: a quarantine rate of 100 %, every record a
+`contract_violation`.
+
+Two different things were wrong, and only one of them was drift.
+
+*Observations the earlier producer did not send.* `tx` on the flow (on all
+239 850 records, and on its own enough to refuse every one under
+`extra="forbid"`), `udp.dgms` (192 724), `tcp.segs` (47 126) and
+`tls.recs[].dir` (23 354). `dgms` and `segs` are per-packet arrays shaped like
+the `tls.recs` the contract already carried, so there was somewhere to put them.
+Had there not been, this would have been the adapter-boundary conversation
+`docs/decisions/0012-input-format-adapters.md` exists to force rather than an
+addition to the contract.
+
+*Requiredness measured too tightly.* `tls.ja4s` was required and this producer
+never sends it; the other fourteen TLS handshake keys sit at about 64 % because
+a flow captured mid-connection has records and no handshake. `dns.rcode`,
+`dns.responses`, `dns.queries`, `dns.responses[].ttl`, `http.req`, `http.res`
+and `http2.res` are the same error at smaller scale.
+
+And one rename: `http.req[].num` / `http.res[].num` arrive as `rnum`, which this
+producer also puts on HTTP/2 — so the "structurally disjoint key sets" sentence
+above is now half true. `content_len` is still HTTP/1 only; `rnum` is on both.
+Both spellings are in the contract, both optional, and neither is mapped onto the
+other, because that would make the stored record no longer the record as read.
+
+**The rule did not change; its input did.** Requiredness is now derived over
+both captures by the same mechanical rule — required only if present in every
+observation of its kind in every capture. Twenty-eight fields moved from required
+to optional and fifteen were added; none was removed and none tightened. The cost
+is real and is the price of the rule rather than a concession: a producer that
+stops sending one of those twenty-eight is now accepted where it would once have
+been quarantined. The direction of a fix stays what this ADR said it was — a
+further observation of the input, never a field tightened on a hunch.
+
+`tests/test_normalizer.py` measures both halves against the capture in place and
+skips when it is absent. The capture is not in the repository and `.gitignore`
+keeps it out: `flow-sample.jsonl` carries a recorded clearance and a datasheet
+(`data/ingest/README.md`) and this capture carries neither, which is a reason to
+leave it where it is rather than a finding about it.
+
 Two things the contract deliberately does **not** enforce, because enforcing
 them would be inventing a requirement to make the model look complete:
 

@@ -125,3 +125,12 @@ assumed.
 host, 2.2 minutes, no labels, no malicious activity, no ground truth. Its layer
 ratios describe this capture, not the schema — any expectation derived from them
 will be wrong on real traffic (EXP-001, INCONCLUSIVE as a corpus).
+
+**That warning has since been collected on.** A second capture — a day of one
+network, 239 850 records, 3 199 source addresses — was refused in its entirety by
+the flow-record contract measured from this fixture: a quarantine rate of 100 %.
+Twenty-eight fields had been marked required on the strength of this capture
+alone and are optional in reality. The addendum in
+[`docs/decisions/0010-capture-identity.md`](../../docs/decisions/0010-capture-identity.md)
+records what moved and what it cost. Nothing about this fixture changed; what
+changed is that it is no longer the only thing requiredness rests on.

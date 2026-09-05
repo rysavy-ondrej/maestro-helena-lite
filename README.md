@@ -184,7 +184,8 @@ tenant, no sensor, no schema version and no raw-record reference** — all four 
 assigned at ingestion, never read from the record. Unknown fields are refused
 rather than coerced, no type is coerced either, and `as_supplied()` round-trips a
 parsed record back to the JSON it came from, asserted over all 62 records of
-`data/ingest/flow-sample.jsonl` and both capture fixtures.
+`data/ingest/flow-sample.jsonl`, both capture fixtures, and — when it is present
+— all 239 850 records of the day capture `data/demo/20250920`.
 
 A **capture** is a retained file of flow records identified by the sha256 of the
 file, and the captures are the durable record for replay — the broker is
@@ -201,7 +202,9 @@ file. `tests/test_normalizer.py` demonstrates it by appending a record and
 watching the identity change, and
 [`docs/decisions/0010-capture-identity.md`](docs/decisions/0010-capture-identity.md)
 records the contract, the requiredness assumption behind it, and what live
-ingestion has to decide.
+ingestion has to decide. That assumption has since been tested: a second capture
+refused 100 % of its records, requiredness was re-measured over both, and the
+ADR's addendum says what moved and what it cost.
 
 The bytes are read by an **adapter**, and that is the boundary a second input
 format has to be absorbed by: `parse(line) -> FlowRecord | ParseFailure`, with no
