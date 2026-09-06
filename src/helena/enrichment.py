@@ -45,10 +45,20 @@ settled that the schema carries **N rows per entity** — Netify alone puts up t
 75 claims on one address. `QueryFailure` is what a query that did not complete
 produces instead: typed, bounded, and with nowhere to put a classification.
 
+**Snapshot versioning is the provenance story for the static tier.** Every load
+attempt of every feed writes a row to `helena_reference_feed_snapshot` —
+including the failures, because a fetch failure, a format change or an empty
+response leaves the previous snapshot in place and is *recorded*, never a silent
+empty opinion. Loading does not delete the snapshot before it: a claim records
+the snapshot it matched against and replay joins *that* one, so `prune_snapshots`
+is a deliberate call rather than a side effect. `feed_status` derives `ok` /
+`stale` / `missing`, which are three different things and none of them is
+`no_match`.
+
 Reads: an HTTP(S) or `file:` URL supplied by the caller, through the standard
 library. Writes: `helena_reference_public_suffix`,
-`helena_reference_public_suffix_load` and — when a loader exists —
-`helena_reference_enrichment_evidence`.
+`helena_reference_public_suffix_load`, `helena_reference_enrichment_evidence` and
+`helena_reference_feed_snapshot`.
 
 Maturity: experimental — the Public Suffix List loader and its failure paths are
 exercised by `tests/test_enrichment.py`, against a real engine and against the
@@ -56,9 +66,10 @@ live list; the source registry and the diversity count by `tests/test_sources.py
 the evidence row, its statuses and its identifier by `tests/test_evidence.py`,
 including a round trip through the engine; the ThreatFox loader by
 `tests/test_threatfox.py`, against a real engine and a committed extract of a
-real export. What has NOT happened: no context has been enriched — the join is a
-view that does not exist yet — and no snapshot version has reached an
-assessment.
+real export; snapshot versioning, the three failure modes and the derived
+statuses by `tests/test_snapshots.py`. What has NOT happened: no context has been
+enriched — the join is a view that does not exist yet — and no snapshot version
+has reached an assessment.
 """
 
 from __future__ import annotations
@@ -90,6 +101,10 @@ __all__ = [
     "ENTITY_TYPES",
     "EnrichmentEvidence",
     "FAILURE_REASONS",
+    "FEED_SNAPSHOT_CURRENT_VIEW",
+    "FEED_SNAPSHOT_TABLE",
+    "FeedSnapshot",
+    "FeedStatus",
     "ICANN_SECTION",
     "LOAD_STATUSES",
     "MALFORMED_EXPORT",
@@ -106,26 +121,26 @@ __all__ = [
     "QUERY_FAILED",
     "QUERY_FAILURE_REASONS",
     "QueryFailure",
+    "SNAPSHOTS_KEPT",
     "SOURCES",
     "STALE",
     "SourceDescriptor",
     "SourceError",
     "THREATFOX_ENTITY_TYPES",
     "THREATFOX_FAILURE_REASONS",
-    "THREATFOX_LOAD_TABLE",
     "THREATFOX_MIN_FETCH_INTERVAL_SECONDS",
     "THREATFOX_SOURCE",
     "THREATFOX_THREAT_TYPES",
     "THREATFOX_UNSEEN_THREAT_TYPE",
     "ThreatFoxEntry",
     "ThreatFoxError",
-    "ThreatFoxLoad",
     "ThreatFoxSnapshot",
     "Tier",
     "UndeclaredClaim",
     "check_claim",
     "classify_threat_type",
     "evidence_id",
+    "feed_status",
     "fetch_public_suffix_list",
     "fetch_threatfox",
     "load_public_suffix_list",
@@ -133,6 +148,7 @@ __all__ = [
     "origins",
     "parse_public_suffix_list",
     "parse_threatfox",
+    "prune_snapshots",
     "source",
     "source_diversity",
     "split_indicator",
@@ -633,6 +649,14 @@ ENTITY_TYPES = frozenset({"address", "domain", "url", "fingerprint"})
 # subset is required to contain it and two functions below compare against it.
 NO_MATCH = "no_match"
 
+# `concept/05` puts fetch limits under "policy the tool layer enforces, not an
+# afterthought", and the recent export is a rolling window rather than a
+# firehose. Hourly is the floor a scheduler is expected to respect; nothing here
+# schedules anything, and a scheduler with its own state would be a second store.
+# It sits with the registry rather than in the ThreatFox section below because
+# the descriptor is what carries a source's schedule -- see `refresh_interval_seconds`.
+THREATFOX_MIN_FETCH_INTERVAL_SECONDS = 3600
+
 
 class SourceError(Exception):
     """A source descriptor or a claim is not what the catalogue says one is."""
@@ -674,6 +698,12 @@ class SourceDescriptor:
     #: stored claim can be read against the subset that was declared when it was
     #: made -- the same rule as every other version in this project.
     emit_subset_version: str
+    #: How often this feed publishes, in seconds -- the feed's OWN schedule and
+    #: not a polling preference. `concept/05` puts fetch limits under "policy the
+    #: tool layer enforces, not an afterthought", and it is also what `stale` is
+    #: measured against: a snapshot older than the interval is one the source has
+    #: already replaced. `None` for a source with no schedule to be late against.
+    refresh_interval_seconds: int | None = None
     #: True where this source republishes other sources' evidence.
     #: `concept/02`: "Evidence copied through an aggregator is not an independent
     #: vote; retain the origin and count source diversity. An aggregator is never
@@ -720,6 +750,11 @@ SOURCES: dict[str, SourceDescriptor] = {
         source_id="threatfox",
         tier=Tier.B,
         entity_types=frozenset({"address", "domain", "url"}),
+        # The recent export "regenerates every few minutes and is a rolling
+        # window, not a cumulative archive". An hour is the floor `concept/05`'s
+        # fair-use terms imply for fetching, and a snapshot older than that is
+        # one the publisher has already moved past.
+        refresh_interval_seconds=THREATFOX_MIN_FETCH_INTERVAL_SECONDS,
         # `concept/05`: "C2 and malware delivery, by threat type". **By threat
         # type** is the part v1 cannot express: the evidence level is roots-only
         # there, because `concept/02` adopts it from a published indicator
@@ -736,6 +771,11 @@ SOURCES: dict[str, SourceDescriptor] = {
         source_id="sslbl-ja3",
         tier=Tier.C,
         entity_types=frozenset({"fingerprint"}),
+        # No schedule: `concept/05` records that this list has been **static
+        # since 2021**. A refresh interval would make it permanently stale and
+        # say something false -- it is not late, it is finished. What is wrong
+        # with it is in the caveat, not in its age.
+        refresh_interval_seconds=None,
         # `concept/05` maps it to "Malware, or a single low-confidence
         # detection", and tier C is "normally `suspicious`". `malicious` is not
         # in the subset and the caveat below is why: a list that its own
@@ -936,6 +976,17 @@ QUERY_FAILURE_REASONS = (
 )
 
 ENRICHMENT_EVIDENCE_TABLE = "helena_reference_enrichment_evidence"
+FEED_SNAPSHOT_TABLE = "helena_reference_feed_snapshot"
+FEED_SNAPSHOT_CURRENT_VIEW = "helena_reference_feed_snapshot_current"
+
+# How many snapshots of one source to keep when `prune_snapshots` is called.
+# More than one, because replay joins the snapshot a claim recorded rather than
+# today's (`concept/02`); a number rather than "all", because the recent export
+# is thousands of claims every hour. Three is a candidate and not a decision --
+# what it should be is a function of how far back replay has to reach, which is
+# an open question (`concept/08-open-questions.md`) rather than a value anyone
+# has measured.
+SNAPSHOTS_KEPT = 3
 
 #: How long a `detail` may be. Bounded because an unbounded diagnostic string is
 #: where a provider response ends up: somebody pastes `str(response)` in, and the
@@ -1278,12 +1329,6 @@ THREATFOX_SOURCE = "threatfox"
 # flag, and the port is the difference between a C2 claim that matches a host's
 # traffic and one that does not.
 
-#: `concept/05` puts fetch limits under "policy the tool layer enforces, not an
-#: afterthought", and the recent export is a rolling window rather than a
-#: firehose. Hourly is the floor a scheduler is expected to respect; nothing here
-#: schedules anything, and a scheduler with its own state would be a second store.
-THREATFOX_MIN_FETCH_INTERVAL_SECONDS = 3600
-
 #: ThreatFox `ioc_type` -> the HELENA entity type it becomes. A type absent from
 #: this map has no entity to attach to and is skipped and counted -- see above.
 THREATFOX_ENTITY_TYPES = {
@@ -1311,7 +1356,7 @@ THREATFOX_THREAT_TYPES = {
 #: it has never seen emits `malicious`, not an invented `malicious.something`."*
 THREATFOX_UNSEEN_THREAT_TYPE = "malicious"
 
-THREATFOX_LOAD_TABLE = "helena_reference_threatfox_load"
+
 
 MALFORMED_EXPORT = "malformed_export"
 EMPTY_EXPORT = "empty_export"
@@ -1647,37 +1692,37 @@ def _threatfox_time(value: str | None) -> datetime | None:
         return None
 
 
-class ThreatFoxLoad(BaseModel):
-    """One row of `helena_reference_threatfox_load`, as it was written.
+class FeedSnapshot(BaseModel):
+    """One row of `helena_reference_feed_snapshot`: one load attempt of one feed.
 
     Frozen: it describes an attempt that has already happened. The invariants the
     columns only document are validated here -- a failure naming a snapshot, a
-    success naming a reason, or counts that do not reconcile -- so a loader that
-    got them the wrong way round fails before storing a row that reads as both.
+    success naming a reason -- so a loader that got them the wrong way round
+    fails before storing a row that reads as both.
+
+    `counts` is whatever that feed counts, because feeds do not count the same
+    things: ThreatFox has entries read, claims stored and skipped file hashes,
+    and a feed with no unmappable indicator type would have two of those. What is
+    checked here is what every feed shares -- see `reconciles`.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    source_id: str
     attempted_at: datetime
     source_url: str
-    status: str
+    outcome: str
     snapshot_version: str | None
-    entries_read: int | None
-    claims_stored: int | None
-    skipped_no_entity: int | None
-    unseen_threat_types: int | None
-    failure_reason: str | None
-    failure_detail: str | None
+    counts: dict[str, Any] = Field(default_factory=dict)
+    failure_reason: str | None = None
+    failure_detail: str | None = None
 
     def model_post_init(self, _context: object) -> None:
-        if self.status not in LOAD_STATUSES:
-            raise ValueError(f"status {self.status!r} is not one of {LOAD_STATUSES}")
-        if self.status == FAILED:
-            if self.failure_reason not in THREATFOX_FAILURE_REASONS:
-                raise ValueError(
-                    f"a failed load names one of {THREATFOX_FAILURE_REASONS}, "
-                    f"not {self.failure_reason!r}"
-                )
+        if self.outcome not in LOAD_STATUSES:
+            raise ValueError(f"outcome {self.outcome!r} is not one of {LOAD_STATUSES}")
+        if self.outcome == FAILED:
+            if not self.failure_reason:
+                raise ValueError("a failed load names a reason")
             if self.snapshot_version is not None:
                 raise ValueError(
                     "a failed load has no snapshot: the previous one stands, and "
@@ -1686,19 +1731,30 @@ class ThreatFoxLoad(BaseModel):
             return
         if self.failure_reason is not None:
             raise ValueError(
-                f"a {self.status} load names failure reason "
+                f"a {self.outcome} load names failure reason "
                 f"{self.failure_reason!r}"
             )
         if self.snapshot_version is None:
-            raise ValueError(f"a {self.status} load names no snapshot")
-        counts = (self.entries_read, self.claims_stored, self.skipped_no_entity)
-        if any(count is None for count in counts):
-            raise ValueError(f"a {self.status} load carries all three counts")
-        if self.entries_read != self.claims_stored + self.skipped_no_entity:
+            raise ValueError(f"a {self.outcome} load names no snapshot")
+        self.reconciles()
+
+    def reconciles(self) -> None:
+        """`entries_read == stored + skipped`, where the feed reports all three.
+
+        `concept/instruction.md` §7 requires produced-versus-materialised counts
+        to reconcile. A feed that does not report these three is not exempt from
+        the rule -- it has nothing here to check, and whatever it does count is
+        checked wherever it is produced.
+        """
+        read = self.counts.get("entries_read")
+        stored = self.counts.get("claims_stored")
+        skipped = self.counts.get("skipped_no_entity")
+        if None in (read, stored, skipped):
+            return
+        if read != stored + skipped:
             raise ValueError(
-                f"{self.entries_read} entries read, {self.claims_stored} stored "
-                f"and {self.skipped_no_entity} skipped; the counters do not "
-                f"reconcile (concept/instruction.md §7)"
+                f"{read} entries read, {stored} stored and {skipped} skipped; "
+                f"the counters do not reconcile (concept/instruction.md §7)"
             )
 
 
@@ -1711,7 +1767,7 @@ def load_threatfox(
     redactor: Redactor,
     raw: bytes | None = None,
     now: datetime | None = None,
-) -> ThreatFoxLoad:
+) -> FeedSnapshot:
     """Fetch, map completely, then write. Returns the load row it wrote.
 
     The order is the one `load_public_suffix_list` uses and for the same reason:
@@ -1740,93 +1796,89 @@ def load_threatfox(
         payload = fetch_threatfox(source_url) if raw is None else raw
         snapshot = threatfox_claims(payload, tenant=tenant, sensor=sensor)
     except ThreatFoxError as failure:
-        return _record_threatfox_load(
+        # The previous snapshot is untouched: nothing has been written, and the
+        # claims still join. `concept/instruction.md`: never let a failure empty
+        # a table -- the result is `stale`, never a silent empty opinion.
+        return _record_snapshot(
             connection,
-            ThreatFoxLoad(
+            FeedSnapshot(
+                source_id=THREATFOX_SOURCE,
                 attempted_at=attempted_at,
                 source_url=recorded_url,
-                status=FAILED,
+                outcome=FAILED,
                 snapshot_version=None,
-                entries_read=None,
-                claims_stored=None,
-                skipped_no_entity=None,
-                unseen_threat_types=None,
                 failure_reason=failure.reason,
                 failure_detail=str(failure)[:MAX_FAILURE_DETAIL],
             ),
+            tenant=tenant,
+            sensor=sensor,
         )
 
-    held = _current_threatfox_snapshot(connection, tenant=tenant, sensor=sensor)
-    if held == snapshot.snapshot_version:
-        # Same bytes, same snapshot. Rewriting four thousand identical rows would
-        # be work for no change, and the attempt is still recorded -- an operator
-        # asking why a snapshot is old needs to see that a fetch happened.
-        return _record_threatfox_load(
-            connection,
-            ThreatFoxLoad(
-                attempted_at=attempted_at,
-                source_url=recorded_url,
-                status=UNCHANGED,
-                snapshot_version=snapshot.snapshot_version,
-                entries_read=snapshot.entries_read,
-                claims_stored=len(snapshot.claims),
-                skipped_no_entity=snapshot.skipped_no_entity,
-                unseen_threat_types=len(snapshot.unseen_threat_types),
-                failure_reason=None,
-                failure_detail=None,
-            ),
-        )
-
-    for claim in snapshot.claims:
-        _insert_evidence(connection, claim, tenant=tenant, sensor=sensor)
-    connection.execute("FLUSH")
-    connection.execute(
-        f"DELETE FROM {ENRICHMENT_EVIDENCE_TABLE} WHERE tenant = %s AND sensor = %s "
-        f"AND source_id = %s AND snapshot_version <> %s",
-        (tenant, sensor, THREATFOX_SOURCE, snapshot.snapshot_version),
-    )
-    connection.execute("FLUSH")
-    return _record_threatfox_load(
+    counts = {
+        "entries_read": snapshot.entries_read,
+        "claims_stored": len(snapshot.claims),
+        "skipped_no_entity": snapshot.skipped_no_entity,
+        "unseen_threat_types": len(snapshot.unseen_threat_types),
+        # Written with the load rather than joined from a table of feeds: the
+        # schedule is what the loader knows and the engine does not, and a row
+        # judged against one interval keeps saying which interval that was.
+        "refresh_interval_seconds": SOURCES[THREATFOX_SOURCE].refresh_interval_seconds,
+    }
+    outcome = UNCHANGED if _holds_snapshot(
         connection,
-        ThreatFoxLoad(
+        tenant=tenant,
+        sensor=sensor,
+        source_id=THREATFOX_SOURCE,
+        snapshot_version=snapshot.snapshot_version,
+    ) else LOADED
+    if outcome == LOADED:
+        # Written, never replaced. The old snapshot stays: a claim records the
+        # snapshot it matched against and replay joins *that* one
+        # (`concept/02`), so deleting it would leave a stored assessment citing a
+        # snapshot the store no longer has. Pruning is `prune_snapshots`, a
+        # deliberate operation against a retention, not a side effect of loading.
+        for claim in snapshot.claims:
+            _insert_evidence(connection, claim, tenant=tenant, sensor=sensor)
+        connection.execute("FLUSH")
+    return _record_snapshot(
+        connection,
+        FeedSnapshot(
+            source_id=THREATFOX_SOURCE,
             attempted_at=attempted_at,
             source_url=recorded_url,
-            status=LOADED,
+            outcome=outcome,
             snapshot_version=snapshot.snapshot_version,
-            entries_read=snapshot.entries_read,
-            claims_stored=len(snapshot.claims),
-            skipped_no_entity=snapshot.skipped_no_entity,
-            unseen_threat_types=len(snapshot.unseen_threat_types),
-            failure_reason=None,
-            failure_detail=None,
+            counts=counts,
         ),
+        tenant=tenant,
+        sensor=sensor,
     )
 
 
-def _current_threatfox_snapshot(
-    connection: psycopg.Connection, *, tenant: str, sensor: str
-) -> str | None:
-    """The snapshot version the evidence table currently holds for this source.
+def _holds_snapshot(
+    connection: psycopg.Connection,
+    *,
+    tenant: str,
+    sensor: str,
+    source_id: str,
+    snapshot_version: str,
+) -> bool:
+    """Whether the evidence table already holds this snapshot's claims.
 
-    Read from the claims rather than from the load ledger, because the claims are
-    what a join sees: a ledger saying `loaded` over an empty table would be a
+    Read from the claims rather than from the snapshot ledger, because the claims
+    are what a join sees: a ledger saying `loaded` over an empty table would be a
     second store disagreeing with the first.
+
+    Several snapshots coexisting is the normal state now and not an error -- that
+    is what replay joins against.
     """
     connection.execute("FLUSH")
     rows = connection.execute(
-        f"SELECT DISTINCT snapshot_version FROM {ENRICHMENT_EVIDENCE_TABLE} "
-        f"WHERE tenant = %s AND sensor = %s AND source_id = %s",
-        (tenant, sensor, THREATFOX_SOURCE),
+        f"SELECT 1 FROM {ENRICHMENT_EVIDENCE_TABLE} WHERE tenant = %s AND "
+        f"sensor = %s AND source_id = %s AND snapshot_version = %s LIMIT 1",
+        (tenant, sensor, source_id, snapshot_version),
     ).fetchall()
-    if len(rows) > 1:
-        # Mid-replacement, or a load that died between the insert and the delete.
-        # Not a value to pick from: say so.
-        raise ThreatFoxError(
-            f"the evidence table holds {len(rows)} snapshots for "
-            f"{THREATFOX_SOURCE}; a replacement did not finish",
-            reason=MALFORMED_EXPORT,
-        )
-    return rows[0][0] if rows else None
+    return bool(rows)
 
 
 def _insert_evidence(
@@ -1867,27 +1919,163 @@ def _insert_evidence(
     )
 
 
-def _record_threatfox_load(
-    connection: psycopg.Connection, load: ThreatFoxLoad
-) -> ThreatFoxLoad:
-    """Write the load row and return it. Every attempt, including the failures."""
+def _record_snapshot(
+    connection: psycopg.Connection,
+    snapshot: FeedSnapshot,
+    *,
+    tenant: str,
+    sensor: str,
+) -> FeedSnapshot:
+    """Write the snapshot row and return it. Every attempt, failures included."""
     connection.execute(
-        f"INSERT INTO {THREATFOX_LOAD_TABLE} (attempted_at, source_url, status, "
-        f"snapshot_version, entries_read, claims_stored, skipped_no_entity, "
-        f"unseen_threat_types, failure_reason, failure_detail) "
+        f"INSERT INTO {FEED_SNAPSHOT_TABLE} (tenant, sensor, source_id, "
+        f"attempted_at, source_url, outcome, snapshot_version, counts, "
+        f"failure_reason, failure_detail) "
         f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
-            load.attempted_at,
-            load.source_url,
-            load.status,
-            load.snapshot_version,
-            load.entries_read,
-            load.claims_stored,
-            load.skipped_no_entity,
-            load.unseen_threat_types,
-            load.failure_reason,
-            load.failure_detail,
+            tenant,
+            sensor,
+            snapshot.source_id,
+            snapshot.attempted_at,
+            snapshot.source_url,
+            snapshot.outcome,
+            snapshot.snapshot_version,
+            Jsonb(snapshot.counts),
+            snapshot.failure_reason,
+            snapshot.failure_detail,
         ),
     )
     connection.execute("FLUSH")
-    return load
+    return snapshot
+
+
+# --- Snapshot status, and what it is not ------------------------------------
+
+
+@dataclass(frozen=True)
+class FeedStatus:
+    """What a source's snapshot is worth as of one read.
+
+    `ok` and `stale` come from the engine's own view of the snapshot ledger;
+    `missing` is the absence of a row there. They are computed rather than stored
+    because two of the four enrichment statuses are properties of *now*:
+    `helena_signal_host_context_live` computes `completeness` over `now()` for
+    exactly this reason, and a stored `stale` would be wrong the moment time
+    passed.
+    """
+
+    source_id: str
+    status: str
+    snapshot_version: str | None
+    attempted_at: datetime | None
+    refresh_interval_seconds: int | None
+
+    @property
+    def has_snapshot(self) -> bool:
+        return self.snapshot_version is not None
+
+
+def feed_status(
+    connection: psycopg.Connection, *, tenant: str, sensor: str, source_id: str
+) -> FeedStatus:
+    """`ok`, `stale` or `missing` for one source, as of this read.
+
+    The three that a *reader* of the reference layer can be in.
+    `concept/instruction.md` forbids collapsing them and the difference is not
+    academic:
+
+    * `ok` -- the snapshot is younger than the feed's own refresh interval, so it
+      is what the publisher currently says.
+    * `stale` -- there is a snapshot and the publisher has moved past it. The
+      claims still stand: `concept/02` is explicit that removal from a feed is
+      not exoneration, and an aged snapshot is evidence with a date on it rather
+      than evidence withdrawn.
+    * `missing` -- **no snapshot at all**. Never `no_match`, and that is the
+      distinction the whole design turns on: `no_match` is a source that ran and
+      found nothing, and `missing` is a source that was never asked. Reading the
+      second as the first is triage reading "no hit" as "clean".
+
+    A source with no `refresh_interval_seconds` can never be `stale` -- the SSLBL
+    JA3 list has been static since 2021, so it is not late, it is finished, and
+    what is wrong with it is in its caveat rather than in its age.
+    """
+    connection.execute("FLUSH")
+    rows = connection.execute(
+        f"SELECT status, snapshot_version, attempted_at, refresh_interval_seconds "
+        f"FROM {FEED_SNAPSHOT_CURRENT_VIEW} "
+        f"WHERE tenant = %s AND sensor = %s AND source_id = %s",
+        (tenant, sensor, source_id),
+    ).fetchall()
+    if not rows:
+        return FeedStatus(
+            source_id=source_id,
+            status=MISSING,
+            snapshot_version=None,
+            attempted_at=None,
+            refresh_interval_seconds=None,
+        )
+    status, version, attempted_at, interval = rows[0]
+    if interval is None:
+        # Nothing to be late against. The view has to say something, and `stale`
+        # against no schedule would be a claim about a feed that has none.
+        status = OK
+    return FeedStatus(
+        source_id=source_id,
+        status=status,
+        snapshot_version=version,
+        attempted_at=attempted_at,
+        refresh_interval_seconds=interval,
+    )
+
+
+def prune_snapshots(
+    connection: psycopg.Connection,
+    *,
+    tenant: str,
+    sensor: str,
+    source_id: str,
+    keep: int = SNAPSHOTS_KEPT,
+) -> int:
+    """Drop all but the newest `keep` snapshots of one source. Returns how many went.
+
+    **A deliberate operation, never a side effect of loading**, and that is the
+    correction this increment makes to the ThreatFox loader as task 22 shipped
+    it: that one replaced its claims insert-then-delete and kept exactly one
+    snapshot, which is right for the Public Suffix List and wrong for a feed. A
+    claim records the snapshot it matched against and `concept/02` requires
+    replay to join *that* snapshot, so deleting it on the next load leaves a
+    stored assessment citing a snapshot the store no longer has.
+
+    Pruning still has to exist -- the recent export is thousands of claims every
+    hour -- so it is here, with a number, called when somebody decides to call
+    it. Nothing calls it automatically, for the reason nothing here schedules a
+    fetch: that decision has an operator behind it.
+    """
+    connection.execute("FLUSH")
+    versions = [
+        row[0]
+        for row in connection.execute(
+            f"SELECT snapshot_version FROM {FEED_SNAPSHOT_TABLE} "
+            f"WHERE tenant = %s AND sensor = %s AND source_id = %s "
+            f"AND snapshot_version IS NOT NULL "
+            f"ORDER BY attempted_at DESC",
+            (tenant, sensor, source_id),
+        ).fetchall()
+    ]
+    # Newest first, de-duplicated: an `unchanged` load writes a second row for a
+    # snapshot already held, and that is one snapshot rather than two.
+    ordered: list[str] = []
+    for version in versions:
+        if version not in ordered:
+            ordered.append(version)
+    doomed = ordered[keep:]
+    if not doomed:
+        return 0
+    for version in doomed:
+        connection.execute(
+            f"DELETE FROM {ENRICHMENT_EVIDENCE_TABLE} WHERE tenant = %s AND "
+            f"sensor = %s AND source_id = %s AND snapshot_version = %s",
+            (tenant, sensor, source_id, version),
+        )
+    connection.execute("FLUSH")
+    return len(doomed)

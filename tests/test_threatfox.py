@@ -30,14 +30,14 @@ from helena.enrichment import (
     MALFORMED_EXPORT,
     OK,
     THREATFOX_ENTITY_TYPES,
-    THREATFOX_LOAD_TABLE,
+    FEED_SNAPSHOT_TABLE,
     THREATFOX_SOURCE,
     THREATFOX_THREAT_TYPES,
     THREATFOX_UNSEEN_THREAT_TYPE,
     UNCHANGED,
     SOURCES,
     ThreatFoxError,
-    ThreatFoxLoad,
+    FeedSnapshot,
     Tier,
     check_claim,
     classify_threat_type,
@@ -353,49 +353,38 @@ def test_the_counts_reconcile():
     assert result.entries_read == len(parse_threatfox(RAW))
 
 
-def test_a_load_row_whose_counts_do_not_reconcile_is_refused():
+def test_a_snapshot_row_whose_counts_do_not_reconcile_is_refused():
     with pytest.raises(ValueError, match="do not reconcile"):
-        ThreatFoxLoad(
+        FeedSnapshot(
+            source_id=THREATFOX_SOURCE,
             attempted_at=datetime.now(timezone.utc),
             source_url=THREATFOX_EXPORT_URL,
-            status=LOADED,
+            outcome=LOADED,
             snapshot_version="a" * 64,
-            entries_read=10,
-            claims_stored=5,
-            skipped_no_entity=2,
-            unseen_threat_types=0,
-            failure_reason=None,
-            failure_detail=None,
+            counts={"entries_read": 10, "claims_stored": 5, "skipped_no_entity": 2},
         )
 
 
 def test_a_failed_load_names_no_snapshot_and_a_successful_one_names_no_reason():
     """A row that read as both would be a row nobody could act on."""
     with pytest.raises(ValueError, match="a failed load has no snapshot"):
-        ThreatFoxLoad(
+        FeedSnapshot(
+            source_id=THREATFOX_SOURCE,
             attempted_at=datetime.now(timezone.utc),
             source_url=THREATFOX_EXPORT_URL,
-            status=FAILED,
+            outcome=FAILED,
             snapshot_version="a" * 64,
-            entries_read=None,
-            claims_stored=None,
-            skipped_no_entity=None,
-            unseen_threat_types=None,
             failure_reason=FETCH_FAILED,
-            failure_detail="",
         )
     with pytest.raises(ValueError, match="names failure reason"):
-        ThreatFoxLoad(
+        FeedSnapshot(
+            source_id=THREATFOX_SOURCE,
             attempted_at=datetime.now(timezone.utc),
             source_url=THREATFOX_EXPORT_URL,
-            status=LOADED,
+            outcome=LOADED,
             snapshot_version="a" * 64,
-            entries_read=1,
-            claims_stored=1,
-            skipped_no_entity=0,
-            unseen_threat_types=0,
+            counts={"entries_read": 1, "claims_stored": 1, "skipped_no_entity": 0},
             failure_reason=FETCH_FAILED,
-            failure_detail="",
         )
 
 
@@ -414,21 +403,26 @@ def test_a_load_writes_the_claims_and_a_load_row(
         redactor=redactor,
         raw=RAW,
     )
-    assert load.status == LOADED
-    assert load.claims_stored == len(snapshot().claims)
-    assert load.entries_read == load.claims_stored + load.skipped_no_entity
+    assert load.outcome == LOADED
+    assert load.counts["claims_stored"] == len(snapshot().claims)
+    assert load.counts["entries_read"] == (
+        load.counts["claims_stored"] + load.counts["skipped_no_entity"]
+    )
 
     stored = migrated_engine.execute(
         f"SELECT count(*), count(DISTINCT snapshot_version) "
         f"FROM {ENRICHMENT_EVIDENCE_TABLE} WHERE source_id = %s",
         (THREATFOX_SOURCE,),
     ).fetchone()
-    assert stored == (load.claims_stored, 1)
+    assert stored == (load.counts["claims_stored"], 1)
 
     rows = migrated_engine.execute(
-        f"SELECT status, snapshot_version, claims_stored FROM {THREATFOX_LOAD_TABLE}"
+        f"SELECT outcome, snapshot_version, counts FROM {FEED_SNAPSHOT_TABLE}"
     ).fetchall()
-    assert rows == [(LOADED, load.snapshot_version, load.claims_stored)]
+    assert len(rows) == 1
+    outcome, version, counts = rows[0]
+    assert (outcome, version) == (LOADED, load.snapshot_version)
+    assert counts["claims_stored"] == load.counts["claims_stored"]
 
 
 @pytest.mark.integration
@@ -456,16 +450,16 @@ def test_the_same_bytes_twice_is_one_snapshot(
         redactor=redactor,
         raw=RAW
     )
-    assert first.status == LOADED
-    assert second.status == UNCHANGED
+    assert first.outcome == LOADED
+    assert second.outcome == UNCHANGED
     assert second.snapshot_version == first.snapshot_version
     count = migrated_engine.execute(
         f"SELECT count(*) FROM {ENRICHMENT_EVIDENCE_TABLE} WHERE source_id = %s",
         (THREATFOX_SOURCE,),
     ).fetchone()[0]
-    assert count == first.claims_stored
+    assert count == first.counts["claims_stored"]
     attempts = migrated_engine.execute(
-        f"SELECT count(*) FROM {THREATFOX_LOAD_TABLE}"
+        f"SELECT count(*) FROM {FEED_SNAPSHOT_TABLE}"
     ).fetchone()[0]
     assert attempts == 2
 
@@ -495,7 +489,7 @@ def test_a_failed_fetch_leaves_the_previous_snapshot_and_records_the_failure(
         redactor=redactor,
         raw=b"not json at all",
     )
-    assert bad.status == FAILED
+    assert bad.outcome == FAILED
     assert bad.failure_reason == MALFORMED_EXPORT
     assert bad.snapshot_version is None
 
@@ -504,18 +498,20 @@ def test_a_failed_fetch_leaves_the_previous_snapshot_and_records_the_failure(
         f"WHERE source_id = %s",
         (THREATFOX_SOURCE,),
     ).fetchone()
-    assert survived == (good.claims_stored, good.snapshot_version)
+    assert survived == (good.counts["claims_stored"], good.snapshot_version)
 
 
 @pytest.mark.integration
-def test_a_new_snapshot_replaces_the_old_one(
+def test_a_new_snapshot_is_kept_beside_the_old_one(
     migrated_engine: psycopg.Connection, redactor: Redactor
 ):
-    """Insert then delete, so a half-done replacement is a superset.
+    """Both snapshots survive, and that is the correction 0013 makes.
 
-    0008 argues the order: a superset for a moment is a reader seeing an old
-    claim beside a new one, and an empty table for a moment is a reader seeing
-    `no_match` where there is a hit.
+    Task 22's loader replaced its claims insert-then-delete and kept exactly one
+    snapshot — right for the Public Suffix List, wrong for a feed. A claim records
+    the snapshot it matched against and `concept/02` requires replay to join *that*
+    snapshot, so deleting it leaves a stored assessment citing a snapshot the store
+    no longer has. Pruning is `prune_snapshots`, called deliberately.
     """
     first = load_threatfox(
         migrated_engine,
@@ -535,14 +531,17 @@ def test_a_new_snapshot_replaces_the_old_one(
         redactor=redactor,
         raw=json.dumps(document).encode(),
     )
-    assert second.status == LOADED
+    assert second.outcome == LOADED
     assert second.snapshot_version != first.snapshot_version
-    held = migrated_engine.execute(
-        f"SELECT DISTINCT snapshot_version FROM {ENRICHMENT_EVIDENCE_TABLE} "
-        f"WHERE source_id = %s",
-        (THREATFOX_SOURCE,),
-    ).fetchall()
-    assert held == [(second.snapshot_version,)]
+    held = {
+        row[0]
+        for row in migrated_engine.execute(
+            f"SELECT DISTINCT snapshot_version FROM {ENRICHMENT_EVIDENCE_TABLE} "
+            f"WHERE source_id = %s",
+            (THREATFOX_SOURCE,),
+        ).fetchall()
+    }
+    assert held == {first.snapshot_version, second.snapshot_version}
 
 
 @pytest.mark.integration
@@ -593,7 +592,7 @@ def test_the_recorded_url_goes_through_the_redactor(
         raw=RAW,
     )
     stored = migrated_engine.execute(
-        f"SELECT source_url FROM {THREATFOX_LOAD_TABLE}"
+        f"SELECT source_url FROM {FEED_SNAPSHOT_TABLE}"
     ).fetchall()
     assert stored
     for (url,) in stored:
