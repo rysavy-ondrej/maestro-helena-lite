@@ -1,0 +1,198 @@
+{
+ "1894170": [
+  {
+   "anonymous": 0,
+   "confidence_level": 100,
+   "first_seen_utc": "2026-09-04 05:01:49",
+   "ioc_type": "domain",
+   "ioc_value": "brightmorningday.top",
+   "is_compromised": false,
+   "last_seen_utc": null,
+   "malware": "js.magecart",
+   "malware_alias": null,
+   "malware_printable": "magecart",
+   "reference": null,
+   "reporter": "threatcat_ch",
+   "tags": "Magecart",
+   "threat_type": "cc_skimming"
+  }
+ ],
+ "1901724": [
+  {
+   "anonymous": 0,
+   "confidence_level": 95,
+   "first_seen_utc": "2026-09-05 20:18:00",
+   "ioc_type": "sha1_hash",
+   "ioc_value": "85f96d3803a17f8bda15b193eb55d3ddcd1f0390",
+   "is_compromised": false,
+   "last_seen_utc": null,
+   "malware": "win.formbook",
+   "malware_alias": "win.xloader",
+   "malware_printable": "Formbook",
+   "reference": null,
+   "reporter": "Grim",
+   "tags": null,
+   "threat_type": "payload"
+  }
+ ],
+ "1901726": [
+  {
+   "anonymous": 0,
+   "confidence_level": 95,
+   "first_seen_utc": "2026-09-05 20:18:00",
+   "ioc_type": "sha256_hash",
+   "ioc_value": "1884032fa01f5483b881248998fc7338979551cf2a1e598dd564cc75a9dd2934",
+   "is_compromised": false,
+   "last_seen_utc": null,
+   "malware": "win.njrat",
+   "malware_alias": "Bladabindi,Lime-Worm",
+   "malware_printable": "NjRAT",
+   "reference": null,
+   "reporter": "Grim",
+   "tags": null,
+   "threat_type": "payload"
+  }
+ ],
+ "1901728": [
+  {
+   "anonymous": 0,
+   "confidence_level": 95,
+   "first_seen_utc": "2026-09-05 20:18:01",
+   "ioc_type": "md5_hash",
+   "ioc_value": "fb33520062ee28f1137e7704df12871c",
+   "is_compromised": false,
+   "last_seen_utc": null,
+   "malware": "win.njrat",
+   "malware_alias": "Bladabindi,Lime-Worm",
+   "malware_printable": "NjRAT",
+   "reference": null,
+   "reporter": "Grim",
+   "tags": null,
+   "threat_type": "payload"
+  }
+ ],
+ "1901884": [
+  {
+   "anonymous": 0,
+   "confidence_level": 50,
+   "first_seen_utc": "2026-09-05 23:27:02",
+   "ioc_type": "domain",
+   "ioc_value": "2tfhozzdy5.workers.dev",
+   "is_compromised": true,
+   "last_seen_utc": null,
+   "malware": "php.shin_webshell",
+   "malware_alias": null,
+   "malware_printable": "php.shin_webshell",
+   "reference": null,
+   "reporter": "xscon",
+   "tags": "Cloudflare,GIF,PHP,webshell,WordPress,workers.dev,wp-admin",
+   "threat_type": "botnet_cc"
+  }
+ ],
+ "1901897": [
+  {
+   "anonymous": 0,
+   "confidence_level": 90,
+   "first_seen_utc": "2026-09-06 01:00:39",
+   "ioc_type": "url",
+   "ioc_value": "https://yogatree1dev.wpenginepowered.com/",
+   "is_compromised": false,
+   "last_seen_utc": null,
+   "malware": "unknown",
+   "malware_alias": null,
+   "malware_printable": "Unknown malware",
+   "reference": "https://clickfix.carsonww.com/domains/yogatree1dev.wpenginepowered.com",
+   "reporter": "CarsonWilliams",
+   "tags": "ClickFix",
+   "threat_type": "payload_delivery"
+  }
+ ],
+ "1901945": [
+  {
+   "anonymous": 1,
+   "confidence_level": 100,
+   "first_seen_utc": "2026-09-06 04:05:07",
+   "ioc_type": "ip:port",
+   "ioc_value": "110.42.239.240:21481",
+   "is_compromised": true,
+   "last_seen_utc": null,
+   "malware": "win.vshell",
+   "malware_alias": null,
+   "malware_printable": "VShell",
+   "reference": null,
+   "reporter": "anonymous",
+   "tags": "vshell",
+   "threat_type": "botnet_cc"
+  }
+ ],
+ "1901952": [
+  {
+   "anonymous": 1,
+   "confidence_level": 90,
+   "first_seen_utc": "2026-09-06 04:14:54",
+   "ioc_type": "domain",
+   "ioc_value": "arefehpourhossein.com",
+   "is_compromised": true,
+   "last_seen_utc": null,
+   "malware": "js.clearfake",
+   "malware_alias": null,
+   "malware_printable": "ClearFake",
+   "reference": null,
+   "reporter": "anonymous",
+   "tags": "compromised,EtherHide",
+   "threat_type": "payload_delivery"
+  }
+ ],
+ "1901959": [
+  {
+   "anonymous": 1,
+   "confidence_level": 100,
+   "first_seen_utc": "2026-09-06 04:34:18",
+   "ioc_type": "domain",
+   "ioc_value": "ydydzmni.us-en-us-morningcoffeeritual.com",
+   "is_compromised": false,
+   "last_seen_utc": null,
+   "malware": "js.clearfake",
+   "malware_alias": null,
+   "malware_printable": "ClearFake",
+   "reference": null,
+   "reporter": "anonymous",
+   "tags": "ClearFake,mac-0x76c7,macos",
+   "threat_type": "payload_delivery"
+  }
+ ],
+ "9999999": [
+  {
+   "anonymous": 1,
+   "confidence_level": 100,
+   "first_seen_utc": "2026-09-06 04:34:18",
+   "ioc_type": "domain",
+   "ioc_value": "ydydzmni.us-en-us-morningcoffeeritual.com",
+   "is_compromised": false,
+   "last_seen_utc": null,
+   "malware": "js.clearfake",
+   "malware_alias": null,
+   "malware_printable": "ClearFake",
+   "reference": null,
+   "reporter": "anonymous",
+   "tags": "ClearFake,mac-0x76c7,macos",
+   "threat_type": "payload_delivery"
+  },
+  {
+   "anonymous": 1,
+   "confidence_level": 100,
+   "first_seen_utc": "2026-09-06 04:22:22",
+   "ioc_type": "domain",
+   "ioc_value": "bp6wvsu3.us-us-en-geniusbrainsignal.com",
+   "is_compromised": false,
+   "last_seen_utc": null,
+   "malware": "js.clearfake",
+   "malware_alias": null,
+   "malware_printable": "ClearFake",
+   "reference": null,
+   "reporter": "anonymous",
+   "tags": "ClearFake,mac-0xdcf2,macos",
+   "threat_type": "payload_delivery"
+  }
+ ]
+}
