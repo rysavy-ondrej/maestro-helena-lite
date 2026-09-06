@@ -20,9 +20,12 @@ second module for one function that shares every rule with this one would be a
 component that does not exist. `sql/migrations/0008_public_suffix_list.sql`
 carries the argument and the derivation; this file is the writer.
 
-The enrichment tier proper — ThreatFox first, per `concept/05` — is still
-deferred, and so is every part of this module that *maps* anything to the
-taxonomy.
+**ThreatFox is loaded.** `concept/05`'s "the first version loads exactly one
+feed" is `load_threatfox` below: fetch the structured export, flatten it, map it
+to claims and replace the snapshot, with every attempt — including the failures —
+recorded in `helena_reference_threatfox_load`. Its section head carries what was
+measured against the real export and when, because the ratios that shape the
+loader are properties of a feed that will move.
 
 **What does exist is the registry**: which sources this deployment knows, what
 tier each one is, and the taxonomy subset each may emit. `concept/05`'s first
@@ -51,9 +54,11 @@ Maturity: experimental — the Public Suffix List loader and its failure paths a
 exercised by `tests/test_enrichment.py`, against a real engine and against the
 live list; the source registry and the diversity count by `tests/test_sources.py`;
 the evidence row, its statuses and its identifier by `tests/test_evidence.py`,
-including a round trip through the engine. Nothing has been enriched, no feed
-loader exists, no claim has been made by anything, and no snapshot version has
-reached an assessment.
+including a round trip through the engine; the ThreatFox loader by
+`tests/test_threatfox.py`, against a real engine and a committed extract of a
+real export. What has NOT happened: no context has been enriched — the join is a
+view that does not exist yet — and no snapshot version has reached an
+assessment.
 """
 
 from __future__ import annotations
@@ -69,49 +74,70 @@ from enum import Enum
 from typing import Any
 
 import psycopg
+from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field
 
 from helena import taxonomy
 from helena.observability import Redactor
 
 __all__ = [
+    "Claim",
     "DEFAULT_RULE",
     "DEFAULT_SECTION",
-    "FAILURE_REASONS",
-    "ICANN_SECTION",
-    "LOAD_STATUSES",
-    "PRIVATE_SECTION",
-    "PUBLIC_SUFFIX_LOAD_TABLE",
-    "PUBLIC_SUFFIX_TABLE",
-    "PublicSuffixListError",
+    "EMPTY_EXPORT",
     "ENRICHMENT_EVIDENCE_TABLE",
     "ENRICHMENT_STATUSES",
     "ENTITY_TYPES",
+    "EnrichmentEvidence",
+    "FAILURE_REASONS",
+    "ICANN_SECTION",
+    "LOAD_STATUSES",
+    "MALFORMED_EXPORT",
     "MAX_FAILURE_DETAIL",
     "MISSING",
     "NO_MATCH",
     "OK",
-    "QUERY_FAILED",
-    "QUERY_FAILURE_REASONS",
-    "STALE",
-    "SOURCES",
-    "Claim",
-    "EnrichmentEvidence",
+    "PRIVATE_SECTION",
+    "PUBLIC_SUFFIX_LOAD_TABLE",
+    "PUBLIC_SUFFIX_TABLE",
+    "PublicSuffixListError",
     "PublicSuffixLoad",
     "PublicSuffixRule",
+    "QUERY_FAILED",
+    "QUERY_FAILURE_REASONS",
     "QueryFailure",
+    "SOURCES",
+    "STALE",
     "SourceDescriptor",
     "SourceError",
+    "THREATFOX_ENTITY_TYPES",
+    "THREATFOX_FAILURE_REASONS",
+    "THREATFOX_LOAD_TABLE",
+    "THREATFOX_MIN_FETCH_INTERVAL_SECONDS",
+    "THREATFOX_SOURCE",
+    "THREATFOX_THREAT_TYPES",
+    "THREATFOX_UNSEEN_THREAT_TYPE",
+    "ThreatFoxEntry",
+    "ThreatFoxError",
+    "ThreatFoxLoad",
+    "ThreatFoxSnapshot",
     "Tier",
     "UndeclaredClaim",
     "check_claim",
+    "classify_threat_type",
     "evidence_id",
     "fetch_public_suffix_list",
+    "fetch_threatfox",
     "load_public_suffix_list",
+    "load_threatfox",
     "origins",
     "parse_public_suffix_list",
+    "parse_threatfox",
     "source",
     "source_diversity",
+    "split_indicator",
+    "threatfox_claims",
+    "threatfox_snapshot_version",
 ]
 
 # The two tables migration 0008 creates. Named here so the loader and the tests
@@ -1163,3 +1189,705 @@ def _length_prefixed(value: str) -> bytes:
     """
     encoded = value.encode("utf-8")
     return f"{len(encoded)}:".encode() + encoded
+
+
+# --- ThreatFox: the first feed ----------------------------------------------
+#
+# `concept/05-threat-intelligence.md`: *"The first version loads exactly one
+# feed: ThreatFox."* Everything below was measured against the real export
+# rather than read off a documentation page, and the measurements are dated
+# because the feed is not ours and will move.
+#
+# **The loader holds no credential.** Measured 2026-09-06, and the second time
+# this has been measured rather than assumed: `GET
+# threatfox.abuse.ch/export/json/recent/` returns **200 with no credential at
+# all**, while `POST threatfox-api.abuse.ch/api/v1/` returns **401** without an
+# `Auth-Key` header. Until 2026-09-03 the concept note said the bulk export
+# carried a key **in the URL path**; it was wrong, it is corrected there, and
+# building a loader around a key this endpoint does not want would have created
+# the exact leak the redaction rule exists to prevent. The redactor is still
+# applied to the recorded URL, because that rule is about the channel -- an
+# exception carrying a request URL leaks whatever was in it -- and not about this
+# provider.
+#
+# **Re-measure before trusting this.** abuse.ch changes its auth on its own
+# schedule, and a bulk export that is open today may not be tomorrow. Probe with
+# status codes; never by printing a key.
+#
+# ## What the real export looks like, measured 2026-09-06 over 4 985 entries
+#
+# | Property | Measured | What it forces |
+# | --- | --- | --- |
+# | Top level is an object keyed by indicator id, values are **lists** | 4 985 keys, every list length 1 *in this snapshot* | Flatten. Reading `[0]` is `concept/instruction.md` §6's named trap, and "length 1 today" is not a schema |
+# | `ip:port` indicators | 3 139 of 4 985 (63 %), **596 distinct ports** | Split and keep the port -- a C2 on one port matched against a host that contacted another is a weaker claim |
+# | `is_compromised` | 821 (16.5 %) | Common, not rare. Native evidence, never the classification |
+# | `confidence_level` | genuinely spread: 49, 50, 75, 80, 90, 95, 100 | Let it reach the claim; flattening it discards the only per-entry signal there is |
+# | `reference` absent | 4 006 (80.4 %) | Per-entry evidence often does not exist |
+# | `last_seen_utc` absent | 961 (19.3 %); `first_seen_utc` absent 0 | **first-seen plus the snapshot version dates a claim** |
+# | `tags` | a comma-delimited string, absent on 443 (8.9 %) | Split it; it is not an array |
+# | File-hash indicators | 452 (9.1 %) -- `sha256_hash`, `md5_hash`, `sha1_hash` | **Skipped and counted.** See below |
+#
+# ## File hashes have no entity here, and are counted rather than dropped
+#
+# ThreatFox reports file hashes. HELENA's entity types are `address`, `domain`,
+# `url` and `fingerprint`, and a `fingerprint` is a TLS JA3/JA4 -- a property of
+# a connection -- not a file digest. There is nothing in a host context for a
+# file hash to attach to, so those entries cannot become claims.
+#
+# They are **skipped and counted**, never silently discarded: the count is on the
+# load row, so "the loader stored 4 533 of 4 985 entries" is a fact an operator
+# can see rather than a discrepancy somebody notices later. `concept/instruction.md`
+# §7 requires produced-versus-materialised counts to reconcile, and a skip nobody
+# counted is exactly how that stops being possible.
+#
+# ## Every threat type maps to `malicious`, and that is not laziness
+#
+# `concept/05` adopts the evidence level "essentially unchanged from an existing
+# published indicator taxonomy, **so that HELENA's evidence stays comparable with
+# other tools' rather than re-deriving a vocabulary from the same providers**."
+#
+# Deriving `malicious.c2` from ThreatFox's `botnet_cc` would be re-deriving a
+# vocabulary from a provider -- the precise thing that sentence exists to
+# prevent. So the mapping table below emits the **root**, which
+# `concept/02-concepts-and-taxonomy.md` calls the right answer for a type the
+# vocabulary cannot express: *"emit the parent rather than guessing a child."*
+# The threat type itself is retained as native evidence, so nothing is lost and
+# an agent can read it.
+#
+# The table is still worth having explicitly and still worth unit-testing, for
+# three reasons that have nothing to do with its current values: it records which
+# threat types have been **seen and considered**, an unseen one is **counted** so
+# the source's vocabulary drifting surfaces instead of passing silently, and it
+# is where children attach on the day the published taxonomy is in this
+# repository and a `v2` can carry them.
+
+THREATFOX_SOURCE = "threatfox"
+
+# **The export URL is not in this package**, and that is enforced rather than
+# remembered: `tests/test_broker.py::test_no_module_in_the_package_holds_a_broker_address`
+# refuses an address-shaped literal anywhere under `helena/`. It lives in
+# `scripts/load_threatfox.py` and nowhere else, for the reason
+# `concept/05-threat-intelligence.md` opens with -- *"adding a source is a
+# governed decision, not a configuration convenience"* -- and a URL in the
+# package or in the environment is exactly that convenience.
+#
+# Which export it must be is a decision rather than a detail, and it belongs
+# beside the URL: take the **structured** export and not the RPZ or hosts-file
+# variants, "which drop exactly the distinctions the composition rule needs".
+# Neither of those carries a port, a confidence, a threat type or the compromised
+# flag, and the port is the difference between a C2 claim that matches a host's
+# traffic and one that does not.
+
+#: `concept/05` puts fetch limits under "policy the tool layer enforces, not an
+#: afterthought", and the recent export is a rolling window rather than a
+#: firehose. Hourly is the floor a scheduler is expected to respect; nothing here
+#: schedules anything, and a scheduler with its own state would be a second store.
+THREATFOX_MIN_FETCH_INTERVAL_SECONDS = 3600
+
+#: ThreatFox `ioc_type` -> the HELENA entity type it becomes. A type absent from
+#: this map has no entity to attach to and is skipped and counted -- see above.
+THREATFOX_ENTITY_TYPES = {
+    "ip:port": "address",
+    "domain": "domain",
+    "url": "url",
+}
+
+#: ThreatFox `threat_type` -> an evidence-level taxonomy path. Every known type
+#: maps to the root, for the reason above. The value of the table is that it
+#: names what has been seen, so an unseen type is a counted event rather than a
+#: silent default.
+#:
+#: Measured 2026-09-06: `botnet_cc` 4 084, `payload` 452, `payload_delivery` 447,
+#: `cc_skimming` 2. `concept/05` warns the real vocabulary is larger than any
+#: sample, which is why the unseen case is a rule and not an oversight.
+THREATFOX_THREAT_TYPES = {
+    "botnet_cc": "malicious",
+    "payload": "malicious",
+    "payload_delivery": "malicious",
+    "cc_skimming": "malicious",
+}
+
+#: What an unseen threat type emits. `concept/02`: *"a mapping with a threat type
+#: it has never seen emits `malicious`, not an invented `malicious.something`."*
+THREATFOX_UNSEEN_THREAT_TYPE = "malicious"
+
+THREATFOX_LOAD_TABLE = "helena_reference_threatfox_load"
+
+MALFORMED_EXPORT = "malformed_export"
+EMPTY_EXPORT = "empty_export"
+THREATFOX_FAILURE_REASONS = (FETCH_FAILED, MALFORMED_EXPORT, EMPTY_EXPORT)
+
+
+class ThreatFoxError(Exception):
+    """The export could not be fetched or could not be read.
+
+    Carries one of `THREATFOX_FAILURE_REASONS`. The same shape as
+    `PublicSuffixListError` and for the same reason: a loader that raised a bare
+    exception would leave the caller deciding whether the previous snapshot
+    survives, and that decision is `concept/instruction.md`'s, not the caller's.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        if reason not in THREATFOX_FAILURE_REASONS:
+            raise ValueError(
+                f"reason {reason!r} is not one of {THREATFOX_FAILURE_REASONS}"
+            )
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class ThreatFoxEntry:
+    """One entry of the export, flattened out of its list and read as it arrived.
+
+    A dataclass rather than a dict so that a field the publisher renames is an
+    error at parse time. Only the fields the mapping or the evidence needs are
+    lifted; the rest of the entry travels in `native` for audit.
+    """
+
+    indicator_id: str
+    ioc_type: str
+    ioc_value: str
+    threat_type: str
+    confidence_level: int
+    is_compromised: bool
+    first_seen_utc: str | None
+    last_seen_utc: str | None
+    tags: tuple[str, ...]
+    native: Mapping[str, Any]
+
+
+def fetch_threatfox(url: str, *, timeout: float = FETCH_TIMEOUT_SECONDS) -> bytes:
+    """The bytes at `url`, or a `ThreatFoxError` with `fetch_failed`.
+
+    No credential is attached, and that is measured rather than assumed -- see
+    the section head. A caller that needs the authenticated API is using the tool
+    layer, which is a different thing with a different rule about keys.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return response.read()
+    except (urllib.error.URLError, OSError, ValueError) as failure:
+        raise ThreatFoxError(
+            f"{type(failure).__name__}: {failure}", reason=FETCH_FAILED
+        ) from failure
+
+
+def parse_threatfox(raw: bytes) -> tuple[ThreatFoxEntry, ...]:
+    """Every entry of the export, flattened, in the order the file gives them.
+
+    **Flattened, not indexed.** The top level is an object keyed by indicator id
+    whose values are lists. Every list was length 1 on 2026-09-06, and that is a
+    property of one snapshot rather than of the format -- `concept/instruction.md`
+    §6 lists reading `[0]` of a nested array among the traps that have already
+    cost this project something, and this is the second place it would have.
+
+    Refuses rather than skips a malformed entry, the way
+    `parse_public_suffix_list` does: a field the publisher renamed is a format
+    change, and skipping it would quietly narrow the snapshot. A *skip* here means
+    something else entirely -- an entry this project has no entity for -- and that
+    is `threatfox_claims`' job, with a count.
+    """
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as failure:
+        raise ThreatFoxError(
+            f"{type(failure).__name__}: {failure}", reason=MALFORMED_EXPORT
+        ) from failure
+    if not isinstance(document, dict):
+        raise ThreatFoxError(
+            f"the export is a {type(document).__name__} and not an object keyed "
+            f"by indicator id",
+            reason=MALFORMED_EXPORT,
+        )
+    if not document:
+        raise ThreatFoxError(
+            "the export is empty; the previous snapshot stays", reason=EMPTY_EXPORT
+        )
+    entries: list[ThreatFoxEntry] = []
+    for indicator_id, value in document.items():
+        if not isinstance(value, list):
+            raise ThreatFoxError(
+                f"{indicator_id}: the value is a {type(value).__name__} and the "
+                f"format is a list per indicator id",
+                reason=MALFORMED_EXPORT,
+            )
+        for offset, entry in enumerate(value):
+            if not isinstance(entry, dict):
+                raise ThreatFoxError(
+                    f"{indicator_id}[{offset}] is a {type(entry).__name__}",
+                    reason=MALFORMED_EXPORT,
+                )
+            entries.append(_threatfox_entry(indicator_id, offset, entry))
+    return tuple(entries)
+
+
+def _threatfox_entry(
+    indicator_id: str, offset: int, entry: Mapping[str, Any]
+) -> ThreatFoxEntry:
+    where = f"{indicator_id}[{offset}]"
+    try:
+        ioc_type = entry["ioc_type"]
+        ioc_value = entry["ioc_value"]
+        threat_type = entry["threat_type"]
+        confidence = entry["confidence_level"]
+    except KeyError as missing:
+        raise ThreatFoxError(
+            f"{where}: no {missing.args[0]!r}; the publisher's format has changed",
+            reason=MALFORMED_EXPORT,
+        ) from missing
+    if not isinstance(confidence, int) or isinstance(confidence, bool):
+        raise ThreatFoxError(
+            f"{where}: confidence_level is {confidence!r}", reason=MALFORMED_EXPORT
+        )
+    # `tags` is a delimited string and not an array -- measured, and absent on
+    # 8.9 % of entries. Splitting an absent one gives no tags rather than [""].
+    raw_tags = entry.get("tags")
+    tags = tuple(t for t in (raw_tags or "").split(",") if t) if raw_tags else ()
+    return ThreatFoxEntry(
+        indicator_id=str(indicator_id),
+        ioc_type=str(ioc_type),
+        ioc_value=str(ioc_value),
+        threat_type=str(threat_type),
+        confidence_level=confidence,
+        is_compromised=bool(entry.get("is_compromised")),
+        first_seen_utc=entry.get("first_seen_utc") or None,
+        last_seen_utc=entry.get("last_seen_utc") or None,
+        tags=tags,
+        native=dict(entry),
+    )
+
+
+def split_indicator(entry: ThreatFoxEntry) -> tuple[str, str, int | None]:
+    """`(entity_type, entity_value, port)` for one entry.
+
+    **The port is kept**, and `concept/05` says why it has to be: a C2 on one port
+    matched against a host that contacted a different port on the same address is
+    a weaker claim, and an address column that swallowed the port could not tell
+    those apart. 3 139 of 4 985 entries carried one on 2026-09-06, across 596
+    distinct ports.
+
+    Raises `KeyError` for an `ioc_type` with no entity -- the caller counts those
+    rather than this refusing the whole snapshot over them.
+    """
+    entity_type = THREATFOX_ENTITY_TYPES[entry.ioc_type]
+    if entry.ioc_type != "ip:port":
+        return entity_type, entry.ioc_value, None
+    address, _, port = entry.ioc_value.rpartition(":")
+    if not address or not port.isdigit():
+        raise ThreatFoxError(
+            f"{entry.indicator_id}: ioc_type is 'ip:port' and ioc_value is "
+            f"{entry.ioc_value!r}",
+            reason=MALFORMED_EXPORT,
+        )
+    return entity_type, address, int(port)
+
+
+def classify_threat_type(threat_type: str) -> tuple[str, bool]:
+    """`(taxonomy path, whether the type was one this mapping has seen)`.
+
+    Deterministic and total: every input has an answer, and the second value says
+    whether that answer came from the table or from the parent rule. A caller
+    counts the unseen ones -- a source's vocabulary growing is a fact worth
+    surfacing, and `concept/05` warns the real vocabulary is larger than any
+    sample.
+    """
+    mapped = THREATFOX_THREAT_TYPES.get(threat_type)
+    if mapped is None:
+        return THREATFOX_UNSEEN_THREAT_TYPE, False
+    return mapped, True
+
+
+@dataclass(frozen=True)
+class ThreatFoxSnapshot:
+    """What one parse produced: the claims, and what did not become one.
+
+    The counts are the point. `concept/instruction.md` §7 requires
+    produced-versus-materialised counts to reconcile, and a loader that returned
+    only its rows would make "4 533 claims from 4 985 entries" a discrepancy
+    somebody notices later rather than a number the load row carries.
+    """
+
+    snapshot_version: str
+    claims: tuple[EnrichmentEvidence, ...]
+    #: Entries whose `ioc_type` has no HELENA entity -- file hashes. Skipped and
+    #: counted, never silently dropped.
+    skipped_no_entity: int
+    #: Entries whose `threat_type` this mapping has not seen. They still became
+    #: claims, at the parent; the count is what makes the source's vocabulary
+    #: drifting visible instead of silent.
+    unseen_threat_types: tuple[str, ...]
+
+    @property
+    def entries_read(self) -> int:
+        return len(self.claims) + self.skipped_no_entity
+
+
+def threatfox_snapshot_version(raw: bytes) -> str:
+    """The sha256 of the fetched bytes.
+
+    The same identity rule the Public Suffix List uses: same content, same
+    version, so two fetches of an unchanged export are one snapshot rather than a
+    second copy of five thousand identical rows.
+    """
+    return hashlib.sha256(raw).hexdigest()
+
+
+def threatfox_claims(
+    raw: bytes, *, tenant: str, sensor: str, now: datetime | None = None
+) -> ThreatFoxSnapshot:
+    """Parse an export and map it to claims, counting what did not become one.
+
+    The mapping `concept/05` rule 2 calls "a unit-testable deliverable, not
+    prose": bytes in, claims out, no engine and no clock except the one that
+    decides staleness.
+    """
+    entries = parse_threatfox(raw)
+    version = threatfox_snapshot_version(raw)
+    claims: list[EnrichmentEvidence] = []
+    skipped = 0
+    unseen: list[str] = []
+    for entry in entries:
+        if entry.ioc_type not in THREATFOX_ENTITY_TYPES:
+            skipped += 1
+            continue
+        entity_type, entity_value, port = split_indicator(entry)
+        classification, seen = classify_threat_type(entry.threat_type)
+        if not seen:
+            unseen.append(entry.threat_type)
+        # The scope is what the claim is ABOUT, and for an `ip:port` indicator
+        # that is the address on that port -- not the address. The entity is the
+        # address, because that is what a context row joins on.
+        #
+        # The port is deliberately NOT a column of its own. The comparison it
+        # would serve -- "a C2 on one port matched against a host that contacted
+        # another is a weaker claim" -- needs a port on the *other* side of the
+        # join, and `helena_signal_context_entities` has none: an entity row is a
+        # value and its observation flags. A column here would be one half of a
+        # join nothing can make. It is kept in the scope and in the native
+        # evidence, so nothing is lost, and the day the entity rows carry a port
+        # is the day this earns a column.
+        scope_type = "address:port" if port is not None else entity_type
+        scope_value = f"{entity_value}:{port}" if port is not None else entity_value
+        native = {
+            "threat_type": entry.threat_type,
+            # `concept/05`: "A compromised flag separates victim from owner, and
+            # is common, not rare." Native evidence, never the classification --
+            # a legitimate site currently serving malware is malicious at that
+            # URL and time, and its owner is a victim. The operational role is
+            # what the classification says; this says who is being wronged.
+            "is_compromised": entry.is_compromised,
+            "malware": entry.native.get("malware"),
+            "malware_printable": entry.native.get("malware_printable"),
+            "reporter": entry.native.get("reporter"),
+            "reference": entry.native.get("reference"),
+            "tags": list(entry.tags),
+            "indicator_id": entry.indicator_id,
+            "threat_type_seen_by_mapping": seen,
+        }
+        if port is not None:
+            native["port"] = port
+        claims.append(
+            EnrichmentEvidence(
+                evidence_id=evidence_id(
+                    tenant=tenant,
+                    sensor=sensor,
+                    source_id=THREATFOX_SOURCE,
+                    snapshot_version=version,
+                    entity_type=entity_type,
+                    entity_value=entity_value,
+                    classification=classification,
+                    scope_type=scope_type,
+                    scope_value=scope_value,
+                    native_evidence=native,
+                ),
+                source_id=THREATFOX_SOURCE,
+                source_tier=SOURCES[THREATFOX_SOURCE].tier,
+                snapshot_version=version,
+                entity_type=entity_type,
+                entity_value=entity_value,
+                status=OK,
+                classification=classification,
+                taxonomy_version=SOURCES[THREATFOX_SOURCE].taxonomy_version,
+                # `concept/05`: confidence is "numeric and genuinely spread" and
+                # "must reach the claim rather than being flattened away".
+                # 0-100 in the export, 0.0-1.0 on the claim, which is a change of
+                # unit and not of meaning.
+                confidence=entry.confidence_level / 100,
+                scope_type=scope_type,
+                scope_value=scope_value,
+                first_seen=_threatfox_time(entry.first_seen_utc),
+                last_seen=_threatfox_time(entry.last_seen_utc),
+                native_evidence=native,
+            )
+        )
+    return ThreatFoxSnapshot(
+        snapshot_version=version,
+        claims=tuple(claims),
+        skipped_no_entity=skipped,
+        unseen_threat_types=tuple(sorted(set(unseen))),
+    )
+
+
+def _threatfox_time(value: str | None) -> datetime | None:
+    """`YYYY-MM-DD HH:MM:SS` in UTC, or None. Never a guess.
+
+    Absent stays absent: `last_seen_utc` is missing on 19.3 % of entries, and
+    `concept/05` is explicit that missing precision is not invented -- a
+    `last_seen` defaulted to now would make every stale claim look fresh. A value
+    this cannot read is also None rather than a raise, because one unparseable
+    timestamp is not a reason to refuse a snapshot; the raw string survives in
+    the native evidence either way.
+    """
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+class ThreatFoxLoad(BaseModel):
+    """One row of `helena_reference_threatfox_load`, as it was written.
+
+    Frozen: it describes an attempt that has already happened. The invariants the
+    columns only document are validated here -- a failure naming a snapshot, a
+    success naming a reason, or counts that do not reconcile -- so a loader that
+    got them the wrong way round fails before storing a row that reads as both.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    attempted_at: datetime
+    source_url: str
+    status: str
+    snapshot_version: str | None
+    entries_read: int | None
+    claims_stored: int | None
+    skipped_no_entity: int | None
+    unseen_threat_types: int | None
+    failure_reason: str | None
+    failure_detail: str | None
+
+    def model_post_init(self, _context: object) -> None:
+        if self.status not in LOAD_STATUSES:
+            raise ValueError(f"status {self.status!r} is not one of {LOAD_STATUSES}")
+        if self.status == FAILED:
+            if self.failure_reason not in THREATFOX_FAILURE_REASONS:
+                raise ValueError(
+                    f"a failed load names one of {THREATFOX_FAILURE_REASONS}, "
+                    f"not {self.failure_reason!r}"
+                )
+            if self.snapshot_version is not None:
+                raise ValueError(
+                    "a failed load has no snapshot: the previous one stands, and "
+                    "a row naming both reads as neither"
+                )
+            return
+        if self.failure_reason is not None:
+            raise ValueError(
+                f"a {self.status} load names failure reason "
+                f"{self.failure_reason!r}"
+            )
+        if self.snapshot_version is None:
+            raise ValueError(f"a {self.status} load names no snapshot")
+        counts = (self.entries_read, self.claims_stored, self.skipped_no_entity)
+        if any(count is None for count in counts):
+            raise ValueError(f"a {self.status} load carries all three counts")
+        if self.entries_read != self.claims_stored + self.skipped_no_entity:
+            raise ValueError(
+                f"{self.entries_read} entries read, {self.claims_stored} stored "
+                f"and {self.skipped_no_entity} skipped; the counters do not "
+                f"reconcile (concept/instruction.md §7)"
+            )
+
+
+def load_threatfox(
+    connection: psycopg.Connection,
+    *,
+    tenant: str,
+    sensor: str,
+    source_url: str,
+    redactor: Redactor,
+    raw: bytes | None = None,
+    now: datetime | None = None,
+) -> ThreatFoxLoad:
+    """Fetch, map completely, then write. Returns the load row it wrote.
+
+    The order is the one `load_public_suffix_list` uses and for the same reason:
+    **fetch, parse completely, then write.** A format change therefore leaves the
+    previous snapshot untouched rather than half-replaced, which is why parsing
+    happens before the first INSERT rather than row by row.
+
+    The replacement is insert-then-delete, again as 0008 argues: RisingWave has no
+    transaction around a write, so one of the two orders has to be chosen for what
+    its half-done state looks like. A superset of the claims for a moment is a
+    reader seeing an old claim beside a new one; an empty table for a moment is a
+    reader seeing `no_match` where there is a hit, which is the failure mode
+    `concept/02` says the whole design exists to prevent.
+
+    `raw` is for a test or a replay that already holds the bytes. Left unset, the
+    export is fetched.
+
+    `redactor` is not optional, for the reason `load_public_suffix_list` gives:
+    `concept/instruction.md` §6 requires a credential in a URL to be redacted
+    before anything is **stored**, not only before anything is logged. This
+    endpoint needs no credential -- measured -- and the rule is about the channel.
+    """
+    attempted_at = now or datetime.now(timezone.utc)
+    recorded_url = redactor.url(source_url)
+    try:
+        payload = fetch_threatfox(source_url) if raw is None else raw
+        snapshot = threatfox_claims(payload, tenant=tenant, sensor=sensor)
+    except ThreatFoxError as failure:
+        return _record_threatfox_load(
+            connection,
+            ThreatFoxLoad(
+                attempted_at=attempted_at,
+                source_url=recorded_url,
+                status=FAILED,
+                snapshot_version=None,
+                entries_read=None,
+                claims_stored=None,
+                skipped_no_entity=None,
+                unseen_threat_types=None,
+                failure_reason=failure.reason,
+                failure_detail=str(failure)[:MAX_FAILURE_DETAIL],
+            ),
+        )
+
+    held = _current_threatfox_snapshot(connection, tenant=tenant, sensor=sensor)
+    if held == snapshot.snapshot_version:
+        # Same bytes, same snapshot. Rewriting four thousand identical rows would
+        # be work for no change, and the attempt is still recorded -- an operator
+        # asking why a snapshot is old needs to see that a fetch happened.
+        return _record_threatfox_load(
+            connection,
+            ThreatFoxLoad(
+                attempted_at=attempted_at,
+                source_url=recorded_url,
+                status=UNCHANGED,
+                snapshot_version=snapshot.snapshot_version,
+                entries_read=snapshot.entries_read,
+                claims_stored=len(snapshot.claims),
+                skipped_no_entity=snapshot.skipped_no_entity,
+                unseen_threat_types=len(snapshot.unseen_threat_types),
+                failure_reason=None,
+                failure_detail=None,
+            ),
+        )
+
+    for claim in snapshot.claims:
+        _insert_evidence(connection, claim, tenant=tenant, sensor=sensor)
+    connection.execute("FLUSH")
+    connection.execute(
+        f"DELETE FROM {ENRICHMENT_EVIDENCE_TABLE} WHERE tenant = %s AND sensor = %s "
+        f"AND source_id = %s AND snapshot_version <> %s",
+        (tenant, sensor, THREATFOX_SOURCE, snapshot.snapshot_version),
+    )
+    connection.execute("FLUSH")
+    return _record_threatfox_load(
+        connection,
+        ThreatFoxLoad(
+            attempted_at=attempted_at,
+            source_url=recorded_url,
+            status=LOADED,
+            snapshot_version=snapshot.snapshot_version,
+            entries_read=snapshot.entries_read,
+            claims_stored=len(snapshot.claims),
+            skipped_no_entity=snapshot.skipped_no_entity,
+            unseen_threat_types=len(snapshot.unseen_threat_types),
+            failure_reason=None,
+            failure_detail=None,
+        ),
+    )
+
+
+def _current_threatfox_snapshot(
+    connection: psycopg.Connection, *, tenant: str, sensor: str
+) -> str | None:
+    """The snapshot version the evidence table currently holds for this source.
+
+    Read from the claims rather than from the load ledger, because the claims are
+    what a join sees: a ledger saying `loaded` over an empty table would be a
+    second store disagreeing with the first.
+    """
+    connection.execute("FLUSH")
+    rows = connection.execute(
+        f"SELECT DISTINCT snapshot_version FROM {ENRICHMENT_EVIDENCE_TABLE} "
+        f"WHERE tenant = %s AND sensor = %s AND source_id = %s",
+        (tenant, sensor, THREATFOX_SOURCE),
+    ).fetchall()
+    if len(rows) > 1:
+        # Mid-replacement, or a load that died between the insert and the delete.
+        # Not a value to pick from: say so.
+        raise ThreatFoxError(
+            f"the evidence table holds {len(rows)} snapshots for "
+            f"{THREATFOX_SOURCE}; a replacement did not finish",
+            reason=MALFORMED_EXPORT,
+        )
+    return rows[0][0] if rows else None
+
+
+def _insert_evidence(
+    connection: psycopg.Connection,
+    claim: EnrichmentEvidence,
+    *,
+    tenant: str,
+    sensor: str,
+) -> None:
+    """Write one claim under one identity. The only writer of the evidence table."""
+    connection.execute(
+        f"INSERT INTO {ENRICHMENT_EVIDENCE_TABLE} (tenant, sensor, evidence_id, "
+        f"source_id, source_tier, snapshot_version, entity_type, entity_value, "
+        f"status, classification, taxonomy_version, confidence, scope_type, "
+        f"scope_value, first_seen, last_seen, valid_until, native_evidence) "
+        f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+        f"%s, %s, %s)",
+        (
+            tenant,
+            sensor,
+            claim.evidence_id,
+            claim.source_id,
+            claim.source_tier.value,
+            claim.snapshot_version,
+            claim.entity_type,
+            claim.entity_value,
+            claim.status,
+            claim.classification,
+            claim.taxonomy_version,
+            claim.confidence,
+            claim.scope_type,
+            claim.scope_value,
+            claim.first_seen,
+            claim.last_seen,
+            claim.valid_until,
+            Jsonb(claim.native_evidence),
+        ),
+    )
+
+
+def _record_threatfox_load(
+    connection: psycopg.Connection, load: ThreatFoxLoad
+) -> ThreatFoxLoad:
+    """Write the load row and return it. Every attempt, including the failures."""
+    connection.execute(
+        f"INSERT INTO {THREATFOX_LOAD_TABLE} (attempted_at, source_url, status, "
+        f"snapshot_version, entries_read, claims_stored, skipped_no_entity, "
+        f"unseen_threat_types, failure_reason, failure_detail) "
+        f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (
+            load.attempted_at,
+            load.source_url,
+            load.status,
+            load.snapshot_version,
+            load.entries_read,
+            load.claims_stored,
+            load.skipped_no_entity,
+            load.unseen_threat_types,
+            load.failure_reason,
+            load.failure_detail,
+        ),
+    )
+    connection.execute("FLUSH")
+    return load

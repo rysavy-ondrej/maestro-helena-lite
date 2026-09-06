@@ -273,7 +273,7 @@
         "Map threat types deterministically, emitting the parent for any unseen value rather than guessing a child, and unit-test the mapping table",
         "Normalize each indicator to its entity's shape and date claims by first-seen plus snapshot version, since recency cannot be read from last-seen alone"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D3 Enrichment] Snapshot versioning and never-empty-a-table failure semantics",
