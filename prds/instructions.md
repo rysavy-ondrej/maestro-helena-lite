@@ -228,3 +228,9 @@ An increment is finished when **all** of these hold:
 - [ ] No credential appears in a prompt, a row, a log, a trace or the repository.
 - [ ] The claim made about the increment is no stronger than what was
       demonstrated.
+- [ ] The increment's **report is written and committed with it**, and the
+      tracking files reflect it. The report is the handover the next session
+      reads, so an increment with working code and no report is unfinished. If
+      no runner launched the session, writing the report is not enough — see
+      `prds/CONTEXT.md` §4, *Landing without the runner*, for the four other
+      files nothing else will write.
