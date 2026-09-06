@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# Bring the pinned engine and broker up, then run the ingest-and-context demo.
+# Bring the pinned engine and broker up, then run one of the demos.
 #
-#   demo/run-demo            run it, leaving the engine and broker up
-#   demo/run-demo --down     ... and stop them again afterwards
+#   demo/run-demo                    run demo 1, leaving the engine and broker up
+#   demo/run-demo 2                  run demo 2 instead
+#   demo/run-demo context_over_a_day ... by name, as well as by number
+#   demo/run-demo --down 2           ... and stop them again afterwards
+#   demo/run-demo 2 -- --files 12    everything after -- goes to the demo itself
+#   demo/run-demo --list             what there is to run
 #
 # Process management is scripts/dev-up's job, not this script's: it verifies the
 # binaries against docs/versions.md and refuses to start anything that does not
@@ -10,12 +14,59 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+# In the order demo/README.md numbers them.
+DEMOS=(ingest_and_context context_over_a_day)
+
+# The comment block at the top of this file, minus the leading '#', is the help.
+usage() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"; }
+
+list() {
+    local i
+    for i in "${!DEMOS[@]}"; do
+        printf '  %d  demo/%s.py\n' "$((i + 1))" "${DEMOS[i]}"
+    done
+}
+
+# A selector is a 1-based number or a script name, with or without the .py.
+resolve() {
+    local want="${1%.py}" i
+    if [[ "$want" =~ ^[0-9]+$ ]]; then
+        [ "$want" -ge 1 ] && [ "$want" -le "${#DEMOS[@]}" ] || return 1
+        printf '%s' "${DEMOS[want - 1]}"
+        return 0
+    fi
+    for i in "${!DEMOS[@]}"; do
+        if [ "$want" = "${DEMOS[i]}" ]; then printf '%s' "${DEMOS[i]}"; return 0; fi
+    done
+    return 1
+}
+
 STOP_AFTER=0
-[ "${1:-}" = "--down" ] && STOP_AFTER=1
+DEMO="${DEMOS[0]}"
+DEMO_ARGS=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --down) STOP_AFTER=1 ;;
+        --list) list; exit 0 ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift; DEMO_ARGS=("$@"); break ;;
+        -*) echo "run-demo: unknown option $1" >&2; usage >&2; exit 2 ;;
+        *)
+            DEMO="$(resolve "$1")" || {
+                echo "run-demo: no such demo: $1" >&2
+                list >&2
+                exit 2
+            }
+            ;;
+    esac
+    shift
+done
 
 scripts/dev-up || true          # says so and exits non-zero if already running
-uv run demo/ingest_and_context.py
-status=$?
+
+status=0
+uv run "demo/$DEMO.py" ${DEMO_ARGS+"${DEMO_ARGS[@]}"} || status=$?
 
 [ "$STOP_AFTER" -eq 1 ] && scripts/dev-down
 exit "$status"

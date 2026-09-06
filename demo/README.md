@@ -11,7 +11,10 @@ first.
 
 ```bash
 demo/run-demo            # start the engine and broker, then run demo 1
-demo/run-demo --down     # ... and stop them again afterwards
+demo/run-demo 2          # ... demo 2 instead; a name works too, `context_over_a_day`
+demo/run-demo --down 2   # ... and stop them again afterwards
+demo/run-demo 2 -- --files 12   # everything after -- goes to the demo itself
+demo/run-demo --list     # what there is to run
 
 uv run demo/ingest_and_context.py           # demo 1, if scripts/dev-up already ran
 uv run demo/context_over_a_day.py           # demo 2, the whole day (~20 min)

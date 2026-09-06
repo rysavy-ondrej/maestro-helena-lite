@@ -2,6 +2,7 @@
 """Put the sample capture through ingest and context, and print what came out.
 
     demo/run-demo                      # brings the engine and broker up first
+    demo/run-demo 1                    # ... the same thing, said explicitly
     uv run demo/ingest_and_context.py  # if they are already up
 
 Six stages, each one the real code path rather than a narration of it: the

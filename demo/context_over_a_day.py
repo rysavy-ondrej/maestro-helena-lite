@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Compute context over a day of one network's traffic, and print what came out.
 
+    demo/run-demo 2                                   # engine and broker up first
+    demo/run-demo 2 -- --files 12                     # ... with the options below
     uv run demo/context_over_a_day.py                 # the whole day
     uv run demo/context_over_a_day.py --files 12      # the first two hours
     uv run demo/context_over_a_day.py --captures DIR  # a different capture set
