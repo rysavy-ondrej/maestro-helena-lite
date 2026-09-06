@@ -348,12 +348,12 @@ git worktree add -b task-NN ../helena-task-NN
 
 **A fresh worktree does not carry what a session needs** — measured, not assumed.
 Everything gitignored is absent: `.env`, `bin/blink`, `bin/risingwave`,
-`bin/lib/`, `data/netify/`, `data/threatfox/` and `.venv/`, and `Settings.load()`
-fails there naming every variable. Link them in first:
+`bin/lib/`, `data/netify/`, `data/threatfox/`, `data/demo/` and `.venv/`, and
+`Settings.load()` fails there naming every variable. Link them in first:
 
 ```bash
 cd ../helena-task-NN
-for p in .env bin/blink bin/risingwave bin/lib data/netify data/threatfox; do
+for p in .env bin/blink bin/risingwave bin/lib data/netify data/threatfox data/demo; do
   ln -s "/root/maestro-helena-lite/$p" "$p"
 done
 uv sync          # this worktree's OWN .venv - see the warning below
