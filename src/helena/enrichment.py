@@ -34,29 +34,42 @@ produce. `SOURCES` is that declaration, `check_claim` is the test rule 1 asks
 for, and `source_diversity` is normalization rule 2: an aggregator is never
 counted as many votes.
 
+**And the evidence row itself.** `EnrichmentEvidence` is one claim about one
+entity from one source, and `helena_reference_enrichment_evidence` is the same
+shape in the engine. Its key is a digest of the claim rather than
+`(entity, source)`, because `docs/decisions/0009-netify-application-identification.md`
+settled that the schema carries **N rows per entity** — Netify alone puts up to
+75 claims on one address. `QueryFailure` is what a query that did not complete
+produces instead: typed, bounded, and with nowhere to put a classification.
+
 Reads: an HTTP(S) or `file:` URL supplied by the caller, through the standard
-library. Writes: `helena_reference_public_suffix` and
-`helena_reference_public_suffix_load`.
+library. Writes: `helena_reference_public_suffix`,
+`helena_reference_public_suffix_load` and — when a loader exists —
+`helena_reference_enrichment_evidence`.
 
 Maturity: experimental — the Public Suffix List loader and its failure paths are
 exercised by `tests/test_enrichment.py`, against a real engine and against the
-live list; the source registry and the diversity count by `tests/test_sources.py`.
-Nothing has been enriched, no feed loader exists, no claim has been made by
-anything, and no snapshot version has reached an assessment.
+live list; the source registry and the diversity count by `tests/test_sources.py`;
+the evidence row, its statuses and its identifier by `tests/test_evidence.py`,
+including a round trip through the engine. Nothing has been enriched, no feed
+loader exists, no claim has been made by anything, and no snapshot version has
+reached an assessment.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import urllib.error
 import urllib.request
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Any
 
 import psycopg
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from helena import taxonomy
 from helena.observability import Redactor
@@ -71,17 +84,28 @@ __all__ = [
     "PUBLIC_SUFFIX_LOAD_TABLE",
     "PUBLIC_SUFFIX_TABLE",
     "PublicSuffixListError",
+    "ENRICHMENT_EVIDENCE_TABLE",
+    "ENRICHMENT_STATUSES",
     "ENTITY_TYPES",
+    "MAX_FAILURE_DETAIL",
+    "MISSING",
     "NO_MATCH",
+    "OK",
+    "QUERY_FAILED",
+    "QUERY_FAILURE_REASONS",
+    "STALE",
     "SOURCES",
     "Claim",
+    "EnrichmentEvidence",
     "PublicSuffixLoad",
     "PublicSuffixRule",
+    "QueryFailure",
     "SourceDescriptor",
     "SourceError",
     "Tier",
     "UndeclaredClaim",
     "check_claim",
+    "evidence_id",
     "fetch_public_suffix_list",
     "load_public_suffix_list",
     "origins",
@@ -818,3 +842,324 @@ def origins(claims: Sequence[Claim]) -> dict[str, list[Claim]]:
     for claim in claims:
         grouped.setdefault(claim.attributed_to, []).append(claim)
     return grouped
+
+
+# --- Enrichment evidence: one claim, and the four ways there is no claim ------
+#
+# `concept/02-concepts-and-taxonomy.md` defines the row: *"One claim about one
+# entity from one source: the classification, its confidence, its scope, its
+# snapshot, its tier, its status."* And it defines what a successful query
+# normalizes into -- *"`verdict`, `classification`, `confidence`, `scope`
+# (`{type, value}`, exactly normalized), `time` (nullable first-seen / last-seen
+# / valid-until -- do not invent missing precision), and `evidence` (the minimal
+# native fields that justify the mapping)."*
+#
+# **The key is not `(entity, source)`, and that is a correction rather than a
+# choice.** `concept/02`'s line was once read as a cardinality constraint, and
+# `docs/decisions/0009-netify-application-identification.md` settled that it is
+# not: *"the evidence schema carries N rows per entity, not one row per (entity,
+# source) holding a collapsed set"*, because Netify alone puts **up to 75 claims
+# on a single address**, and a loader keyed by address silently discarded 124 653
+# rows in a first draft of that measurement. `concept/02` now says so directly:
+# *"An entity carries as many claims as its sources and their values produce --
+# multiplicity is evidence for the agent to weigh, never something to collapse
+# before it is seen."* So the row is keyed by a digest of the claim, and two
+# genuinely different claims from one source about one entity are two rows.
+#
+# **`verdict` is derived and not stored.** It is the root of the classification
+# path, `helena.taxonomy` already refuses a path whose root is not its first
+# segment, and a second column holding the same fact is a column that can
+# disagree with the one it was copied from. The six-field contract is satisfied
+# at the object -- `EnrichmentEvidence.verdict` is there -- without a stored
+# duplicate that nothing keeps in step.
+
+
+#: `concept/02`: "`ok` / `stale` / `failed` / `missing` -- each **distinct from
+#: `no_match`**." `concept/instruction.md` makes that five things that may never
+#: be collapsed, at any layer, for any reason: a typed error is the fifth.
+#:
+#:   ok       the source was queried and answered, and there is a claim. The
+#:            claim may be `no_match`, which is an answer and not an absence.
+#:   stale    the snapshot is older than this source's own refresh window. The
+#:            claim stands and its age is now part of what it is worth.
+#:   failed   the query ran and did not complete. There is a typed error and no
+#:            taxonomy object.
+#:   missing  no snapshot exists to query at all -- the feed has never loaded,
+#:            or its table is empty. Not a source that found nothing.
+OK = "ok"
+STALE = "stale"
+QUERY_FAILED = "failed"
+MISSING = "missing"
+ENRICHMENT_STATUSES = (OK, STALE, QUERY_FAILED, MISSING)
+
+#: Why a query did not complete. Typed, because `concept/05` rule 4 turns on the
+#: distinction: *"Emit a typed error on failure, and no taxonomy object. A
+#: timeout is never `no_match` and never `unknown`."* Both of those are analysis
+#: results returned after a **successful** query.
+TIMEOUT = "timeout"
+QUOTA_EXHAUSTED = "quota_exhausted"
+AUTH_FAILED = "auth_failed"
+TRANSPORT_ERROR = "transport_error"
+MALFORMED_RESPONSE = "malformed_response"
+QUERY_FAILURE_REASONS = (
+    TIMEOUT,
+    QUOTA_EXHAUSTED,
+    AUTH_FAILED,
+    TRANSPORT_ERROR,
+    MALFORMED_RESPONSE,
+)
+
+ENRICHMENT_EVIDENCE_TABLE = "helena_reference_enrichment_evidence"
+
+#: How long a `detail` may be. Bounded because an unbounded diagnostic string is
+#: where a provider response ends up: somebody pastes `str(response)` in, and the
+#: row now holds the body `QueryFailure` exists to keep out.
+MAX_FAILURE_DETAIL = 500
+
+
+class QueryFailure(BaseModel):
+    """A query that did not complete. Compact, typed, and carrying no payload.
+
+    `concept/05` rule 4 and `concept/02`: a timeout, quota exhaustion or an auth
+    failure **never becomes `no_match`** and never becomes `unknown` -- both of
+    those are valid analysis results returned after a *successful* query -- and
+    *"the error object stays compact and never carries secrets, authorization
+    headers or full provider responses."*
+
+    That last rule is enforced by the shape rather than by review. There is no
+    field a response body can go in: `reason` is one of five typed values,
+    `detail` is bounded, and `extra="forbid"` means a caller cannot add
+    `response` or `headers` to the object at all. `tests/test_evidence.py`
+    asserts the field set, so adding one is a deliberate act with a test to
+    change rather than a field that appears.
+
+    It has **no classification and no confidence**, and that is the point: an
+    object that could carry either would be a taxonomy object emitted on failure,
+    which is exactly what rule 4 forbids.
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    source_id: str
+    entity_type: str
+    entity_value: str
+    reason: str
+    #: What went wrong, in words, for an operator. Never a provider response,
+    #: never a header, never a credential -- see the class docstring.
+    detail: str = ""
+
+    def model_post_init(self, _context: object) -> None:
+        if self.reason not in QUERY_FAILURE_REASONS:
+            raise ValueError(
+                f"reason {self.reason!r} is not one of {QUERY_FAILURE_REASONS}"
+            )
+        if len(self.detail) > MAX_FAILURE_DETAIL:
+            raise ValueError(
+                f"detail is {len(self.detail)} characters and the limit is "
+                f"{MAX_FAILURE_DETAIL}; a diagnostic is a sentence, and an "
+                f"unbounded one is where a provider response ends up"
+            )
+        if self.entity_type not in ENTITY_TYPES:
+            raise ValueError(
+                f"entity type {self.entity_type!r} is not among {sorted(ENTITY_TYPES)}"
+            )
+
+
+class EnrichmentEvidence(BaseModel):
+    """One claim about one entity from one source, as a source normalized it.
+
+    Frozen: a claim describes a query that has already happened.
+
+    **`confidence` is confidence in the mapping, not the probability that the
+    indicator is malicious.** `concept/02` says so in as many words and gives the
+    consequence that makes it checkable: *"A definitive negative answer can be
+    `no_match` with confidence `1.0`."* A field read as P(malicious) would make
+    that combination nonsense, and a consumer that averaged it across sources
+    would be averaging two different quantities. It is also **not** the tier: the
+    tier is about the *source* and this is about *this mapping of this entry*.
+
+    **The time fields are nullable and stay that way.** `concept/05` measured
+    that references and last-seen dates are frequently absent, so *"first-seen
+    plus the snapshot version is what dates a claim"* and missing precision is
+    never invented -- a `last_seen` defaulted to the load time would make every
+    stale claim look fresh, which is the failure the `stale` status exists to
+    make visible.
+
+    **A bad classification raises `TaxonomyError`, not `ValidationError`.** Every
+    other refusal below raises `ValueError` and Pydantic turns it into a
+    validation error about a field; a path the vocabulary does not have is not a
+    malformed field but a taxonomy fact, and `helena.taxonomy` already tells "not
+    in the vocabulary" apart from "declared but unused". Flattening both into one
+    field error would lose that at the first caller, which is
+    `concept/instruction.md` §2's rule about two facts and one value.
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    #: The stable identifier: a digest of the claim, so replaying a load writes
+    #: the same row and two genuinely different claims are two rows. See
+    #: `evidence_id`.
+    evidence_id: str
+    source_id: str
+    source_tier: Tier
+    #: The feed snapshot this claim came from. `concept/02`: replay joins the
+    #: snapshot current at event time, not today's.
+    snapshot_version: str
+    entity_type: str
+    entity_value: str
+    status: str
+    #: The taxonomy path, present only when the source answered. `None` for every
+    #: other status, because `concept/05` rule 4 forbids a taxonomy object where
+    #: there was no successful query -- and because `stale` carries its claim on
+    #: a row of its own rather than by reusing this one.
+    classification: str | None = None
+    taxonomy_version: str | None = None
+    confidence: float | None = None
+    #: `scope` -- `{type, value}`, exactly normalized. What the claim is *about*,
+    #: which is not always the entity it attaches to: a URL claim scopes to the
+    #: URL and `concept/05` says the host inherits "only with host-level
+    #: evidence", and a Spamhaus DROP claim scopes to a netblock or an ASN and
+    #: "never a host". Two columns rather than a JSON blob, because the scope is
+    #: what the composition rule reads.
+    scope_type: str
+    scope_value: str
+    first_seen: datetime | None = None
+    last_seen: datetime | None = None
+    valid_until: datetime | None = None
+    #: The minimal native fields that justify the mapping -- `concept/05` rule 5,
+    #: "retain the native payload for audit". Minimal is the operative word: it
+    #: is what justifies *this* mapping, not the provider's whole response.
+    native_evidence: dict[str, Any] = Field(default_factory=dict)
+
+    def model_post_init(self, _context: object) -> None:
+        if self.status not in ENRICHMENT_STATUSES:
+            raise ValueError(
+                f"status {self.status!r} is not one of {ENRICHMENT_STATUSES}. "
+                f"`no_match` is a classification and never a status."
+            )
+        if self.entity_type not in ENTITY_TYPES:
+            raise ValueError(
+                f"entity type {self.entity_type!r} is not among {sorted(ENTITY_TYPES)}"
+            )
+        has_claim = self.classification is not None
+        if self.status in (OK, STALE) and not has_claim:
+            raise ValueError(
+                f"status {self.status!r} means the source answered, and there is "
+                f"no classification. An answer of 'nothing listed' is the "
+                f"classification 'no_match', not an absent one."
+            )
+        if self.status in (QUERY_FAILED, MISSING) and has_claim:
+            raise ValueError(
+                f"status {self.status!r} carries classification "
+                f"{self.classification!r}; a query that did not complete emits a "
+                f"typed error and no taxonomy object (concept/05, rule 4)"
+            )
+        if has_claim:
+            if self.taxonomy_version is None:
+                raise ValueError(
+                    "a classification without a taxonomy version cannot be "
+                    "replayed: nothing says which vocabulary it was drawn from"
+                )
+            taxonomy.resolve(
+                self.classification,
+                level=taxonomy.EVIDENCE,
+                version=self.taxonomy_version,
+            )
+        if self.confidence is not None and not 0.0 <= self.confidence <= 1.0:
+            raise ValueError(
+                f"confidence {self.confidence} is outside 0.0-1.0"
+            )
+        if not self.scope_type.strip() or not self.scope_value.strip():
+            raise ValueError(
+                "scope is {type, value} and both are required: what a claim is "
+                "about is what the composition rule reads"
+            )
+
+    @property
+    def verdict(self) -> str | None:
+        """The root of the classification -- derived, never stored.
+
+        `concept/02` lists `verdict` among the six normalized fields, and the
+        taxonomy already refuses a path whose root is not its first segment. A
+        stored column would be a second copy of a fact that cannot disagree in
+        the model and can in a table.
+        """
+        return None if self.classification is None else self.classification.split(".")[0]
+
+    @property
+    def dated_by(self) -> str:
+        """What dates this claim: `concept/05`'s rule, as a value.
+
+        *"Recency cannot be read from last-seen alone, so first-seen plus the
+        snapshot version is what dates a claim."* Returned as text because it is
+        for a reader and an operator, not for arithmetic.
+        """
+        seen = "unknown first-seen" if self.first_seen is None else self.first_seen.isoformat()
+        return f"{seen} in snapshot {self.snapshot_version}"
+
+
+def evidence_id(
+    *,
+    tenant: str,
+    sensor: str,
+    source_id: str,
+    snapshot_version: str,
+    entity_type: str,
+    entity_value: str,
+    classification: str | None,
+    scope_type: str,
+    scope_value: str,
+    native_evidence: Mapping[str, Any],
+) -> str:
+    """The stable identifier for one claim: a digest over what makes it that claim.
+
+    Deterministic and drawn from nothing that changes on a replay, for the reason
+    `helena.normalizer._event_id` gives: re-running a load has to write the same
+    row rather than a second copy of it, and a RisingWave INSERT onto an existing
+    key is a silent upsert.
+
+    **The native evidence is in the digest**, and it has to be. Netify puts up to
+    75 claims on one address, and they differ *only* in the application they
+    name; a digest over source, snapshot and entity alone would make those 75 one
+    row and silently keep the last. That is the exact discard
+    `docs/decisions/0009-netify-application-identification.md` measured.
+
+    **Tenant and sensor are in it** for the reason the event id has them: two
+    deployments enriching the same entity would otherwise mint the same id in one
+    store, and the upsert would be a cross-tenant overwrite that looks like it is
+    working.
+
+    **The status is not in it.** A claim that goes stale is the same claim; its
+    status is what this deployment currently thinks of it, not part of which
+    claim it is. Putting it in the digest would mint a new row every time a
+    snapshot aged.
+    """
+    material = b"".join(
+        _length_prefixed(part)
+        for part in (
+            tenant,
+            sensor,
+            source_id,
+            snapshot_version,
+            entity_type,
+            entity_value,
+            "" if classification is None else classification,
+            scope_type,
+            scope_value,
+            # Canonical: sorted keys, no incidental whitespace, so two equal
+            # payloads written by two loaders hash the same.
+            json.dumps(native_evidence, sort_keys=True, separators=(",", ":")),
+        )
+    )
+    return hashlib.sha256(material).hexdigest()
+
+
+def _length_prefixed(value: str) -> bytes:
+    """`value` as its UTF-8 length, a colon, then its UTF-8 bytes.
+
+    The same construction `helena.normalizer` uses, and for the same reason: a
+    digest over concatenated fields with no lengths in it collides whenever two
+    fields can borrow a character from each other.
+    """
+    encoded = value.encode("utf-8")
+    return f"{len(encoded)}:".encode() + encoded

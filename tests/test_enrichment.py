@@ -34,6 +34,7 @@ from helena.enrichment import (
     DEFAULT_RULE,
     DEFAULT_SECTION,
     EMPTY_LIST,
+    ENRICHMENT_EVIDENCE_TABLE,
     FAILED,
     FETCH_FAILED,
     ICANN_SECTION,
@@ -375,7 +376,13 @@ def loaded(migrated_engine: psycopg.Connection) -> psycopg.Connection:
 def test_the_reference_objects_are_what_they_declare(
     migrated_engine: psycopg.Connection,
 ):
-    """Two tables with a writer, and a plain view counting the attempts."""
+    """Every object in the reference layer, named.
+
+    A prefix query rather than a list of things to check, so adding a reference
+    object means editing this dict -- the same deliberate friction
+    `tests/test_context.py` applies to the signal layer. A table that appeared
+    without anybody deciding it should is what this catches.
+    """
     assert dict(
         rows(
             migrated_engine,
@@ -387,6 +394,9 @@ def test_the_reference_objects_are_what_they_declare(
         PUBLIC_SUFFIX_TABLE: "BASE TABLE",
         PUBLIC_SUFFIX_LOAD_TABLE: "BASE TABLE",
         "helena_reference_public_suffix_load_counts": "VIEW",
+        # The claims themselves (0011). Its shape is asserted in
+        # tests/test_evidence.py, beside the model it has to agree with.
+        ENRICHMENT_EVIDENCE_TABLE: "BASE TABLE",
     }
 
 
