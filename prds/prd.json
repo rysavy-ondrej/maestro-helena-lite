@@ -286,7 +286,7 @@
         "Add tests for fetch failure, format change and empty response, each asserting the previous snapshot survives and the failure is recorded",
         "Document that an indicator's disappearance between snapshots means aged out or retracted, and a differ reads them as one event"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D3 Enrichment] Feed mapping views producing evidence-level claims",

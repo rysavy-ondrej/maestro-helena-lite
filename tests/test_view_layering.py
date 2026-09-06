@@ -439,7 +439,7 @@ def test_a_replaced_definition_that_does_not_say_so_is_refused(tmp_path: Path):
     nothing anywhere.
     """
     view = _DECLARED.format(name="probe_thing", reads="nothing.")
-    with pytest.raises(DeclarationError, match="nothing there says so"):
+    with pytest.raises(DeclarationError, match="nothing here says so"):
         migrations.declarations(
             synthetic(tmp_path, view + "\nDROP VIEW probe_thing;\n\n" + view)
         )
@@ -451,7 +451,7 @@ def test_a_superseded_by_naming_the_wrong_migration_is_refused(tmp_path: Path):
         "-- Read by:  tests/test_view_layering.py.\n"
         "-- Superseded by: 0099_somewhere_else.sql",
     )
-    with pytest.raises(DeclarationError, match="instead of"):
+    with pytest.raises(DeclarationError, match="that drops it"):
         migrations.declarations(
             synthetic(
                 tmp_path,
@@ -462,15 +462,53 @@ def test_a_superseded_by_naming_the_wrong_migration_is_refused(tmp_path: Path):
         )
 
 
-def test_a_superseded_by_on_something_never_replaced_is_refused(tmp_path: Path):
-    """Pointing at a migration that does not recreate it sends a reader nowhere."""
+def test_a_superseded_by_on_a_live_object_is_refused(tmp_path: Path):
+    """A definition that says it is gone and is not sends a reader nowhere.
+
+    The other direction from the test above: this one is what the engine holds,
+    and a note saying otherwise would make a reader go looking for a replacement
+    that does not exist.
+    """
     view = _DECLARED.format(name="probe_thing", reads="nothing.").replace(
         "-- Read by:  tests/test_view_layering.py.",
         "-- Read by:  tests/test_view_layering.py.\n"
         "-- Superseded by: 0099_somewhere_else.sql",
     )
-    with pytest.raises(DeclarationError, match="no such migration creates it"):
+    with pytest.raises(DeclarationError, match="nothing drops it"):
         migrations.declarations(synthetic(tmp_path, view))
+
+
+def test_a_removed_definition_says_so_too(tmp_path: Path):
+    """Dropped and *not* recreated is the second way a definition goes stale.
+
+    0013 does this to 0012's per-feed load table: superseded by one snapshot
+    table for every source, under a different name. To whoever opens 0012 the
+    question is the same as for a replaced definition -- *is this CREATE what the
+    engine holds?* -- so it is the same field and the same check.
+    """
+    removed = _DECLARED.format(name="probe_thing", reads="nothing.").replace(
+        "-- Read by:  tests/test_view_layering.py.",
+        "-- Read by:  tests/test_view_layering.py.\n"
+        "-- Superseded by: 0001_synthetic.sql",
+    )
+    declared = migrations.declarations(
+        synthetic(tmp_path, removed + "\nDROP VIEW probe_thing;\n")
+    )
+    assert "probe_thing" not in declared
+    retired = migrations.superseded(
+        synthetic(tmp_path, removed + "\nDROP VIEW probe_thing;\n")
+    )
+    assert [(d.relation, d.superseded_by) for d in retired] == [
+        ("probe_thing", "0001_synthetic.sql")
+    ]
+
+
+def test_a_removed_definition_that_does_not_say_so_is_refused(tmp_path: Path):
+    view = _view("probe_thing")
+    with pytest.raises(DeclarationError, match="nothing here says so"):
+        migrations.declarations(
+            synthetic(tmp_path, view + "\nDROP VIEW probe_thing;\n")
+        )
 
 
 def test_a_superseded_by_that_is_not_a_migration_name_is_refused(tmp_path: Path):
@@ -491,22 +529,31 @@ def test_the_repository_records_every_definition_the_engine_does_not_hold():
     field is checked against it, so a mismatch fails in `declarations()` and an
     omission fails here.
     """
-    retired = migrations.superseded()
-    assert {d.relation for d in retired} == {
-        "helena_signal_entity_observations",
-        "helena_signal_context_entities",
-        "helena_signal_context_entities_retained",
-        "helena_signal_domain_suffix_candidates",
-        "helena_signal_domain_public_suffix",
-        "helena_signal_domain_registrable",
-        "helena_signal_context_domains",
+    retired = {d.relation: d.superseded_by for d in migrations.superseded()}
+    assert retired == {
+        # Replaced: 0010 drops these seven and creates them again with the
+        # NULL guards.
+        "helena_signal_entity_observations": "0010_entity_value_null_guard.sql",
+        "helena_signal_context_entities": "0010_entity_value_null_guard.sql",
+        "helena_signal_context_entities_retained": "0010_entity_value_null_guard.sql",
+        "helena_signal_domain_suffix_candidates": "0010_entity_value_null_guard.sql",
+        "helena_signal_domain_public_suffix": "0010_entity_value_null_guard.sql",
+        "helena_signal_domain_registrable": "0010_entity_value_null_guard.sql",
+        "helena_signal_context_domains": "0010_entity_value_null_guard.sql",
+        # Removed: 0013 drops these two and recreates nothing, because one
+        # snapshot ledger serves every feed.
+        "helena_reference_threatfox_load": "0013_feed_snapshots.sql",
+        "helena_reference_threatfox_load_counts": "0013_feed_snapshots.sql",
     }
-    assert all(
-        d.superseded_by == "0010_entity_value_null_guard.sql" for d in retired
-    )
-    assert not set(migrations.declarations()) & {d.relation for d in retired} - {
-        d.relation for d in retired
-    }
+    # The difference between the two kinds, from the live side: a replaced
+    # relation is still what the engine holds, under the migration that
+    # recreated it; a removed one is not there at all.
+    live = migrations.declarations()
+    for relation, by in retired.items():
+        if relation.startswith("helena_reference_threatfox_load"):
+            assert relation not in live, f"{relation} was removed and is live"
+        else:
+            assert live[relation].migration == by
 
 
 def test_the_repository_drops_nothing_it_does_not_recreate():

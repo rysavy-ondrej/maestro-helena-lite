@@ -56,6 +56,10 @@
 -- Read by:  src/helena/enrichment.py (the loader writes it and reads back the
 --           current snapshot) and tests/test_threatfox.py, plus
 --           helena_reference_threatfox_load_counts below.
+-- Superseded by: 0013_feed_snapshots.sql. That file drops this object and does
+--               not recreate it: one snapshot table serves every source, so a
+--               per-feed load table has no reason to exist. The definition
+--               below is not what the engine holds.
 CREATE TABLE IF NOT EXISTS helena_reference_threatfox_load (
     attempted_at        TIMESTAMPTZ NOT NULL,
     -- Through Redactor.url before it is stored -- see the head.
@@ -89,6 +93,10 @@ CREATE TABLE IF NOT EXISTS helena_reference_threatfox_load (
 -- Reads:    helena_reference_threatfox_load
 -- Read by:  tests/test_threatfox.py and whoever is asking why a snapshot is old.
 --           `docs/runbook.md` is where that question gets answered.
+-- Superseded by: 0013_feed_snapshots.sql. That file drops this object and does
+--               not recreate it: one snapshot table serves every source, so a
+--               per-feed load table has no reason to exist. The definition
+--               below is not what the engine holds.
 CREATE VIEW helena_reference_threatfox_load_counts AS
 SELECT status,
        failure_reason,

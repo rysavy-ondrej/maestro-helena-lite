@@ -43,7 +43,7 @@ from helena.enrichment import (
     PRIVATE_SECTION,
     PUBLIC_SUFFIX_LOAD_TABLE,
     PUBLIC_SUFFIX_TABLE,
-    THREATFOX_LOAD_TABLE,
+    FEED_SNAPSHOT_TABLE,
     UNCHANGED,
     PublicSuffixListError,
     PublicSuffixLoad,
@@ -398,9 +398,11 @@ def test_the_reference_objects_are_what_they_declare(
         # The claims themselves (0011). Its shape is asserted in
         # tests/test_evidence.py, beside the model it has to agree with.
         ENRICHMENT_EVIDENCE_TABLE: "BASE TABLE",
-        # ThreatFox's load ledger and its counter (0012).
-        THREATFOX_LOAD_TABLE: "BASE TABLE",
-        "helena_reference_threatfox_load_counts": "VIEW",
+        # One snapshot ledger for every feed, and its two views (0013). 0012's
+        # per-feed table is dropped there and does not appear.
+        FEED_SNAPSHOT_TABLE: "BASE TABLE",
+        "helena_reference_feed_snapshot_current": "VIEW",
+        "helena_reference_feed_snapshot_counts": "VIEW",
     }
 
 

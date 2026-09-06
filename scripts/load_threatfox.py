@@ -37,9 +37,14 @@ changes its auth on its own schedule, and a bulk export that is open today may
 not be tomorrow. Probe with status codes; never by printing a key.
 
 Every load, including a failed one, writes a row to
-`helena_reference_threatfox_load`. A failed fetch leaves the previous snapshot in
-place; this script's exit status says what happened so a scheduler can notice,
-and the row is what an operator reads afterwards.
+`helena_reference_feed_snapshot` — one ledger for every feed, not one per feed. A
+failed fetch leaves the previous snapshot in place; this script's exit status says
+what happened so a scheduler can notice, and the row is what an operator reads
+afterwards.
+
+**Loading does not delete the previous snapshot.** A claim records the snapshot
+it matched against and replay joins *that* one, so the old claims stay joinable.
+Pruning is `helena.enrichment.prune_snapshots`, called deliberately.
 
 Maturity: experimental — the loader underneath it is exercised by
 `tests/test_threatfox.py` against a real engine and a committed extract of a real
@@ -57,7 +62,7 @@ from helena.config import Settings
 from helena.enrichment import (
     ENRICHMENT_EVIDENCE_TABLE,
     FAILED,
-    THREATFOX_LOAD_TABLE,
+    FEED_SNAPSHOT_TABLE,
     THREATFOX_MIN_FETCH_INTERVAL_SECONDS,
     THREATFOX_SOURCE,
     load_threatfox,
@@ -82,19 +87,23 @@ def _status(connection: psycopg.Connection) -> int:
     for version, count in claims:
         print(f"snapshot {version}  {count} claim(s)")
     attempts = connection.execute(
-        f"SELECT attempted_at, status, failure_reason, claims_stored, "
-        f"skipped_no_entity, unseen_threat_types FROM {THREATFOX_LOAD_TABLE} "
-        f"ORDER BY attempted_at DESC LIMIT 5"
+        f"SELECT attempted_at, outcome, failure_reason, counts "
+        f"FROM {FEED_SNAPSHOT_TABLE} WHERE source_id = %s "
+        f"ORDER BY attempted_at DESC LIMIT 5",
+        (THREATFOX_SOURCE,),
     ).fetchall()
     if not attempts:
         print("no load has been attempted")
         return 0
     print("\nrecent attempts:")
-    for attempted_at, status, reason, stored, skipped, unseen in attempts:
+    for attempted_at, outcome, reason, counts in attempts:
+        counts = counts or {}
         detail = f" ({reason})" if reason else (
-            f"  {stored} stored, {skipped} skipped, {unseen} unseen threat type(s)"
+            f"  {counts.get('claims_stored')} stored, "
+            f"{counts.get('skipped_no_entity')} skipped, "
+            f"{counts.get('unseen_threat_types')} unseen threat type(s)"
         )
-        print(f"  {attempted_at:%Y-%m-%d %H:%M:%S}  {status}{detail}")
+        print(f"  {attempted_at:%Y-%m-%d %H:%M:%S}  {outcome}{detail}")
     return 0
 
 
@@ -123,22 +132,24 @@ def main(argv: list[str] | None = None) -> int:
             redactor=redactor,
         )
 
-    if load.status == FAILED:
+    if load.outcome == FAILED:
         print(
             f"load failed: {load.failure_reason}: {load.failure_detail}\n"
             f"the previous snapshot is untouched.",
             file=sys.stderr,
         )
         return 1
+    counts = load.counts
     print(
-        f"{load.status}: snapshot {load.snapshot_version}\n"
-        f"  {load.entries_read} entries read\n"
-        f"  {load.claims_stored} claims stored\n"
-        f"  {load.skipped_no_entity} skipped — no HELENA entity for the indicator\n"
-        f"  {load.unseen_threat_types} entry(ies) with a threat type this mapping "
-        f"has not seen"
+        f"{load.outcome}: snapshot {load.snapshot_version}\n"
+        f"  {counts['entries_read']} entries read\n"
+        f"  {counts['claims_stored']} claims stored\n"
+        f"  {counts['skipped_no_entity']} skipped — no HELENA entity for the "
+        f"indicator\n"
+        f"  {counts['unseen_threat_types']} entry(ies) with a threat type this "
+        f"mapping has not seen"
     )
-    if load.unseen_threat_types:
+    if counts["unseen_threat_types"]:
         print(
             "\nAn unseen threat type emitted the parent rather than a guessed "
             "child, which is correct and is also worth looking at: the source's "
