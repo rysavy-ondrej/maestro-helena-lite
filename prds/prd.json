@@ -311,7 +311,7 @@
         "Add a test that an entity with no hit on anything yields `no_match` and not an absent row, since an enriched context is mostly negative space",
         "Add a test that changing the current snapshot does not change the enriched context of an older window"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D3 Enrichment] Enrichment status propagation acceptance tests",

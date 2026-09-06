@@ -94,7 +94,10 @@
 -- Reads:    nothing.
 -- Read by:  src/helena/enrichment.py (every loader writes it, and reads back
 --           which snapshot is current), helena_reference_feed_snapshot_current
---           and helena_reference_feed_snapshot_counts below, and
+--           and helena_reference_feed_snapshot_counts below,
+--           helena_reference_feed_snapshot_validity,
+--           helena_reference_feed_attempt_validity and
+--           helena_analytical_enriched_context (sql/migrations/0015), and
 --           tests/test_snapshots.py.
 CREATE TABLE IF NOT EXISTS helena_reference_feed_snapshot (
     -- Identity, for the reason every other stored row carries it: an INSERT onto

@@ -407,6 +407,12 @@ def test_the_reference_objects_are_what_they_declare(
         FEED_SNAPSHOT_TABLE: "BASE TABLE",
         "helena_reference_feed_snapshot_current": "VIEW",
         "helena_reference_feed_snapshot_counts": "VIEW",
+        # sql/migrations/0015: the ledger as intervals, so the enriched context
+        # can join the snapshot that was current at a window's event time rather
+        # than the newest one. Two views because they answer two questions —
+        # which snapshot was current, and what the most recent attempt was.
+        "helena_reference_feed_snapshot_validity": "VIEW",
+        "helena_reference_feed_attempt_validity": "VIEW",
     }
 
 
