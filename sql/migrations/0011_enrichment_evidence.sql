@@ -82,6 +82,13 @@
 --           increment) is the reader this exists for; nothing joins it yet, and
 --           a table -- unlike a materialized view -- costs nothing while it
 --           waits.
+-- Superseded by: 0014_feed_mapping_views.sql. That file drops this table and
+--               does not recreate it: the evidence shape is now DERIVED from
+--               each feed's reference table by a mapping view, which is what
+--               concept/03-architecture.md means by an enrichment view. The
+--               shape below is still the contract -- helena_reference_evidence
+--               presents exactly these columns plus evidence_tier -- but this
+--               CREATE is not what the engine holds.
 CREATE TABLE IF NOT EXISTS helena_reference_enrichment_evidence (
     -- The ingestion identity, for the reason helena_normalized_events carries
     -- it: an INSERT onto an existing key in RisingWave is a silent upsert, and

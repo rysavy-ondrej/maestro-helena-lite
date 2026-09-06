@@ -298,7 +298,7 @@
         "Tag every row with evidence tier `enrichment`",
         "Add execution tests asserting the mapped rows are valid taxonomy paths inside the source's declared subset"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D3 Enrichment] Enriched host context join view",

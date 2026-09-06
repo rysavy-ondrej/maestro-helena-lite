@@ -21,7 +21,7 @@ from pydantic import ValidationError
 
 from helena import taxonomy
 from helena.enrichment import (
-    ENRICHMENT_EVIDENCE_TABLE,
+    ENRICHMENT_EVIDENCE_VIEW,
     ENRICHMENT_STATUSES,
     MAX_FAILURE_DETAIL,
     MISSING,
@@ -328,7 +328,7 @@ def _id(**overrides: Any) -> str:
         "classification": "normal",
         "scope_type": "address",
         "scope_value": "1.62.64.112",
-        "native_evidence": {"application": "app.qq"},
+        "native_record": "netify-row-1",
     }
     fields.update(overrides)
     return evidence_id(**fields)
@@ -351,14 +351,18 @@ def test_two_claims_from_one_source_about_one_entity_are_two_rows():
     make those 75 one row and silently keep the last — the exact discard ADR-0009
     measured at 124 653 rows.
     """
-    qq = _id(native_evidence={"application": "app.qq"})
-    cdn = _id(native_evidence={"application": "app.tencent-cloud-cdn"})
-    assert qq != cdn
+    assert _id(native_record="netify-row-1") != _id(native_record="netify-row-2")
 
 
-def test_the_native_evidence_is_canonicalized_before_hashing():
-    """Key order is not part of what a claim is."""
-    assert _id(native_evidence={"a": 1, "b": 2}) == _id(native_evidence={"b": 2, "a": 1})
+def test_the_native_record_is_the_publishers_key_and_not_a_payload_digest():
+    """A payload digest would mint a new identifier whenever a field nobody reads
+    changed; the publisher's key is what the publisher means by "this record".
+
+    `sql/migrations/0014_feed_mapping_views.sql` is what produces the identifier
+    in practice, and `tests/test_mapping.py` asserts it agrees with this.
+    """
+    assert _id(native_record="1901959:0") != _id(native_record="1901959:1")
+    assert _id(native_record="1901959:0") == _id(native_record="1901959:0")
 
 
 def test_two_deployments_do_not_mint_the_same_id():
@@ -389,98 +393,16 @@ def test_the_snapshot_is_in_the_digest():
     assert _id(snapshot_version="snapshot-1") != _id(snapshot_version="snapshot-2")
 
 
-# --- The Python model and the engine table are one interface ----------------
-
-
-def test_the_model_and_the_table_carry_the_same_columns(migrated_engine):
-    """Asserted against a real engine, not read off the .sql.
-
-    The model's fields plus the identity columns the table adds are the table's
-    columns. A migration that renamed one, or a model field nobody added a column
-    for, fails here.
-    """
-    columns = {
-        row[0]
-        for row in migrated_engine.execute(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name = %s",
-            (ENRICHMENT_EVIDENCE_TABLE,),
-        ).fetchall()
-    }
-    assert columns == EVIDENCE_SHAPE
-    assert set(EnrichmentEvidence.model_fields) | {"tenant", "sensor"} == EVIDENCE_SHAPE
-
-
-def _insert(connection: psycopg.Connection, row: EnrichmentEvidence) -> None:
-    """Write one claim, under a fixed identity. The writer proper is D3's loader."""
-    connection.execute(
-        f"INSERT INTO {ENRICHMENT_EVIDENCE_TABLE} (tenant, sensor, evidence_id, "
-        f"source_id, source_tier, snapshot_version, entity_type, entity_value, "
-        f"status, classification, taxonomy_version, confidence, scope_type, "
-        f"scope_value, first_seen, last_seen, valid_until, native_evidence) VALUES "
-        f"(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-        (
-            "acme",
-            "sensor-1",
-            row.evidence_id,
-            row.source_id,
-            row.source_tier.value,
-            row.snapshot_version,
-            row.entity_type,
-            row.entity_value,
-            row.status,
-            row.classification,
-            row.taxonomy_version,
-            row.confidence,
-            row.scope_type,
-            row.scope_value,
-            row.first_seen,
-            row.last_seen,
-            row.valid_until,
-            Jsonb(row.native_evidence),
-        ),
-    )
-    connection.execute("FLUSH")
-
-
-def test_a_claim_round_trips_through_the_engine(migrated_engine):
-    """Written and read back, so the types agree with the columns.
-
-    Nothing in this project trusts a column to hold what a model says without
-    putting one through it.
-    """
-    row = claim(
-        evidence_id=_id(),
-        first_seen=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        native_evidence={"threat_type": "botnet_cc"},
-    )
-    _insert(migrated_engine, row)
-    stored = migrated_engine.execute(
-        f"SELECT status, classification, confidence, first_seen, native_evidence "
-        f"FROM {ENRICHMENT_EVIDENCE_TABLE} WHERE evidence_id = %s",
-        (row.evidence_id,),
-    ).fetchall()
-    assert len(stored) == 1
-    status, classification, confidence, first_seen, native = stored[0]
-    assert (status, classification, confidence) == (OK, "malicious", 0.9)
-    assert first_seen == row.first_seen
-    assert native == {"threat_type": "botnet_cc"}
-
-
-def test_a_stored_classification_resolves_against_the_version_beside_it(migrated_engine):
-    """A row carries `taxonomy_version` so replay validates against the
-    vocabulary the claim was made under rather than today's.
-
-    Exercised on a row that came back out of the engine, because that is the only
-    way to know the two columns survive together.
-    """
-    row = claim(evidence_id=_id(classification="no_match"), classification="no_match")
-    _insert(migrated_engine, row)
-    classification, version = migrated_engine.execute(
-        f"SELECT classification, taxonomy_version FROM {ENRICHMENT_EVIDENCE_TABLE} "
-        f"WHERE evidence_id = %s",
-        (row.evidence_id,),
-    ).fetchall()[0]
-    assert taxonomy.resolve(
-        classification, level=taxonomy.EVIDENCE, version=version
-    ).path == classification
+# --- Where the rest of this went -------------------------------------------
+#
+# The engine-facing tests -- the column shape, the round trip, a stored
+# classification resolving against the version beside it -- are in
+# `tests/test_mapping.py` now. `sql/migrations/0014_feed_mapping_views.sql`
+# made the evidence shape a VIEW derived from each feed's reference table rather
+# than a table a loader writes, so the thing to assert against the model is what
+# the view produces, and the file that asserts it is the one that also checks the
+# mapping produced it correctly.
+#
+# What stays here is the model: the statuses, the four ways there is no claim,
+# the typed failure, and the identifier's construction. None of those need an
+# engine, and they are the contract the view has to satisfy.

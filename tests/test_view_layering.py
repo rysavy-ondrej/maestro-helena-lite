@@ -541,16 +541,20 @@ def test_the_repository_records_every_definition_the_engine_does_not_hold():
         "helena_signal_domain_registrable": "0010_entity_value_null_guard.sql",
         "helena_signal_context_domains": "0010_entity_value_null_guard.sql",
         # Removed: 0013 drops these two and recreates nothing, because one
-        # snapshot ledger serves every feed.
+        # snapshot ledger serves every feed; 0014 drops the evidence table,
+        # because the evidence shape is derived by a view now.
         "helena_reference_threatfox_load": "0013_feed_snapshots.sql",
         "helena_reference_threatfox_load_counts": "0013_feed_snapshots.sql",
+        "helena_reference_enrichment_evidence": "0014_feed_mapping_views.sql",
     }
     # The difference between the two kinds, from the live side: a replaced
     # relation is still what the engine holds, under the migration that
     # recreated it; a removed one is not there at all.
     live = migrations.declarations()
     for relation, by in retired.items():
-        if relation.startswith("helena_reference_threatfox_load"):
+        if relation.startswith("helena_reference_threatfox_load") or relation == (
+            "helena_reference_enrichment_evidence"
+        ):
             assert relation not in live, f"{relation} was removed and is live"
         else:
             assert live[relation].migration == by

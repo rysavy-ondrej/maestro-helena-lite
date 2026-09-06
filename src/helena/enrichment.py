@@ -38,12 +38,20 @@ for, and `source_diversity` is normalization rule 2: an aggregator is never
 counted as many votes.
 
 **And the evidence row itself.** `EnrichmentEvidence` is one claim about one
-entity from one source, and `helena_reference_enrichment_evidence` is the same
-shape in the engine. Its key is a digest of the claim rather than
-`(entity, source)`, because `docs/decisions/0009-netify-application-identification.md`
-settled that the schema carries **N rows per entity** — Netify alone puts up to
-75 claims on one address. `QueryFailure` is what a query that did not complete
-produces instead: typed, bounded, and with nowhere to put a classification.
+entity from one source. It is a **derived** shape, not a stored one: each feed's
+loader writes its own reference table and a mapping view in
+`sql/migrations/0014_feed_mapping_views.sql` turns that into
+`helena_reference_evidence` — `concept/03-architecture.md`'s "SQL mapping and
+join views turning reference tables into enrichment evidence. **No runtime
+service.**" A loader that assembled the evidence shape itself would be a second
+implementation of the contract per feed, which is how the second feed's rows come
+out subtly different from the first's.
+
+Its identifier is a digest of the claim rather than `(entity, source)`, because
+`docs/decisions/0009-netify-application-identification.md` settled that the schema
+carries **N rows per entity** — Netify alone puts up to 75 claims on one address.
+`QueryFailure` is what a query that did not complete produces instead: typed,
+bounded, and with nowhere to put a classification.
 
 **Snapshot versioning is the provenance story for the static tier.** Every load
 attempt of every feed writes a row to `helena_reference_feed_snapshot` —
@@ -67,7 +75,9 @@ the evidence row, its statuses and its identifier by `tests/test_evidence.py`,
 including a round trip through the engine; the ThreatFox loader by
 `tests/test_threatfox.py`, against a real engine and a committed extract of a
 real export; snapshot versioning, the three failure modes and the derived
-statuses by `tests/test_snapshots.py`. What has NOT happened: no context has been
+statuses by `tests/test_snapshots.py`; the mapping views, the identifier's two
+homes and the tiers by `tests/test_mapping.py`, every one of them against a real
+engine. What has NOT happened: no context has been
 enriched — the join is a view that does not exist yet — and no snapshot version
 has reached an assessment.
 """
@@ -96,11 +106,12 @@ __all__ = [
     "DEFAULT_RULE",
     "DEFAULT_SECTION",
     "EMPTY_EXPORT",
-    "ENRICHMENT_EVIDENCE_TABLE",
+    "ENRICHMENT_EVIDENCE_VIEW",
     "ENRICHMENT_STATUSES",
     "ENTITY_TYPES",
     "EnrichmentEvidence",
     "FAILURE_REASONS",
+    "FEED_REFERENCE_TABLES",
     "FEED_SNAPSHOT_CURRENT_VIEW",
     "FEED_SNAPSHOT_TABLE",
     "FeedSnapshot",
@@ -129,11 +140,13 @@ __all__ = [
     "THREATFOX_ENTITY_TYPES",
     "THREATFOX_FAILURE_REASONS",
     "THREATFOX_MIN_FETCH_INTERVAL_SECONDS",
+    "THREATFOX_REFERENCE_TABLE",
     "THREATFOX_SOURCE",
     "THREATFOX_THREAT_TYPES",
     "THREATFOX_UNSEEN_THREAT_TYPE",
     "ThreatFoxEntry",
     "ThreatFoxError",
+    "ThreatFoxRow",
     "ThreatFoxSnapshot",
     "Tier",
     "UndeclaredClaim",
@@ -152,7 +165,7 @@ __all__ = [
     "source",
     "source_diversity",
     "split_indicator",
-    "threatfox_claims",
+    "threatfox_rows",
     "threatfox_snapshot_version",
 ]
 
@@ -975,7 +988,16 @@ QUERY_FAILURE_REASONS = (
     MALFORMED_RESPONSE,
 )
 
-ENRICHMENT_EVIDENCE_TABLE = "helena_reference_enrichment_evidence"
+# The evidence shape is a VIEW over each feed's reference table, not a table a
+# loader writes -- `sql/migrations/0014_feed_mapping_views.sql` and
+# `concept/03-architecture.md`'s "Enrichment views" row. What a loader writes is
+# its own reference table.
+ENRICHMENT_EVIDENCE_VIEW = "helena_reference_evidence"
+THREATFOX_REFERENCE_TABLE = "helena_reference_threatfox"
+
+# Which table a source's snapshots live in, so pruning does not need a branch per
+# feed. A source with no entry here has no loader yet.
+FEED_REFERENCE_TABLES = {"threatfox": THREATFOX_REFERENCE_TABLE}
 FEED_SNAPSHOT_TABLE = "helena_reference_feed_snapshot"
 FEED_SNAPSHOT_CURRENT_VIEW = "helena_reference_feed_snapshot_current"
 
@@ -1186,7 +1208,7 @@ def evidence_id(
     classification: str | None,
     scope_type: str,
     scope_value: str,
-    native_evidence: Mapping[str, Any],
+    native_record: str,
 ) -> str:
     """The stable identifier for one claim: a digest over what makes it that claim.
 
@@ -1195,11 +1217,22 @@ def evidence_id(
     row rather than a second copy of it, and a RisingWave INSERT onto an existing
     key is a silent upsert.
 
-    **The native evidence is in the digest**, and it has to be. Netify puts up to
+    **The native record is in the digest**, and it has to be. Netify puts up to
     75 claims on one address, and they differ *only* in the application they
     name; a digest over source, snapshot and entity alone would make those 75 one
     row and silently keep the last. That is the exact discard
     `docs/decisions/0009-netify-application-identification.md` measured.
+
+    `native_record` is the **publisher's own identifier** for the record -- for
+    ThreatFox, its `indicator_id` and the offset within the list that id keys.
+    Not a digest of the payload: the publisher's key is stable across snapshots
+    and is what the publisher means by "this record", where a payload digest
+    would mint a new identifier every time a field nobody reads changed.
+
+    This is the second home of the construction in
+    `sql/migrations/0014_feed_mapping_views.sql`, which is what actually produces
+    the identifier. `tests/test_mapping.py` asserts the two agree on a row read
+    out of the engine, rather than either being believed.
 
     **Tenant and sensor are in it** for the reason the event id has them: two
     deployments enriching the same entity would otherwise mint the same id in one
@@ -1223,9 +1256,7 @@ def evidence_id(
             "" if classification is None else classification,
             scope_type,
             scope_value,
-            # Canonical: sorted keys, no incidental whitespace, so two equal
-            # payloads written by two loaders hash the same.
-            json.dumps(native_evidence, sort_keys=True, separators=(",", ":")),
+            native_record,
         )
     )
     return hashlib.sha256(material).hexdigest()
@@ -1391,6 +1422,7 @@ class ThreatFoxEntry:
     """
 
     indicator_id: str
+    record_offset: int
     ioc_type: str
     ioc_value: str
     threat_type: str
@@ -1491,6 +1523,7 @@ def _threatfox_entry(
     tags = tuple(t for t in (raw_tags or "").split(",") if t) if raw_tags else ()
     return ThreatFoxEntry(
         indicator_id=str(indicator_id),
+        record_offset=offset,
         ioc_type=str(ioc_type),
         ioc_value=str(ioc_value),
         threat_type=str(threat_type),
@@ -1544,6 +1577,41 @@ def classify_threat_type(threat_type: str) -> tuple[str, bool]:
 
 
 @dataclass(frozen=True)
+class ThreatFoxRow:
+    """One entry of the export, normalized into the reference table's shape.
+
+    Not the evidence shape: that is what the mapping view derives, and a loader
+    that assembled it would be a second implementation of the evidence contract
+    per feed. This is the native record with the publisher's format read out of
+    it -- the list flattened, `ip:port` split, the delimited tags split, the
+    timestamps parsed -- plus the taxonomy classification, which
+    `concept/03-architecture.md` makes the loader's job.
+    """
+
+    snapshot_version: str
+    indicator_id: str
+    record_offset: int
+    ioc_type: str
+    ioc_value: str
+    entity_type: str
+    entity_value: str
+    port: int | None
+    threat_type: str
+    classification: str
+    taxonomy_version: str
+    threat_type_seen: bool
+    confidence_level: int
+    is_compromised: bool
+    first_seen: datetime | None
+    last_seen: datetime | None
+    tags: tuple[str, ...]
+    malware: str | None
+    malware_printable: str | None
+    reporter: str | None
+    reference: str | None
+
+
+@dataclass(frozen=True)
 class ThreatFoxSnapshot:
     """What one parse produced: the claims, and what did not become one.
 
@@ -1554,7 +1622,7 @@ class ThreatFoxSnapshot:
     """
 
     snapshot_version: str
-    claims: tuple[EnrichmentEvidence, ...]
+    rows: tuple[ThreatFoxRow, ...]
     #: Entries whose `ioc_type` has no HELENA entity -- file hashes. Skipped and
     #: counted, never silently dropped.
     skipped_no_entity: int
@@ -1565,7 +1633,7 @@ class ThreatFoxSnapshot:
 
     @property
     def entries_read(self) -> int:
-        return len(self.claims) + self.skipped_no_entity
+        return len(self.rows) + self.skipped_no_entity
 
 
 def threatfox_snapshot_version(raw: bytes) -> str:
@@ -1578,18 +1646,19 @@ def threatfox_snapshot_version(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def threatfox_claims(
-    raw: bytes, *, tenant: str, sensor: str, now: datetime | None = None
-) -> ThreatFoxSnapshot:
-    """Parse an export and map it to claims, counting what did not become one.
+def threatfox_rows(raw: bytes) -> ThreatFoxSnapshot:
+    """Parse an export into reference rows, counting what did not become one.
 
-    The mapping `concept/05` rule 2 calls "a unit-testable deliverable, not
-    prose": bytes in, claims out, no engine and no clock except the one that
-    decides staleness.
+    The half of the mapping `concept/05` rule 2 calls "a unit-testable
+    deliverable, not prose" that needs the publisher's format in front of it:
+    bytes in, reference rows out, no engine and no clock. Turning these into the
+    evidence shape is `helena_reference_evidence_threatfox`'s job, because that
+    shape is the same for every feed and a loader that assembled it would be a
+    second implementation of it per feed.
     """
     entries = parse_threatfox(raw)
     version = threatfox_snapshot_version(raw)
-    claims: list[EnrichmentEvidence] = []
+    rows: list[ThreatFoxRow] = []
     skipped = 0
     unseen: list[str] = []
     for entry in entries:
@@ -1600,75 +1669,34 @@ def threatfox_claims(
         classification, seen = classify_threat_type(entry.threat_type)
         if not seen:
             unseen.append(entry.threat_type)
-        # The scope is what the claim is ABOUT, and for an `ip:port` indicator
-        # that is the address on that port -- not the address. The entity is the
-        # address, because that is what a context row joins on.
-        #
-        # The port is deliberately NOT a column of its own. The comparison it
-        # would serve -- "a C2 on one port matched against a host that contacted
-        # another is a weaker claim" -- needs a port on the *other* side of the
-        # join, and `helena_signal_context_entities` has none: an entity row is a
-        # value and its observation flags. A column here would be one half of a
-        # join nothing can make. It is kept in the scope and in the native
-        # evidence, so nothing is lost, and the day the entity rows carry a port
-        # is the day this earns a column.
-        scope_type = "address:port" if port is not None else entity_type
-        scope_value = f"{entity_value}:{port}" if port is not None else entity_value
-        native = {
-            "threat_type": entry.threat_type,
-            # `concept/05`: "A compromised flag separates victim from owner, and
-            # is common, not rare." Native evidence, never the classification --
-            # a legitimate site currently serving malware is malicious at that
-            # URL and time, and its owner is a victim. The operational role is
-            # what the classification says; this says who is being wronged.
-            "is_compromised": entry.is_compromised,
-            "malware": entry.native.get("malware"),
-            "malware_printable": entry.native.get("malware_printable"),
-            "reporter": entry.native.get("reporter"),
-            "reference": entry.native.get("reference"),
-            "tags": list(entry.tags),
-            "indicator_id": entry.indicator_id,
-            "threat_type_seen_by_mapping": seen,
-        }
-        if port is not None:
-            native["port"] = port
-        claims.append(
-            EnrichmentEvidence(
-                evidence_id=evidence_id(
-                    tenant=tenant,
-                    sensor=sensor,
-                    source_id=THREATFOX_SOURCE,
-                    snapshot_version=version,
-                    entity_type=entity_type,
-                    entity_value=entity_value,
-                    classification=classification,
-                    scope_type=scope_type,
-                    scope_value=scope_value,
-                    native_evidence=native,
-                ),
-                source_id=THREATFOX_SOURCE,
-                source_tier=SOURCES[THREATFOX_SOURCE].tier,
+        rows.append(
+            ThreatFoxRow(
                 snapshot_version=version,
+                indicator_id=entry.indicator_id,
+                record_offset=entry.record_offset,
+                ioc_type=entry.ioc_type,
+                ioc_value=entry.ioc_value,
                 entity_type=entity_type,
                 entity_value=entity_value,
-                status=OK,
+                port=port,
+                threat_type=entry.threat_type,
                 classification=classification,
                 taxonomy_version=SOURCES[THREATFOX_SOURCE].taxonomy_version,
-                # `concept/05`: confidence is "numeric and genuinely spread" and
-                # "must reach the claim rather than being flattened away".
-                # 0-100 in the export, 0.0-1.0 on the claim, which is a change of
-                # unit and not of meaning.
-                confidence=entry.confidence_level / 100,
-                scope_type=scope_type,
-                scope_value=scope_value,
+                threat_type_seen=seen,
+                confidence_level=entry.confidence_level,
+                is_compromised=entry.is_compromised,
                 first_seen=_threatfox_time(entry.first_seen_utc),
                 last_seen=_threatfox_time(entry.last_seen_utc),
-                native_evidence=native,
+                tags=entry.tags,
+                malware=entry.native.get("malware"),
+                malware_printable=entry.native.get("malware_printable"),
+                reporter=entry.native.get("reporter"),
+                reference=entry.native.get("reference"),
             )
         )
     return ThreatFoxSnapshot(
         snapshot_version=version,
-        claims=tuple(claims),
+        rows=tuple(rows),
         skipped_no_entity=skipped,
         unseen_threat_types=tuple(sorted(set(unseen))),
     )
@@ -1794,7 +1822,7 @@ def load_threatfox(
     recorded_url = redactor.url(source_url)
     try:
         payload = fetch_threatfox(source_url) if raw is None else raw
-        snapshot = threatfox_claims(payload, tenant=tenant, sensor=sensor)
+        snapshot = threatfox_rows(payload)
     except ThreatFoxError as failure:
         # The previous snapshot is untouched: nothing has been written, and the
         # claims still join. `concept/instruction.md`: never let a failure empty
@@ -1816,7 +1844,7 @@ def load_threatfox(
 
     counts = {
         "entries_read": snapshot.entries_read,
-        "claims_stored": len(snapshot.claims),
+        "claims_stored": len(snapshot.rows),
         "skipped_no_entity": snapshot.skipped_no_entity,
         "unseen_threat_types": len(snapshot.unseen_threat_types),
         # Written with the load rather than joined from a table of feeds: the
@@ -1837,8 +1865,8 @@ def load_threatfox(
         # (`concept/02`), so deleting it would leave a stored assessment citing a
         # snapshot the store no longer has. Pruning is `prune_snapshots`, a
         # deliberate operation against a retention, not a side effect of loading.
-        for claim in snapshot.claims:
-            _insert_evidence(connection, claim, tenant=tenant, sensor=sensor)
+        for row in snapshot.rows:
+            _insert_threatfox_row(connection, row, tenant=tenant, sensor=sensor)
         connection.execute("FLUSH")
     return _record_snapshot(
         connection,
@@ -1874,47 +1902,57 @@ def _holds_snapshot(
     """
     connection.execute("FLUSH")
     rows = connection.execute(
-        f"SELECT 1 FROM {ENRICHMENT_EVIDENCE_TABLE} WHERE tenant = %s AND "
+        f"SELECT 1 FROM {ENRICHMENT_EVIDENCE_VIEW} WHERE tenant = %s AND "
         f"sensor = %s AND source_id = %s AND snapshot_version = %s LIMIT 1",
         (tenant, sensor, source_id, snapshot_version),
     ).fetchall()
     return bool(rows)
 
 
-def _insert_evidence(
+def _insert_threatfox_row(
     connection: psycopg.Connection,
-    claim: EnrichmentEvidence,
+    row: ThreatFoxRow,
     *,
     tenant: str,
     sensor: str,
 ) -> None:
-    """Write one claim under one identity. The only writer of the evidence table."""
+    """Write one reference row. The only writer of the ThreatFox snapshot table.
+
+    Nothing here assembles an evidence row: that is the mapping view's job, and
+    the evidence shape has exactly one implementation because of it.
+    """
     connection.execute(
-        f"INSERT INTO {ENRICHMENT_EVIDENCE_TABLE} (tenant, sensor, evidence_id, "
-        f"source_id, source_tier, snapshot_version, entity_type, entity_value, "
-        f"status, classification, taxonomy_version, confidence, scope_type, "
-        f"scope_value, first_seen, last_seen, valid_until, native_evidence) "
-        f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
-        f"%s, %s, %s)",
+        f"INSERT INTO {THREATFOX_REFERENCE_TABLE} (tenant, sensor, "
+        f"snapshot_version, indicator_id, record_offset, ioc_type, ioc_value, "
+        f"entity_type, entity_value, port, threat_type, classification, "
+        f"taxonomy_version, threat_type_seen, confidence_level, is_compromised, "
+        f"first_seen, last_seen, tags, malware, malware_printable, reporter, "
+        f"reference) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+        f"%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             tenant,
             sensor,
-            claim.evidence_id,
-            claim.source_id,
-            claim.source_tier.value,
-            claim.snapshot_version,
-            claim.entity_type,
-            claim.entity_value,
-            claim.status,
-            claim.classification,
-            claim.taxonomy_version,
-            claim.confidence,
-            claim.scope_type,
-            claim.scope_value,
-            claim.first_seen,
-            claim.last_seen,
-            claim.valid_until,
-            Jsonb(claim.native_evidence),
+            row.snapshot_version,
+            row.indicator_id,
+            row.record_offset,
+            row.ioc_type,
+            row.ioc_value,
+            row.entity_type,
+            row.entity_value,
+            row.port,
+            row.threat_type,
+            row.classification,
+            row.taxonomy_version,
+            row.threat_type_seen,
+            row.confidence_level,
+            row.is_compromised,
+            row.first_seen,
+            row.last_seen,
+            Jsonb(list(row.tags)),
+            row.malware,
+            row.malware_printable,
+            row.reporter,
+            row.reference,
         ),
     )
 
@@ -2071,11 +2109,12 @@ def prune_snapshots(
     doomed = ordered[keep:]
     if not doomed:
         return 0
+    table = FEED_REFERENCE_TABLES[source_id]
     for version in doomed:
         connection.execute(
-            f"DELETE FROM {ENRICHMENT_EVIDENCE_TABLE} WHERE tenant = %s AND "
-            f"sensor = %s AND source_id = %s AND snapshot_version = %s",
-            (tenant, sensor, source_id, version),
+            f"DELETE FROM {table} WHERE tenant = %s AND sensor = %s "
+            f"AND snapshot_version = %s",
+            (tenant, sensor, version),
         )
     connection.execute("FLUSH")
     return len(doomed)

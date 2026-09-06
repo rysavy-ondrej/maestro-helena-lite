@@ -60,7 +60,7 @@ import psycopg
 
 from helena.config import Settings
 from helena.enrichment import (
-    ENRICHMENT_EVIDENCE_TABLE,
+    ENRICHMENT_EVIDENCE_VIEW,
     FAILED,
     FEED_SNAPSHOT_TABLE,
     THREATFOX_MIN_FETCH_INTERVAL_SECONDS,
@@ -78,7 +78,7 @@ THREATFOX_EXPORT_URL = "https://threatfox.abuse.ch/export/json/recent/"
 def _status(connection: psycopg.Connection) -> int:
     """What is loaded, and what the last attempt did."""
     claims = connection.execute(
-        f"SELECT snapshot_version, count(*) FROM {ENRICHMENT_EVIDENCE_TABLE} "
+        f"SELECT snapshot_version, count(*) FROM {ENRICHMENT_EVIDENCE_VIEW} "
         f"WHERE source_id = %s GROUP BY snapshot_version",
         (THREATFOX_SOURCE,),
     ).fetchall()

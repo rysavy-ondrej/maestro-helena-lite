@@ -23,7 +23,7 @@ import pytest
 from helena.config import Settings
 from helena.enrichment import (
     EMPTY_EXPORT,
-    ENRICHMENT_EVIDENCE_TABLE,
+    ENRICHMENT_EVIDENCE_VIEW,
     FAILED,
     FEED_SNAPSHOT_CURRENT_VIEW,
     FEED_SNAPSHOT_TABLE,
@@ -86,7 +86,7 @@ def claims_held(connection: psycopg.Connection) -> dict[str, int]:
     return {
         version: count
         for version, count in connection.execute(
-            f"SELECT snapshot_version, count(*) FROM {ENRICHMENT_EVIDENCE_TABLE} "
+            f"SELECT snapshot_version, count(*) FROM {ENRICHMENT_EVIDENCE_VIEW} "
             f"WHERE source_id = %s GROUP BY snapshot_version",
             (THREATFOX_SOURCE,),
         ).fetchall()
