@@ -1,0 +1,62 @@
+{
+  "task_index": 22,
+  "title": "[D3 Enrichment] Snapshot versioning and never-empty-a-table failure semantics",
+  "status": "completed",
+  "summary": "Snapshot versioning becomes the provenance story for the static tier. Loading now keeps every snapshot it is given, one ledger row records every attempt including the failures, and prune_snapshots is a deliberate call rather than a side effect. This increment also corrects something the ThreatFox loader shipped four commits earlier.",
+  "assumption_validated": "STALE AND MISSING ARE DERIVED, NEVER STORED. Two of the four enrichment statuses are properties of a row and two are properties of now. `ok` and `failed` are stored -- they are what happened when the query ran. `stale` is a comparison against the clock, so storing it would be wrong the moment time passed; helena_reference_feed_snapshot_current computes it, the same call 0009 makes for `completeness`. `missing` is not a property of any row at all, because the rows do not exist -- only a LEFT JOIN from the entity side can say it, which is the enriched-context view's job. feed_status returns the three and never `no_match`, which is a source that RAN and found nothing. A source with no schedule can never be stale: the SSLBL JA3 list has been static since 2021, so it is not late, it is finished, and what is wrong with it is in its caveat rather than in its age.",
+  "makes_buildable": "A ledger the enriched-context view can turn into validity intervals, so a claim can be joined against the snapshot current at event time rather than today's. One row per attempt per source in helena_reference_feed_snapshot, with per-feed counts as JSONB `counts` -- because feeds do not count the same things, and a column per feed's idea of a count is how a shared table stops being shared.",
+  "files_changed": [
+    "prds/prd.json",
+    "scripts/load_threatfox.py",
+    "sql/migrations/0012_threatfox_load.sql",
+    "sql/migrations/0013_feed_snapshots.sql",
+    "src/helena/enrichment.py",
+    "src/helena/migrations.py",
+    "tests/test_enrichment.py",
+    "tests/test_snapshots.py",
+    "tests/test_threatfox.py",
+    "tests/test_view_layering.py"
+  ],
+  "verification": {
+    "command": "uv run pytest -q",
+    "passed": true,
+    "detail": "740 passed (17 new), as stated in the task's commit. Re-verified on 2026-09-06 at the D3 tip (88eeef9): the full suite is 765 passed, 0 failed, against a throwaway engine. Three failure modes are tested, each asserting the same two things: the previous snapshot survives, and the failure is on the record."
+  },
+  "escalations": [],
+  "invariant_conflicts": [
+    {
+      "step": "The ThreatFox loader replaced its claims insert-then-delete and kept exactly one snapshot, mirroring the Public Suffix List loader",
+      "conflict": "For the Public Suffix List that is right and deliberate -- 0008 holds one snapshot on purpose and its derivation GROUPs BY snapshot_version so a second fails loudly. For a FEED it is wrong: concept/02 says 'replay joins the snapshot current at event time, not today's' and concept/05 says 'keep enough history for replay', and a claim records the snapshot it matched against. Deleting that snapshot on the next load leaves a stored assessment citing something the store no longer has -- a replay that cannot be validated rather than one that disagrees.",
+      "resolution": "CORRECTED. Loading keeps every snapshot it is given, and prune_snapshots is a deliberate call against a retention this file records as a candidate."
+    },
+    {
+      "step": "0012 gave ThreatFox its own load table",
+      "conflict": "It does not generalise: a second feed would need a second table with the same columns, and 'which feeds are stale' would be a UNION somebody has to remember to extend.",
+      "resolution": "ONE LEDGER, NOT ONE PER FEED. 0013 drops both of 0012's objects -- by name, no CASCADE -- and puts one row per attempt per source in helena_reference_feed_snapshot. That needed `Superseded by:` to grow: until now it meant 'dropped and recreated', and 0012's table is dropped and NOT recreated, superseded by something with a different name. Both are now covered by one field, and the walk records which migration dropped each definition and refuses a claim that disagrees with it in BOTH directions -- a definition that is dropped and does not say so, and one that says so and is still live."
+    }
+  ],
+  "deferred": [
+    "A retention policy for snapshots. prune_snapshots exists and the candidate retention is recorded in the migration; nothing prunes automatically.",
+    "AN INDICATOR THAT DISAPPEARS BETWEEN SNAPSHOTS IS DOCUMENTED AND NOT COMPUTED. The recent export is a rolling window, so a disappearance is either an age-out or a retraction and the export says which by saying nothing. concept/02 settles what may be concluded and it is very little -- 'removal from a feed is not exoneration' -- and a differ that reported a difference would be asserting one the source does not make."
+  ],
+  "lessons": [
+    "NEVER EMPTY A REFERENCE TABLE. An emptied table reads downstream as no_match, which is the failure mode the whole design exists to prevent, arriving through the loader instead of through triage. A failed load leaves the previous snapshot in place and puts the failure on the record; three failure modes are tested for exactly those two properties.",
+    "ONE SHARED LEDGER, NOT A LOAD TABLE PER FEED, and per-feed counts as JSONB. Feeds do not count the same things -- ThreatFox has entries read, claims stored and skipped file hashes, and a feed with no unmappable indicator type would have two of those.",
+    "`stale` and `missing` are DERIVED, never stored. Storing a comparison against the clock is wrong the moment time passes. `ok` and `failed` are what happened and are stored.",
+    "A source with no schedule can never be stale. Static since 2021 is not late, it is finished; the caveat carries what is wrong with it.",
+    "RisingWave REJECTS `make_interval(secs => n)` with 'named function arguments are not supported'. Use `INTERVAL '1 second' * n`.",
+    "`Superseded by:` now covers both 'dropped and recreated' and 'dropped and not recreated, superseded by a different name', because the question a reader has when opening a superseded migration is the same either way: is this CREATE what the engine holds? The walk refuses a claim that disagrees in either direction."
+  ],
+  "failed_approaches": [
+    "Mirroring the Public Suffix List loader's single-snapshot replace for a FEED. One snapshot is right for the PSL (0008 GROUPs BY snapshot_version so a second fails loudly) and wrong for a feed, where replay joins the snapshot current at event time and a deleted snapshot orphans a stored citation.",
+    "A load table per feed (0012). It does not generalise, and 'which feeds are stale' becomes a UNION somebody has to extend.",
+    "`make_interval(secs => n)` in a RisingWave view -- named function arguments are not supported."
+  ],
+  "next_session_should_know": "The snapshot ledger is helena_reference_feed_snapshot: one row per attempt per source, counts as JSONB, failures included. A load never empties a table and never deletes an old snapshot as a side effect. Derive `stale` from the ledger and the schedule; derive `missing` from the entity side with a LEFT JOIN -- feed_status returns three statuses and never no_match. When a migration drops an object, say so with `Superseded by:` in the file that created it: the walk checks the claim in both directions and will refuse a live definition that claims to be superseded.",
+  "reconstructed": {
+    "source": "Rebuilt on 2026-09-06 from commit 90eabdc, whose message the implementing session wrote at the time. The task was merged without its report; this restores the handover rather than reporting it fresh.",
+    "commit": "90eabdc",
+    "git_label": "Landed as 'task-23' in the git history. The report contract numbers by zero-based task index, so that label is this task's index + 1 -- see prds/CONTEXT.md \u00a77.",
+    "not_recoverable": "Anything the session did not write into its commit message is absent: approaches tried and abandoned that left no trace, and the verification detail beyond the stated '740 passed (17 new)'."
+  }
+}

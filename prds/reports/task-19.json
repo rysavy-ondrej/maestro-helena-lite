@@ -1,0 +1,40 @@
+{
+  "task_index": 19,
+  "title": "[D3 Enrichment] Source tier registry and per-source declared emit subsets",
+  "status": "completed",
+  "summary": "helena.enrichment gains the registry: a source's tier, the entity types it is about, and the taxonomy subset it may emit, versioned. Tier A-D is concept/02's table verbatim, and `Tier.escalates_independently` is where 'deterministic signals escalate independently of triage' stops being prose -- A and B, with B's *high confidence* condition left to the caller because confidence belongs to the entry and the tier belongs to the source.",
+  "assumption_validated": "Two sources, both rated where concept/05's catalogue rates them. ThreatFox is tier B over address, domain and URL. The SSLBL JA3 list is tier C over fingerprints, and its caveat is on the descriptor rather than in prose a consumer may never open: under a hundred fingerprints, static since 2021, carrying the publisher's own statement that they are untested against known-good traffic. That caveat is also why `malicious` is not in its declared subset -- a list its own publisher will not vouch for cannot establish that a fingerprint performed malicious activity, and tier C is 'normally suspicious'. `source_diversity` is concept/02 normalization rule 2 and is a count over retained ORIGINS rather than over source names, so one source making forty claims is one, an aggregator republishing forty rows with no origin retained is one, and the same origin reaching us directly AND through an aggregator is one -- the correlated-source double-count the rule is actually about.",
+  "makes_buildable": "`check_claim` is the test concept/05 rule 1 asks for, and it keeps three failures apart: a path not in the taxonomy is a TaxonomyError; a valid path outside the declared subset is UndeclaredClaim; a non-aggregator attributing evidence elsewhere is UndeclaredClaim too but with its own message, because it is either misattribution or an undeclared aggregator. Any loader can now be checked against what its source declared. `origins` returns the grouping so the diversity number can be argued with, and so contradictions survive to the agent (rule 6).",
+  "files_changed": [
+    "README.md",
+    "prds/prd.json",
+    "src/helena/enrichment.py",
+    "tests/test_sources.py"
+  ],
+  "verification": {
+    "command": "uv run pytest -q",
+    "passed": true,
+    "detail": "667 passed (23 new), as stated in the task's commit. Re-verified on 2026-09-06 at the D3 tip (88eeef9): the full suite is 765 passed, 0 failed, against a throwaway engine."
+  },
+  "escalations": [],
+  "invariant_conflicts": [],
+  "deferred": [
+    "ThreatFox's threat-type children. Its subset is `{malicious, no_match}` and the missing half is recorded: concept/05 maps it to 'C2 and malware delivery, BY THREAT TYPE', which is exactly what taxonomy v1 cannot express. The children arrive with a taxonomy v2 and a new subset version here, which is the first real exercise of the version rule.",
+    "Nothing emits a claim, because no feed loader exists. What is exercised is the declaration and the counting, never a mapping.",
+    "The aggregator rule is tested against a descriptor built in the test, since neither accepted source republishes anybody."
+  ],
+  "lessons": [
+    "EVERY DECLARED SUBSET MUST CONTAIN `no_match`, and it is enforced rather than conventional. concept/05 rule 1 makes an explicit absence part of what a source reports, and concept/02 says why: with sparse coverage most entities have no hit on anything, so triage reading 'no hit' as 'clean' is the failure mode the design exists to prevent. A source that could not say no_match would leave that silence unlabelled.",
+    "source_diversity counts RETAINED ORIGINS, not source names. That one choice is what makes an aggregator republishing forty rows count once, and what catches the same origin arriving directly and through an aggregator.",
+    "Confidence belongs to the entry, the tier belongs to the source. Tier.escalates_independently is A and B; B's 'high confidence' condition is left to the caller for that reason.",
+    "The Public Suffix List is deliberately absent from the registry, and a test says so rather than leaving it as an oversight: concept/05 gives it tier N/A rather than unassigned, because it makes no claim about any entity."
+  ],
+  "failed_approaches": [],
+  "next_session_should_know": "A source is a declaration before it is a loader: tier, entity types, and the taxonomy subset it may emit, all versioned. A loader that emits outside its declared subset raises UndeclaredClaim, so widening what a source may say is an edit to the registry and a new subset version -- not something a mapping does quietly. Check any claim through `check_claim` rather than validating the path alone; the three failures it separates are three different bugs.",
+  "reconstructed": {
+    "source": "Rebuilt on 2026-09-06 from commit d9a9e31, whose message the implementing session wrote at the time. The task was merged without its report; this restores the handover rather than reporting it fresh.",
+    "commit": "d9a9e31",
+    "git_label": "Landed as 'task-20' in the git history. The report contract numbers by zero-based task index, so that label is this task's index + 1 -- see prds/CONTEXT.md \u00a77.",
+    "not_recoverable": "Anything the session did not write into its commit message is absent: approaches tried and abandoned that left no trace, and the verification detail beyond the stated '667 passed (23 new)'."
+  }
+}

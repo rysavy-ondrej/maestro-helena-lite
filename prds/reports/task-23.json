@@ -1,0 +1,49 @@
+{
+  "task_index": 23,
+  "title": "[D3 Enrichment] Feed mapping views producing evidence-level claims",
+  "status": "completed",
+  "summary": "concept/03-architecture.md names two components where this repository had one. 'Feed loaders: parse it, map it to the taxonomy, and update ITS reference table' existed; 'Enrichment views: SQL mapping and join views turning reference tables into enrichment evidence. No runtime service' did not. The loader now writes helena_reference_threatfox -- the native record, normalized but not reshaped -- the mapping view turns that into the evidence shape, and helena_reference_evidence unions the feeds.",
+  "assumption_validated": "THE SPLIT IS NOT ARBITRARY, and it was the operator's call rather than the session's: the concept note reads both ways and no ADR settles it. The loader does what needs the export in front of it -- flattening the id-keyed lists, splitting ip:port, splitting the delimited tags, parsing the timestamps, deciding an unseen threat type emits the parent: decisions about THIS PUBLISHER'S FORMAT, and a view making them would be a format parser written in SQL. The view does what is the same for every feed -- the evidence shape, the identifier, the scope, the tiers: decisions about THE EVIDENCE CONTRACT, and a loader making them would be a second implementation of it per feed.",
+  "makes_buildable": "helena_reference_evidence is one relation carrying every feed's claims in the evidence shape, which is what the enriched-context join reads. Adding a feed is now a loader plus a mapping view plus a branch of the union, and none of it re-implements the evidence contract.",
+  "files_changed": [
+    "prds/prd.json",
+    "scripts/load_threatfox.py",
+    "sql/migrations/0011_enrichment_evidence.sql",
+    "sql/migrations/0014_feed_mapping_views.sql",
+    "src/helena/enrichment.py",
+    "tests/test_enrichment.py",
+    "tests/test_evidence.py",
+    "tests/test_mapping.py",
+    "tests/test_snapshots.py",
+    "tests/test_threatfox.py",
+    "tests/test_view_layering.py"
+  ],
+  "verification": {
+    "command": "uv run pytest -q",
+    "passed": true,
+    "detail": "752 passed (15 new), as stated in the task's commit. Re-verified on 2026-09-06 at the D3 tip (88eeef9): the full suite is 765 passed, 0 failed, against a throwaway engine. The identifier now has two homes and they are asserted equal by execution: 0014 produces it, helena.enrichment.evidence_id is the same digest in Python, and tests/test_mapping.py asks the engine rather than reading the file."
+  },
+  "escalations": [],
+  "invariant_conflicts": [],
+  "deferred": [
+    "Nothing aggregates, deduplicates or picks between claims, and that is permanent rather than pending: UNION ALL and not UNION, because two identical rows from two feeds are two claims and collapsing them is exactly what concept/05 rule 6 forbids."
+  ],
+  "lessons": [
+    "THE LOADER/VIEW LINE IS FORMAT vs CONTRACT. Anything that needs this publisher's export in front of it belongs in the loader; anything that is the same for every feed -- the evidence shape, the identifier, the scope, the tiers -- belongs in the view. A view doing the first is a format parser in SQL; a loader doing the second is a second implementation of the evidence contract per feed.",
+    "THE NATIVE RECORD IS THE PUBLISHER'S OWN KEY PLUS THE OFFSET within the list it keys, not a digest of the payload. A payload digest would mint a new identifier every time a field nobody reads changed, and the publisher's key is what the publisher means by 'this record'. The offset is there because the format is a list per id -- which is also why the fixture carries a constructed id with two entries.",
+    "evidence_tier ('enrichment' -- static feeds joined in SQL, vs 'analyst' -- live providers queried through tools) is NOT the A-D source tier, which says how strong a source is. The two answer different questions about the same row.",
+    "A reference-layer object must match the `helena_reference_%` prefix, or the prefix query that keeps a reference object from appearing unnoticed will not see it. The views were first named helena_enrichment_* and had to be renamed.",
+    "tests/test_evidence.py keeps the model half (the statuses, the four ways there is no claim, the typed failure, the identifier's construction) and tests/test_mapping.py holds the engine-facing half. None of the model contract needs an engine."
+  ],
+  "failed_approaches": [
+    "Length-prefixing the indicator id and the record offset SEPARATELY in SQL and as ONE string in Python. The two digests never agreed. tests/test_mapping.py caught it immediately by asking the engine for the identifier rather than reading the migration file -- which is the argument for that test's shape.",
+    "Naming the mapping views helena_enrichment_*. They are in the reference layer but escape the helena_reference_% prefix query; renamed."
+  ],
+  "next_session_should_know": "There are two components, not one: a loader per feed writing its NATIVE record, and a mapping view turning that into evidence. helena_reference_evidence is the union and it is UNION ALL on purpose -- do not deduplicate it. The evidence identifier exists in SQL and in Python and a test asserts them equal against a running engine; if you change one, the test will tell you, and the digest's input encoding must match byte for byte.",
+  "reconstructed": {
+    "source": "Rebuilt on 2026-09-06 from commit d6df01e, whose message the implementing session wrote at the time. The task was merged without its report; this restores the handover rather than reporting it fresh.",
+    "commit": "d6df01e",
+    "git_label": "Landed as 'task-24' in the git history. The report contract numbers by zero-based task index, so that label is this task's index + 1 -- see prds/CONTEXT.md \u00a77.",
+    "not_recoverable": "Anything the session did not write into its commit message is absent: approaches tried and abandoned that left no trace, and the verification detail beyond the stated '752 passed (15 new)'."
+  }
+}

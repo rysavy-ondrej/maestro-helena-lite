@@ -40,7 +40,8 @@ concept/         The concept notes. Authoritative. Read what you need, not all o
   instruction.md         BINDING build rules + the definition of done
 
 prds/            This folder. Task list and progress tracking.
-  prd.json               56 tasks. THE SCRIPT OWNS THIS FILE — do not edit it.
+  prd.json               56 tasks. THE SCRIPT OWNS THIS FILE — do not edit it,
+                         unless no script ran: see §4, *Landing without the runner*.
   CONTEXT.md             this file
   instructions.md        a copy of concept/instruction.md (stale links; prefer the original)
   reports/task-NN.json   YOUR OUTPUT. One per task. See §7.
@@ -320,8 +321,14 @@ A task is not done because the code looks right.
 
 ### Report
 
-Write `prds/reports/task-NN.json` (§7). **This is the deliverable the next
-session reads.** A task with working code and no report is an incomplete task.
+Write `prds/reports/task-NN.json` (§7), where `NN` is the **zero-based task
+index** — task index 18 is `task-18.json`, never `task-19.json`. **This is the
+deliverable the next session reads.** A task with working code and no report is
+an incomplete task.
+
+The report is your only channel to the other tracking files: the runner reads it
+and folds it into `session-memory.json`, `progress.txt` and `session.json`. If no
+runner launched you, nothing will — see *Landing without the runner* below.
 
 ### Land — commit, merge, release the workspace
 
@@ -387,6 +394,47 @@ Four rules around it:
   ports), so a worktree does not get its own RisingWave. Run the suite in one
   workspace at a time.
 
+### Landing without the runner
+
+**Everything in `prds/` except your report is written by `implement.sh`. If it
+did not launch you, it will not write them, and the bookkeeping has no author
+unless you are it.** This is the one case where the "do not edit the tracking
+files" rule in §6 is suspended — not because the rule is soft, but because its
+premise is that a runner will do the writing.
+
+Measured, not hypothetical: tasks 18-24 were implemented, verified and merged
+this way. The code and the git history were never in doubt. What was missing was
+the handover — seven tasks with no report, no `progress.txt` entry and no
+`session-memory.json` note, while `session.json` still pointed at task 17. The
+next session would have inherited nothing from its seven predecessors.
+
+So when you land a task that no runner started, do all five, in this order:
+
+1. `prds/reports/task-NN.json` — the report, exactly as §7 specifies. Zero-based
+   `NN`. This is the source the other four are derived from, so write it first.
+2. `prds/prd.json` — set this task's `done` to `true`. Nothing else in the file.
+3. `prds/session-memory.json` — a `taskNotes["NN"]` entry (`status`, `title`,
+   `summary`, `makes_buildable`, `next_session_should_know`, `deferred`), and
+   your `lessons` and `failed_approaches` appended to `lessonsLearned` and
+   `failedApproaches`, each prefixed `task NN: ` once.
+4. `prds/progress.txt` — append the human entry: the header line, the title, the
+   summary, any `ESCALATION` and `CONFLICT` lines, then `NEXT:`.
+5. `prds/session.json` — move `currentTaskIndex`. **Do not invent an
+   `iterationTimings` entry**: that block is the runner's record of its own
+   iterations, and a duration, exit code and session id that were never measured
+   are fabrication. Say the task landed outside the runner instead.
+
+`implement.sh`'s `record_report()` is the reference for the exact shapes — read
+it rather than guessing, and do not run it.
+
+**Name the commit by the zero-based index too.** The D3 commits landed as
+`task-19`..`task-25` for indices 18..24, so `Merge task-25` names a task that is
+not done and no commit mentions task 18 at all. One numbering, and it is
+`prd.json`'s.
+
+**The report is part of the commit** either way — see the first of the four rules
+above.
+
 ---
 
 ## 5. Using Claude Code efficiently here
@@ -441,7 +489,9 @@ for the same information.
 **Do not**
 
 - edit `prd.json`, `session.json`, `progress.txt` or `session-memory.json` — the
-  runner owns them, and your channel to them is the report;
+  runner owns them, and your channel to them is the report. **Unless no runner
+  launched you**, in which case nothing else will write them and §4, *Landing
+  without the runner*, says what you owe;
 - leave a finished task uncommitted, or merged nowhere — see §4, *Land*;
 - add a `docs/` sprawl. If a decision was made, record it where the task says;
   otherwise it goes in the report.
@@ -472,8 +522,10 @@ not the documentation page, and if you cannot check it, escalate.
 ## 7. The report contract
 
 Write exactly one file, `prds/reports/task-NN.json`, where `NN` is the
-zero-padded task index the runner gave you. The runner reads it to update the
-tracking files, so the shape matters.
+zero-padded, **zero-based** task index — the index `prd.json` gives the task,
+which is the index the runner gave you. Index 18 is `task-18.json`. The runner
+reads it to update the tracking files, so the shape matters; if no runner
+launched you, §4, *Landing without the runner*, says who updates them instead.
 
 ```json
 {

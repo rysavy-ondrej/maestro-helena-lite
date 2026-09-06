@@ -1,0 +1,56 @@
+{
+  "task_index": 21,
+  "title": "[D3 Enrichment] ThreatFox feed loader",
+  "status": "completed",
+  "summary": "The first feed. Fetch the structured export, flatten it, map it to claims, replace the snapshot, and record every attempt including the failures. Everything that shapes the loader was measured against the real export on 2026-09-06 rather than read off a documentation page, and the section head carries the numbers and the date because the feed is not ours and will move.",
+  "assumption_validated": "Measured over 4 985 entries, and each number changes something. ip:port 3 139 (63%), 596 distinct ports -- split, and the port is KEPT, because a C2 on one port matched against a host that contacted another is a weaker claim. is_compromised 821 (16.5%) -- common, not rare, exactly as concept/05 says; it is native evidence and never the classification, because a legitimate site serving malware is malicious at that URL and its owner is a victim. confidence 49/50/75/80/90/95/100 -- genuinely spread, and it reaches the claim as 0.0-1.0; a loader that rounded it to a flag would discard the only per-entry signal there is. reference absent on 80.4%; last_seen absent on 19.3%, first_seen on none -- so first-seen plus the snapshot dates a claim, and absent stays absent. tags a delimited string, absent on 8.9%.",
+  "makes_buildable": "There is a feed in the store, so everything downstream has real rows to be built against rather than a fixture shape. The mapping table is explicit and unit-tested for reasons that have nothing to do with its current values: it records which threat types have been seen and considered, an unseen one is counted so the source's vocabulary drifting surfaces, and it is where children attach on the day there are any.",
+  "files_changed": [
+    "prds/prd.json",
+    "scripts/load_threatfox.py",
+    "sql/migrations/0012_threatfox_load.sql",
+    "src/helena/enrichment.py",
+    "tests/fixtures/threatfox/README.md",
+    "tests/fixtures/threatfox/export.json",
+    "tests/test_enrichment.py",
+    "tests/test_threatfox.py"
+  ],
+  "verification": {
+    "command": "uv run pytest -q",
+    "passed": true,
+    "detail": "723 passed (29 new), as stated in the task's commit. Re-verified on 2026-09-06 at the D3 tip (88eeef9): the full suite is 765 passed, 0 failed, against a throwaway engine."
+  },
+  "escalations": [],
+  "invariant_conflicts": [
+    {
+      "step": "Step 1 says to redact the key 'because it travels in the URL path'",
+      "conflict": "IT DOES NOT. Measured on 2026-09-06, and the second measurement rather than the first: the bulk export returns 200 with NO credential, and the API returns 401 without an Auth-Key header. concept/05 recorded that correction on 2026-09-03 after the same claim had propagated through four files.",
+      "resolution": "The loader holds no key. The redactor is still applied to the stored URL, because that rule is about the channel -- a stored URL leaks whatever was in it -- and not about this provider."
+    },
+    {
+      "step": "Put THREATFOX_EXPORT_URL in helena/enrichment.py",
+      "conflict": "tests/test_broker.py::test_no_module_in_the_package_holds_a_broker_address failed it.",
+      "resolution": "Resolved in the test's favour. The source URL lives in a script and nowhere else, because concept/05 opens with 'adding a source is a governed decision, not a configuration convenience'. It is now in scripts/load_threatfox.py, the loader takes it as a required argument, and the test imports it from the script so the two cannot disagree."
+    }
+  ],
+  "deferred": [
+    "FILE HASHES HAVE NO ENTITY HERE. ThreatFox reports sha256/md5/sha1 indicators -- 452 of 4 985, 9.1% -- and HELENA's entity types are address, domain, url and fingerprint, where a fingerprint is a TLS JA3/JA4 rather than a file digest. There is nothing in a host context for them to attach to. They are skipped and COUNTED on the load row, because instruction.md \u00a77 requires produced-versus-materialised counts to reconcile and a skip nobody counted is how that stops being possible.",
+    "The evidence-level children. Creating a taxonomy v2 here would have been wrong -- see lessons."
+  ],
+  "lessons": [
+    "THE ABUSE.CH KEY DOES NOT TRAVEL IN THE URL PATH. The bulk export answers 200 with no credential; the API answers 401 without an `Auth-Key` HEADER. Measured 2026-09-06. This claim had already propagated through four files before concept/05 corrected it on 2026-09-03, and the task description still carried it -- which is why the measurement is repeated in the code comment with its date.",
+    "EVERY THREAT TYPE MAPS TO `malicious`, AND CREATING A TAXONOMY v2 WOULD HAVE BEEN WRONG. An earlier task recorded that this loader was where the evidence-level children would arrive. It is not. concept/05 adopts the evidence level from a published indicator taxonomy 'so that HELENA's evidence stays comparable with other tools' rather than RE-DERIVING A VOCABULARY FROM THE SAME PROVIDERS', and deriving malicious.c2 from ThreatFox's botnet_cc is precisely that. The mapping emits the root and the threat type is retained as native evidence, where an agent can read it and nothing is lost. The children arrive when the published taxonomy is in this repository, not when a provider's vocabulary is.",
+    "A fixture where every list has one element cannot tell a loader that flattens from one that indexes. Every list in the real snapshot had length one, which is a property of a snapshot and not of a format, so the committed fixture constructs one indicator id carrying TWO entries and its README says so.",
+    "The measurements are dated in the section head on purpose: the feed is not ours and will move. Re-measure before trusting the percentages above."
+  ],
+  "failed_approaches": [
+    "Putting the feed's export URL in the package (helena/enrichment.py). tests/test_broker.py refuses any module in the package holding a source address; the URL belongs in scripts/load_threatfox.py and the loader takes it as an argument."
+  ],
+  "next_session_should_know": "The loader holds no credential and must not acquire one: the bulk export is open, and the task description's claim that the key travels in the URL path is wrong and measured wrong twice. Threat types map to the root `malicious` and the native threat type is retained beside it -- do not derive children from a provider's vocabulary. File-hash indicators are skipped and counted, not dropped silently. The percentages in the section head are dated because the feed moves.",
+  "reconstructed": {
+    "source": "Rebuilt on 2026-09-06 from commit cf7e9c5, whose message the implementing session wrote at the time. The task was merged without its report; this restores the handover rather than reporting it fresh.",
+    "commit": "cf7e9c5",
+    "git_label": "Landed as 'task-22' in the git history. The report contract numbers by zero-based task index, so that label is this task's index + 1 -- see prds/CONTEXT.md \u00a77.",
+    "not_recoverable": "Anything the session did not write into its commit message is absent: approaches tried and abandoned that left no trace, and the verification detail beyond the stated '723 passed (29 new)'."
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "task_index": 20,
+  "title": "[D3 Enrichment] Enrichment evidence schema with status distinct from no_match",
+  "status": "completed",
+  "summary": "EnrichmentEvidence is one claim about one entity from one source, and sql/migrations/0011 is the same shape in the engine, asserted equal by execution rather than by reading. QueryFailure is what a query that did not complete produces instead.",
+  "assumption_validated": "TWO COLUMNS CARRY THE FIVE-WAY DISTINCTION instruction.md forbids collapsing. `status` is ok/stale/failed/missing -- what happened to the query. `classification` is a taxonomy path, no_match included -- what the source said. classification is NULL exactly when the status is failed or missing, which is concept/05 rule 4: a query that did not complete emits a typed error and no taxonomy object. A row with status ok and classification no_match is a source that ran and found nothing, which is a different fact from a source that could not be asked. There is no `verdict` column though concept/02 lists it among the six normalized fields: it is the root of the classification path, the taxonomy already refuses a path whose root is not its first segment, and a stored copy is a column that can disagree with the one it came from. EnrichmentEvidence.verdict derives it.",
+  "makes_buildable": "The row shape a loader writes into now exists in both homes and they are asserted equal by execution. The evidence_id digest is defined, so a loader has a key to write against and a later view has one to reproduce.",
+  "files_changed": [
+    "prds/prd.json",
+    "sql/migrations/0011_enrichment_evidence.sql",
+    "src/helena/enrichment.py",
+    "tests/test_enrichment.py",
+    "tests/test_evidence.py"
+  ],
+  "verification": {
+    "command": "uv run pytest -q",
+    "passed": true,
+    "detail": "696 passed (29 new), as stated in the task's commit. Re-verified on 2026-09-06 at the D3 tip (88eeef9): the full suite is 765 passed, 0 failed, against a throwaway engine."
+  },
+  "escalations": [],
+  "invariant_conflicts": [
+    {
+      "step": "The task opens 'One claim per (entity, source)'",
+      "conflict": "That is the reading docs/decisions/0009-netify-application-identification.md corrected: 'the evidence schema carries N rows per entity, not one row per (entity, source) holding a collapsed set', because Netify alone puts up to 75 claims on a single address and a loader keyed by address silently discarded 124 653 rows in the first draft of that measurement. concept/02 now says it directly.",
+      "resolution": "Resolved against concept/, which outranks prd.json. The key is `evidence_id`, a digest of what makes a claim that claim, and the task's phrase describes the UNIT of a claim rather than capping their number."
+    }
+  ],
+  "deferred": [
+    "Nothing writes a row. The loader is the next task."
+  ],
+  "lessons": [
+    "WHAT IS IN THE evidence_id DIGEST IS LOAD-BEARING. The native evidence is in it, because Netify's 75 claims differ only in the application they name and a digest over source, snapshot and entity alone would make them one row and silently keep the last -- the exact discard ADR-0009 measured. The tenant and sensor are in it for the reason _event_id has them: an INSERT onto an existing key in RisingWave is a SILENT UPSERT, so two deployments would overwrite each other. The status is NOT in it: a claim that goes stale is the same claim, and including it would mint a new row every time a snapshot aged.",
+    "QueryFailure enforces 'never carries secrets, authorization headers or full provider responses' BY SHAPE rather than by review: five fields, extra='forbid' so a caller cannot add `response`, a typed reason, and a bounded detail because an unbounded diagnostic is where str(response) ends up. It has no classification and no confidence field at all, so a timeout cannot become no_match or unknown by accident.",
+    "A bad classification raises TaxonomyError rather than ValidationError, deliberately: every other refusal is a ValueError that Pydantic turns into a field error, and a path the vocabulary does not have is a taxonomy fact rather than a malformed field. Flattening both into one field error would lose 'not in the vocabulary' vs 'declared but unused' at the first caller."
+  ],
+  "failed_approaches": [],
+  "next_session_should_know": "status and classification are two independent columns and must stay that way: `no_match` is a CLASSIFICATION on a row whose query succeeded, never a status. The four statuses are ok/stale/failed/missing and classification is NULL exactly for failed and missing. Do not add a verdict column -- it is derived from the classification path's root. tests/test_enrichment.py's reference-layer prefix query needed the new table added, which is the deliberate friction from task 17 working as designed.",
+  "reconstructed": {
+    "source": "Rebuilt on 2026-09-06 from commit 0cc4c4a, whose message the implementing session wrote at the time. The task was merged without its report; this restores the handover rather than reporting it fresh.",
+    "commit": "0cc4c4a",
+    "git_label": "Landed as 'task-21' in the git history. The report contract numbers by zero-based task index, so that label is this task's index + 1 -- see prds/CONTEXT.md \u00a77.",
+    "not_recoverable": "Anything the session did not write into its commit message is absent: approaches tried and abandoned that left no trace, and the verification detail beyond the stated '696 passed (29 new)'."
+  }
+}

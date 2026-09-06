@@ -1,0 +1,48 @@
+{
+  "task_index": 18,
+  "title": "[D3 Enrichment] Taxonomy version module with validated paths",
+  "status": "completed",
+  "summary": "helena/taxonomy holds the machinery and one module per version; v1.py is the first vocabulary. The four rules concept/02-concepts-and-taxonomy.md calls 'validated, not assumed' are checks rather than comments: roots are closed per level AND per emitter, the root must equal the first segment, a path must be in the vocabulary, and `unknown` has no children.",
+  "assumption_validated": "Two questions the task raised were answered by refusing to invent. (1) THE EVIDENCE LEVEL IS ROOTS-ONLY, DELIBERATELY. concept/02 adopts it 'essentially unchanged from an existing published indicator taxonomy' and then neither names that taxonomy nor reproduces it, and nothing else in this repository does either. The sub-paths cannot be adopted -- there is nothing here to adopt them from -- and must not be invented, because the note's own rule is 'emit the parent rather than guessing a child'. A plausible evidence vocabulary would be that mistake one layer up and indistinguishable from the real thing afterwards. v1 closes the five roots as the whole vocabulary. (2) THE CONTEXT LEVEL IS DERIVED FROM PROSE, AND THE DERIVATION IS SHOWN: concept/02 describes three families in three sentences and writes out exactly one path anywhere in the repository, `malicious.c2`. Each path in v1 carries the fragment it came from as a comment, so the derivation can be checked rather than taken.",
+  "makes_buildable": "A real vocabulary exists to declare against, which is what the source registry (task 19) needs before it can hold a per-source emit subset. `resolve` answers 'is this in the vocabulary' and `for_emission` answers 'may anything emit it now', because declared-but-unused and not-in-the-vocabulary are two different facts and instruction.md \u00a72 forbids one value for two facts. UnknownVersion is a third: a row recording a version whose module is absent is a replay that cannot be validated, not a bad value. helena.versions records taxonomy_version as a dimension.",
+  "files_changed": [
+    "README.md",
+    "prds/prd.json",
+    "src/helena/taxonomy/__init__.py",
+    "src/helena/taxonomy/v1.py",
+    "src/helena/versions.py",
+    "tests/test_package_layout.py",
+    "tests/test_taxonomy.py"
+  ],
+  "verification": {
+    "command": "uv run pytest -q",
+    "passed": true,
+    "detail": "644 passed (31 new), as stated in the task's commit. Re-verified on 2026-09-06 at the D3 tip (88eeef9): the full suite is 765 passed, 0 failed, against a throwaway engine."
+  },
+  "escalations": [],
+  "invariant_conflicts": [
+    {
+      "step": "Create helena/taxonomy/v1.py as a versioned subpackage",
+      "conflict": "tests/test_package_layout.py derived its module set from `rglob` stems, so any subpackage failed it -- a previous session had recorded that as a reason not to have one.",
+      "resolution": "Resolved in the task's favour. The authority order in prds/CONTEXT.md puts prd.json above CONTEXT.md and below instruction.md, and a test's stem bookkeeping is not an instruction.md invariant. The test gained a principled rule instead: subpackages are declared, a versioned package holds only __init__.py and vN.py, and the component check reads the top level. ADR-0008 promises the same shape for agent schemas, prompts and renderings, so it is a category rather than one exception. The new rule also refuses a shared helper inside a versioned package, which would be a file every frozen version imports and therefore a way to edit v1 through a side door."
+    }
+  ],
+  "deferred": [
+    "The evidence-level sub-paths. They arrive with the first feed that can say what they are, and that is a taxonomy v2 -- not an invention here.",
+    "Nothing emits a taxonomy path yet, so nothing validates one in anger.",
+    "helena.versions records taxonomy_version and deliberately does not resolve it -- resolving is what replay does."
+  ],
+  "lessons": [
+    "The evidence level of the taxonomy is roots-only ON PURPOSE, and the reason survives every later task: the published indicator taxonomy concept/02 adopts is not in this repository, so a child path here would be re-derived from the same providers the vocabulary exists to stay comparable with. Emit the parent.",
+    "A versioned package holds only __init__.py and vN.py, and no shared helper -- a helper every frozen version imports is a way to edit a frozen version through a side door. tests/test_package_layout.py enforces it.",
+    "Declared-but-unused and not-in-the-vocabulary are two different facts with two functions: `resolve` and `for_emission`. A third, UnknownVersion, is a version whose module is absent -- a replay that cannot be validated, not a bad value."
+  ],
+  "failed_approaches": [],
+  "next_session_should_know": "helena.taxonomy is the vocabulary and it validates rather than documents. Before emitting any path: it must be in the version's vocabulary, its root must equal its first segment, and the root must be open to your level and your emitter. The evidence level is five roots and no children, and that is not an omission to be helpfully filled in -- see the assumption above before adding one. Anomaly, baseline and novelty paths are declared and marked unused with a shared reason: every one is a comparison against this host's past, and a context is one host in one five-minute window.",
+  "reconstructed": {
+    "source": "Rebuilt on 2026-09-06 from commit 9ee7ac0, whose message the implementing session wrote at the time. The task was merged without its report; this restores the handover rather than reporting it fresh.",
+    "commit": "9ee7ac0",
+    "git_label": "Landed as 'task-19' in the git history. The report contract numbers by zero-based task index, so that label is this task's index + 1 -- see prds/CONTEXT.md \u00a77.",
+    "not_recoverable": "Anything the session did not write into its commit message is absent: approaches tried and abandoned that left no trace, and the verification detail beyond the stated '644 passed (31 new)'."
+  }
+}
