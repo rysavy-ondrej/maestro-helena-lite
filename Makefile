@@ -3,11 +3,12 @@
 # Everything runs through `uv run`, against the `.venv/` that is already at the
 # project root. Never `pip`, never a second virtualenv, never a system python.
 
-.PHONY: help sync test check lint typecheck dev-up dev-down migrate storage
+.PHONY: help sync test check acceptance lint typecheck dev-up dev-down migrate storage
 
 help:
 	@echo "sync       install the locked environment (uv sync)"
 	@echo "test       run the one pytest suite"
+	@echo "acceptance run the enrichment-status gate alone (a subset of test)"
 	@echo "check      lockfile is in sync, sources compile, suite passes"
 	@echo "dev-up     verify the pinned binaries and run the engine and broker"
 	@echo "dev-down   stop them again"
@@ -21,6 +22,13 @@ sync:
 
 test:
 	uv run pytest -q
+
+# The D3 gate. Not a second suite - these tests are part of `make test` and are
+# marked so they can be run alone, because "the triage stage is not buildable
+# until this passes" needs something a person can actually run. See the head of
+# tests/test_acceptance_enrichment.py.
+acceptance:
+	uv run pytest -q -m acceptance
 
 dev-up:
 	scripts/dev-up

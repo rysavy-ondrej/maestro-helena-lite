@@ -21,8 +21,8 @@ bin/lib
 
 # Intelligence snapshots stay out of the repository - fair-use terms bind them.
 # A small extract committed as a test fixture is fine; the full files are not.
-data/threatfox/
-data/netify/
+data/threatfox
+data/netify
 
 # Flow captures held for demonstration and measurement. Unlike
 # data/ingest/flow-sample.jsonl - 62 records of the maintainer's own host, with a

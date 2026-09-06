@@ -323,7 +323,7 @@
         "Assert an in-flight load does not present as either a hit or a clean lookup",
         "Wire these as a named acceptance suite that must pass before the triage stage is considered buildable"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D4 Contract] Versioned agent request/result contract with typed failure envelope",

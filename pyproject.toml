@@ -30,4 +30,5 @@ addopts = "-ra --strict-markers --strict-config"
 filterwarnings = ["error"]
 markers = [
     "integration: needs the pinned engine or broker; the fixtures start one if nothing answers",
+    "acceptance: the enrichment-status gate (tests/test_acceptance_enrichment.py). `make acceptance` runs it alone, and D4 triage is not buildable until it passes",
 ]

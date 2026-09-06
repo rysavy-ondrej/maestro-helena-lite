@@ -1,8 +1,8 @@
 {
   "currentIteration": 22,
-  "currentTaskIndex": 24,
-  "elapsedTimeSeconds": 286678,
-  "lastUpdateTime": 1788719648978,
+  "currentTaskIndex": 25,
+  "elapsedTimeSeconds": 290503,
+  "lastUpdateTime": 1788723473882,
   "startTime": 1788432970645,
   "statistics": {
     "averageDurationMs": 1231021,
@@ -198,9 +198,10 @@
       21,
       22,
       23,
-      24
+      24,
+      25
     ],
-    "note": "Implemented, verified and merged by sessions launched outside implement.sh, so no runner iteration recorded them. The statistics block counts the runner's own iterations only and deliberately excludes these seven. Their reports were rebuilt from the commit record on 2026-09-06 -- see prds/progress.txt and each report's `reconstructed` field."
+    "note": "Implemented, verified and merged by sessions launched outside implement.sh, so no runner iteration recorded them. The statistics block counts the runner's own iterations only and deliberately excludes these eight. Their reports were rebuilt from the commit record on 2026-09-06 -- see prds/progress.txt and each report's `reconstructed` field."
   },
   "totalIterations": 22
 }
