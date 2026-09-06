@@ -184,8 +184,9 @@
 -- Read by:  helena_signal_context_entities (entity extraction),
 --           helena_signal_host_context_retained (the retention boundary),
 --           helena_signal_retention_rejections (the counter over what the
---           boundary drops) and tests/test_context.py. The enriched-context view
---           (D3) reads the live view above the boundary, not this one.
+--           boundary drops), helena_signal_context_entity_ports
+--           (sql/migrations/0015, which pairs a context with the ports its host
+--           reached) and tests/test_context.py.
 --
 -- `'v1'` below is the literal copy of `helena.versions.AGGREGATION_VERSION`.
 -- It is a literal because a streaming query cannot read

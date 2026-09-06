@@ -248,9 +248,9 @@ FROM helena_reference_threatfox t;
 --           state for, and the enriched-context view above it is where
 --           materialization is worth arguing about.
 -- Reads:    helena_reference_evidence_threatfox
--- Read by:  src/helena/enrichment.py (reading claims back), tests/test_mapping.py
---           and tests/test_evidence.py. The enriched-context view (the next D3
---           increment) is the reader this exists for.
+-- Read by:  helena_analytical_enriched_context (sql/migrations/0015 -- the
+--           reader this exists for), src/helena/enrichment.py (reading claims
+--           back), tests/test_mapping.py and tests/test_evidence.py.
 --
 -- One feed today. `UNION ALL` and not `UNION`: two identical rows from two feeds
 -- would be two claims, and deduplicating them is precisely the collapse

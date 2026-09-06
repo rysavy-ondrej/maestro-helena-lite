@@ -287,10 +287,10 @@ JOIN (
 -- Read by:  helena_signal_context_entities_retained (the retention boundary),
 --           helena_signal_domain_suffix_candidates and
 --           helena_signal_context_domains (the registrable-domain derivation),
---           and tests/test_context.py. It exists for the enriched-context view
---           (D3), which joins these rows against the enrichment reference
---           tables, and for the triage rendering, which needs per-domain and
---           per-address records rather than arrays.
+--           helena_analytical_enriched_context (sql/migrations/0015, the join
+--           this exists for), and tests/test_context.py. The triage rendering
+--           needs per-domain and per-address records rather than arrays, which
+--           is the other half of why these rows are shaped this way.
 --
 -- Two levels of aggregation, and both are load-bearing:
 --

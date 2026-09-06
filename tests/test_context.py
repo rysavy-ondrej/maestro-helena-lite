@@ -1033,6 +1033,11 @@ def test_every_signal_object_declares_what_it_is(migrated_engine: psycopg.Connec
         LIVE_HOST_CONTEXT_VIEW: "VIEW",
         RETAINED_CONTEXT_ENTITIES_VIEW: "MATERIALIZED VIEW",
         RETENTION_REJECTIONS_VIEW: "VIEW",
+        # sql/migrations/0015: the ports a host reached on an address, which the
+        # enriched context needs and cannot fetch itself — the analytical layer
+        # may not read the flatten layer. Plain, because one view joins it and
+        # nothing else does.
+        "helena_signal_context_entity_ports": "VIEW",
         # The registrable-domain derivation of
         # sql/migrations/0008_public_suffix_list.sql. The two candidate views
         # are intermediates — nothing reads a single candidate — and the

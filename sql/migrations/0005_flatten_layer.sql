@@ -93,7 +93,8 @@
 -- Object:   VIEW (plain). Nothing queries a flow row on its own; the signal
 --           layer aggregates it into a host context.
 -- Reads:    helena_normalized_events
--- Read by:  helena_signal_host_context (the windowed aggregation) and
+-- Read by:  helena_signal_host_context, helena_signal_context_entity_ports
+--           (sql/migrations/0015) (the windowed aggregation) and
 --           helena_signal_entity_observations (entity extraction), both in the
 --           signal layer, and tests/test_context.py.
 --

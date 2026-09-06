@@ -208,6 +208,31 @@ retained is one, and the same origin arriving directly and through an aggregator
 is one. That last case is the correlated-source double-count
 `concept/02-concepts-and-taxonomy.md` names.
 
+**The enriched context is a join, and it is per entity.**
+[`sql/migrations/0015_enriched_context.sql`](sql/migrations/0015_enriched_context.sql)
+is the first object in the **analytical** layer — until it existed, `MAY_READ`'s
+`analytical` row was an invariant the layering tests could describe and not
+exercise. It joins a context's entity rows to the claims about them, per entity,
+because a host context is one row with arrays inside it and an array inside a
+window cannot be joined to evidence.
+
+Three things it does that are easy to get wrong. It joins **the snapshot that was
+current at the context's event time**, not the newest one, so an old context does
+not silently re-enrich itself every time it is read. It emits a row for every
+(entity, source) rather than only for the hits, so an entity with no hit anywhere
+is a **`no_match` row and not an absence** — with sparse coverage most entities
+have no hit on anything, and triage reading "no hit" as "clean" is the failure
+mode the design exists to prevent. And it records **whether the claim's port
+matched** what the host actually reached, three-valued and never as a filter: a
+C2 claim on a port the host never touched is a weaker claim, not no claim, and
+dropping the row would make the composition rule's decision on its behalf.
+
+**It carries no verdict, no severity and no score**, and that absence is the
+point. `concept/02`'s composition rule — an evidence-level classification about a
+contacted indicator does not become the context verdict — is about what a reader
+may conclude from these rows. A verdict column would be that decision taken in
+SQL, where none of the traffic correlation the rule turns on has been weighed.
+
 **Two levels, and the vocabulary each one closes over.** The *evidence* level
 classifies an indicator — what a source says about an address, domain, URL or
 fingerprint — over the roots `no_match`, `normal`, `suspicious`, `malicious` and
