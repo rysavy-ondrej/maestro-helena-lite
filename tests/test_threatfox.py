@@ -23,7 +23,7 @@ import pytest
 
 from helena.enrichment import (
     EMPTY_EXPORT,
-    ENRICHMENT_EVIDENCE_TABLE,
+    ENRICHMENT_EVIDENCE_VIEW,
     FAILED,
     FETCH_FAILED,
     LOADED,
@@ -39,12 +39,13 @@ from helena.enrichment import (
     ThreatFoxError,
     FeedSnapshot,
     Tier,
+    Claim,
     check_claim,
     classify_threat_type,
     load_threatfox,
     parse_threatfox,
     split_indicator,
-    threatfox_claims,
+    threatfox_rows,
 )
 from helena.config import Settings
 from helena.observability import Redactor
@@ -85,7 +86,7 @@ def redactor() -> Redactor:
 
 
 def snapshot():
-    return threatfox_claims(RAW, tenant=TENANT, sensor=SENSOR)
+    return threatfox_rows(RAW)
 
 
 # --- Flatten, never index ---------------------------------------------------
@@ -147,10 +148,10 @@ def test_an_ip_port_indicator_splits_and_the_port_survives():
     assert port is not None and port > 0
     assert entry.ioc_value == f"{entity_value}:{port}"
 
-    claim = next(c for c in snapshot().claims if c.scope_type == "address:port")
-    assert claim.entity_type == "address"
-    assert ":" not in claim.entity_value
-    assert claim.scope_value == f"{claim.entity_value}:{claim.native_evidence['port']}"
+    row = next(r for r in snapshot().rows if r.port is not None)
+    assert row.entity_type == "address"
+    assert ":" not in row.entity_value
+    assert row.ioc_value == f"{row.entity_value}:{row.port}"
 
 
 def test_a_malformed_ip_port_is_a_format_change():
@@ -160,11 +161,10 @@ def test_a_malformed_ip_port_is_a_format_change():
         split_indicator(broken)
 
 
-def test_a_domain_claim_has_no_port_and_scopes_to_itself():
-    claim = next(c for c in snapshot().claims if c.entity_type == "domain")
-    assert claim.scope_type == "domain"
-    assert claim.scope_value == claim.entity_value
-    assert "port" not in claim.native_evidence
+def test_a_domain_row_has_no_port():
+    row = next(r for r in snapshot().rows if r.entity_type == "domain")
+    assert row.port is None
+    assert row.entity_value == row.ioc_value
 
 
 # --- The compromised flag is evidence, never the classification -------------
@@ -180,14 +180,12 @@ def test_the_compromised_flag_is_native_evidence_and_not_the_classification():
     compromised entry and an uncompromised one with the same threat type carry
     the **same** classification and differ in their evidence.
     """
-    claims = snapshot().claims
-    compromised = [c for c in claims if c.native_evidence["is_compromised"]]
+    rows = snapshot().rows
+    compromised = [r for r in rows if r.is_compromised]
     assert compromised, "the fixture no longer carries a compromised entry"
-    for claim in compromised:
-        assert claim.classification == "malicious"
-        assert claim.native_evidence["is_compromised"] is True
     # The flag changes nothing about the classification, which is the point.
-    assert {c.classification for c in claims} == {"malicious"}
+    assert {r.classification for r in rows} == {"malicious"}
+    assert {r.classification for r in compromised} == {"malicious"}
 
 
 # --- Confidence reaches the claim -------------------------------------------
@@ -204,22 +202,22 @@ def test_the_entry_confidence_reaches_the_claim_rather_than_being_flattened():
     """
     document = json.loads(RAW)
     raw_levels = {e["confidence_level"] for v in document.values() for e in v}
-    claim_levels = {c.confidence for c in snapshot().claims}
+    kept = {r.confidence_level for r in snapshot().rows}
     assert len(raw_levels) > 1, "the fixture no longer has spread confidence"
-    for claim in snapshot().claims:
-        assert 0.0 <= claim.confidence <= 1.0
-    assert {round(level * 100) for level in claim_levels} <= raw_levels
+    # The reference table keeps the publisher's unit; the mapping view divides
+    # by 100, and tests/test_mapping.py is where that is checked.
+    assert kept <= raw_levels
+    assert len(kept) > 1
 
 
-def test_confidence_is_confidence_in_the_mapping():
-    """Not P(malicious) — which is why a `no_match` at 1.0 is meaningful.
+def test_the_source_tier_is_a_property_of_the_source_and_not_the_entry():
+    """A tier-B source's low-confidence entry is still tier B.
 
-    `tests/test_evidence.py` holds that case; here it is enough that a tier-B
-    source's high-confidence entry and its low-confidence one are the same tier.
+    The tier is not on the reference row at all — it is the source's, and the
+    mapping view carries it onto every claim from `helena.enrichment.SOURCES`.
     """
-    claims = snapshot().claims
-    assert {c.source_tier for c in claims} == {Tier.B}
-    assert len({c.confidence for c in claims}) > 1
+    assert SOURCES[THREATFOX_SOURCE].tier is Tier.B
+    assert len({r.confidence_level for r in snapshot().rows}) > 1
 
 
 # --- The threat-type mapping ------------------------------------------------
@@ -248,15 +246,11 @@ def test_an_unseen_threat_type_emits_the_parent_and_is_counted():
     document = json.loads(RAW)
     key = next(iter(document))
     document[key][0]["threat_type"] = "brand_new_thing"
-    result = threatfox_claims(
-        json.dumps(document).encode(), tenant=TENANT, sensor=SENSOR
-    )
+    result = threatfox_rows(json.dumps(document).encode())
     assert result.unseen_threat_types == ("brand_new_thing",)
-    unseen_claim = next(
-        c for c in result.claims if not c.native_evidence["threat_type_seen_by_mapping"]
-    )
-    assert unseen_claim.classification == "malicious"
-    assert unseen_claim.native_evidence["threat_type"] == "brand_new_thing"
+    unseen_row = next(r for r in result.rows if not r.threat_type_seen)
+    assert unseen_row.classification == "malicious"
+    assert unseen_row.threat_type == "brand_new_thing"
 
 
 def test_the_threat_type_survives_as_native_evidence():
@@ -267,8 +261,8 @@ def test_the_threat_type_survives_as_native_evidence():
     vocabulary from the same providers" — so ThreatFox's threat type does not
     become a taxonomy child. It is still on the claim, where an agent can read it.
     """
-    for claim in snapshot().claims:
-        assert claim.native_evidence["threat_type"]
+    for row in snapshot().rows:
+        assert row.threat_type
 
 
 def test_every_claim_is_inside_the_declared_subset():
@@ -277,14 +271,14 @@ def test_every_claim_is_inside_the_declared_subset():
     `concept/05` rule 1 requires the declared subset to be tested; this is the
     mapping meeting its own declaration rather than a descriptor checking itself.
     """
-    for claim in snapshot().claims:
-        assert claim.classification in SOURCES[THREATFOX_SOURCE].emits
+    for row in snapshot().rows:
+        assert row.classification in SOURCES[THREATFOX_SOURCE].emits
         check_claim(
-            __import__("helena.enrichment", fromlist=["Claim"]).Claim(
+            Claim(
                 source_id=THREATFOX_SOURCE,
-                entity_type=claim.entity_type,
-                entity_value=claim.entity_value,
-                path=claim.classification,
+                entity_type=row.entity_type,
+                entity_value=row.entity_value,
+                path=row.classification,
             )
         )
 
@@ -298,19 +292,22 @@ def test_an_absent_last_seen_stays_absent():
     assert any(
         not e.get("last_seen_utc") for v in document.values() for e in v
     ), "the fixture no longer carries an entry without last_seen"
-    claims = snapshot().claims
-    assert any(c.last_seen is None for c in claims)
-    for claim in claims:
-        assert claim.first_seen is not None
-        assert claim.first_seen.tzinfo is timezone.utc
+    rows = snapshot().rows
+    assert any(r.last_seen is None for r in rows)
+    for row in rows:
+        assert row.first_seen is not None
+        assert row.first_seen.tzinfo is timezone.utc
 
 
-def test_a_claim_is_dated_by_first_seen_plus_the_snapshot():
-    """`concept/05`: "recency cannot be read from last-seen alone"."""
+def test_a_row_carries_its_snapshot_so_a_claim_can_be_dated():
+    """`concept/05`: "recency cannot be read from last-seen alone".
+
+    First-seen plus the snapshot version is what dates a claim, and both are on
+    the reference row so the mapping view can put both on the claim.
+    """
     result = snapshot()
-    claim = result.claims[0]
-    assert result.snapshot_version in claim.dated_by
-    assert claim.first_seen.isoformat() in claim.dated_by
+    assert all(r.snapshot_version == result.snapshot_version for r in result.rows)
+    assert result.rows[0].first_seen is not None
 
 
 def test_tags_are_split_from_a_delimited_string_and_an_absent_one_is_no_tags():
@@ -342,14 +339,14 @@ def test_file_hashes_are_skipped_and_counted():
     assert hashes, "the fixture no longer carries a file hash"
     result = snapshot()
     assert result.skipped_no_entity == len(hashes)
-    assert not [c for c in result.claims if "hash" in c.entity_type]
+    assert not [r for r in result.rows if "hash" in r.entity_type]
     for ioc_type in {e["ioc_type"] for e in hashes}:
         assert ioc_type not in THREATFOX_ENTITY_TYPES
 
 
 def test_the_counts_reconcile():
     result = snapshot()
-    assert result.entries_read == len(result.claims) + result.skipped_no_entity
+    assert result.entries_read == len(result.rows) + result.skipped_no_entity
     assert result.entries_read == len(parse_threatfox(RAW))
 
 
@@ -404,14 +401,14 @@ def test_a_load_writes_the_claims_and_a_load_row(
         raw=RAW,
     )
     assert load.outcome == LOADED
-    assert load.counts["claims_stored"] == len(snapshot().claims)
+    assert load.counts["claims_stored"] == len(snapshot().rows)
     assert load.counts["entries_read"] == (
         load.counts["claims_stored"] + load.counts["skipped_no_entity"]
     )
 
     stored = migrated_engine.execute(
         f"SELECT count(*), count(DISTINCT snapshot_version) "
-        f"FROM {ENRICHMENT_EVIDENCE_TABLE} WHERE source_id = %s",
+        f"FROM {ENRICHMENT_EVIDENCE_VIEW} WHERE source_id = %s",
         (THREATFOX_SOURCE,),
     ).fetchone()
     assert stored == (load.counts["claims_stored"], 1)
@@ -454,7 +451,7 @@ def test_the_same_bytes_twice_is_one_snapshot(
     assert second.outcome == UNCHANGED
     assert second.snapshot_version == first.snapshot_version
     count = migrated_engine.execute(
-        f"SELECT count(*) FROM {ENRICHMENT_EVIDENCE_TABLE} WHERE source_id = %s",
+        f"SELECT count(*) FROM {ENRICHMENT_EVIDENCE_VIEW} WHERE source_id = %s",
         (THREATFOX_SOURCE,),
     ).fetchone()[0]
     assert count == first.counts["claims_stored"]
@@ -494,7 +491,7 @@ def test_a_failed_fetch_leaves_the_previous_snapshot_and_records_the_failure(
     assert bad.snapshot_version is None
 
     survived = migrated_engine.execute(
-        f"SELECT count(*), max(snapshot_version) FROM {ENRICHMENT_EVIDENCE_TABLE} "
+        f"SELECT count(*), max(snapshot_version) FROM {ENRICHMENT_EVIDENCE_VIEW} "
         f"WHERE source_id = %s",
         (THREATFOX_SOURCE,),
     ).fetchone()
@@ -536,7 +533,7 @@ def test_a_new_snapshot_is_kept_beside_the_old_one(
     held = {
         row[0]
         for row in migrated_engine.execute(
-            f"SELECT DISTINCT snapshot_version FROM {ENRICHMENT_EVIDENCE_TABLE} "
+            f"SELECT DISTINCT snapshot_version FROM {ENRICHMENT_EVIDENCE_VIEW} "
             f"WHERE source_id = %s",
             (THREATFOX_SOURCE,),
         ).fetchall()
@@ -558,12 +555,12 @@ def test_a_stored_claim_is_a_well_formed_evidence_row(
         raw=RAW
     )
     statuses = migrated_engine.execute(
-        f"SELECT DISTINCT status FROM {ENRICHMENT_EVIDENCE_TABLE} WHERE source_id = %s",
+        f"SELECT DISTINCT status FROM {ENRICHMENT_EVIDENCE_VIEW} WHERE source_id = %s",
         (THREATFOX_SOURCE,),
     ).fetchall()
     assert statuses == [(OK,)]
     nulls = migrated_engine.execute(
-        f"SELECT count(*) FROM {ENRICHMENT_EVIDENCE_TABLE} "
+        f"SELECT count(*) FROM {ENRICHMENT_EVIDENCE_VIEW} "
         f"WHERE source_id = %s AND classification IS NULL",
         (THREATFOX_SOURCE,),
     ).fetchone()[0]

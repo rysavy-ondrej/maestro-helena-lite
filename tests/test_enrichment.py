@@ -34,7 +34,7 @@ from helena.enrichment import (
     DEFAULT_RULE,
     DEFAULT_SECTION,
     EMPTY_LIST,
-    ENRICHMENT_EVIDENCE_TABLE,
+    ENRICHMENT_EVIDENCE_VIEW,
     FAILED,
     FETCH_FAILED,
     ICANN_SECTION,
@@ -395,9 +395,13 @@ def test_the_reference_objects_are_what_they_declare(
         PUBLIC_SUFFIX_TABLE: "BASE TABLE",
         PUBLIC_SUFFIX_LOAD_TABLE: "BASE TABLE",
         "helena_reference_public_suffix_load_counts": "VIEW",
-        # The claims themselves (0011). Its shape is asserted in
-        # tests/test_evidence.py, beside the model it has to agree with.
-        ENRICHMENT_EVIDENCE_TABLE: "BASE TABLE",
+        # ThreatFox's snapshot and the two views that map it into the evidence
+        # shape (0014). 0011's evidence TABLE is dropped there: the shape is
+        # derived now, not written. Their columns are asserted in
+        # tests/test_mapping.py, beside the model they have to agree with.
+        "helena_reference_threatfox": "BASE TABLE",
+        "helena_reference_evidence_threatfox": "VIEW",
+        ENRICHMENT_EVIDENCE_VIEW: "VIEW",
         # One snapshot ledger for every feed, and its two views (0013). 0012's
         # per-feed table is dropped there and does not appear.
         FEED_SNAPSHOT_TABLE: "BASE TABLE",
