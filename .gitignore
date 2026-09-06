@@ -34,3 +34,9 @@ data/demo
 # The runner budget cache: transient state, rewritten on every run.
 # Tracking it makes the linear-history gate fire on its own churn.
 prds/.usage-cache.json
+
+# Claude Code's own workspace directory: task worktrees and local session state,
+# ~69 MB of working copies of this repository. Per-machine and transient, and
+# untracked it makes the linear-history gate (prds/CONTEXT.md §4) fire on a
+# tool's scratch space rather than on this project's own unlanded work.
+.claude/
