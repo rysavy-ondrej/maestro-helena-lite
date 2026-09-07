@@ -402,7 +402,7 @@
         "Add a test that a model returning `malicious` or `unknown` produces a schema violation and then a typed failure, never a third label",
         "Add a test that a triage failure does not escalate, since failing closed is safe only because deterministic escalation is independent"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D4 Policy] Composition rule engine — scope before severity",
