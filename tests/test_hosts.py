@@ -310,14 +310,42 @@ def test_the_package_imports_nothing_that_could_reach_an_agent_or_the_store(path
     )
 
 
+def _annotation_nodes(module: ast.Module) -> set[int]:
+    """Every node inside a type annotation, by identity.
+
+    A type annotation **names** the type; it does not produce a value of it.
+    `helena.rendering.v1.render` takes `hosts.HostAttributes` as a parameter and
+    could not usefully say so any other way, and refusing the name there would
+    push the renderer into an unannotated parameter rather than stop it building
+    anything — which is what the test below is actually about.
+
+    An assignment whose *annotation* is the type is still checked on the value
+    side: `x: HostAttributes = HostAttributes(...)` puts the call outside any
+    annotation subtree, so it is still caught.
+    """
+    inside: set[int] = set()
+    for node in ast.walk(module):
+        annotations = []
+        if isinstance(node, ast.arg) and node.annotation is not None:
+            annotations.append(node.annotation)
+        elif isinstance(node, ast.AnnAssign):
+            annotations.append(node.annotation)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            if node.returns is not None:
+                annotations.append(node.returns)
+        for annotation in annotations:
+            inside.update(id(child) for child in ast.walk(annotation))
+    return inside
+
+
 def test_nothing_outside_the_package_mints_a_host_attribute():
     """Route two: the rest of the tree.
 
     `_attributes` is the one function that turns a value into a host attribute
     and it is private, so the package's public surface takes a **path and an
     address** and nothing else. This asserts nobody reached around it: the
-    renderer that arrives next calls `load(...).attributes_for(address)`, which
-    needs neither of these names.
+    renderer calls `load(...).attributes_for(address)` and passes the result on,
+    so the only place it needs the type's name is a parameter annotation.
     """
     minting = {"HostAttributes", "HostAttributeSet", "_attributes", "_unknown_for"}
     offending: list[str] = []
@@ -325,7 +353,10 @@ def test_nothing_outside_the_package_mints_a_host_attribute():
         if path.parent == PACKAGE:
             continue
         module = ast.parse(path.read_text())
+        annotated = _annotation_nodes(module)
         for node in ast.walk(module):
+            if id(node) in annotated:
+                continue
             if isinstance(node, ast.alias) and node.name.split(".")[-1] in minting:
                 offending.append(f"{path.name} imports {node.name}")
             elif isinstance(node, ast.Name) and node.id in minting:
@@ -337,6 +368,32 @@ def test_nothing_outside_the_package_mints_a_host_attribute():
         f"producer is a second source, and the point of the set is that there "
         f"is one."
     )
+
+
+def test_a_call_in_an_annotated_assignment_is_still_caught(tmp_path: Path):
+    """The exemption above is for annotations, and only for annotations.
+
+    Written as a module the same walk reads, so what is exercised is the parse
+    the repository's own files go through rather than a claim about it.
+    """
+    module = ast.parse(
+        "from helena.hosts import HostAttributes\n"
+        "def f(attributes: HostAttributes) -> HostAttributes:\n"
+        "    forged: HostAttributes = HostAttributes(version='v1', values={})\n"
+        "    return forged\n"
+    )
+    annotated = _annotation_nodes(module)
+    found = [
+        node
+        for node in ast.walk(module)
+        if id(node) not in annotated
+        and (
+            (isinstance(node, ast.Name) and node.id == "HostAttributes")
+            or (isinstance(node, ast.alias) and node.name == "HostAttributes")
+        )
+    ]
+    # The import and the call, and neither of the three annotations.
+    assert len(found) == 2
 
 
 def test_the_public_surface_takes_a_path_and_an_address(tmp_path: Path):

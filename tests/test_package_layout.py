@@ -89,7 +89,16 @@ SUPPORT_MODULES = {
 # which set produced it. A `v2` that adds or retires a field must leave `v1`
 # meaning what it meant, so the field set is a frozen module and the loader,
 # the configuration reader and the renderer are the machinery beside it.
-VERSIONED_PACKAGES = {"taxonomy", "contracts", "hosts"}
+#
+# `rendering` is the fourth, and ADR-0008 named it in the same breath as the
+# other two: "prompt and rendering versions follow the same shape: what triage
+# saw is pinned by the recorded version, not reconstructed from current code."
+# An assessment records `rendering_version`, so a `v2` that reorders a line or
+# selects a different TLS parameter must leave `v1` meaning what it meant. It is
+# not in COMPONENT_MODULES because `concept/03-architecture.md` puts rendering
+# inside Orchestration -- "renders agent input" -- and the thing that has to stay
+# frozen is the projection, not the code that calls it.
+VERSIONED_PACKAGES = {"taxonomy", "contracts", "hosts", "rendering"}
 
 # What a file inside a versioned package may be called. Anything else -- a
 # helper, a shared base, a `common.py` -- is the thing that would let a later

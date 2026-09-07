@@ -218,8 +218,10 @@ WHERE window_end > now() - INTERVAL '24 hours';
 --           place.
 -- Reads:    helena_signal_host_context_retained
 -- Read by:  helena.context.ContextStore.freeze, which copies a row of it into
---           helena_frozen_context, and tests/test_context.py. The enriched-context
---           view (D3) is the next reader.
+--           helena_frozen_context, src/helena/rendering/__init__.py, which reads
+--           the context's version and its bidirectional counters for the triage
+--           rendering and refuses to render a context this view no longer shows,
+--           and tests/test_context.py.
 CREATE VIEW helena_signal_host_context_live AS
 SELECT c.context_id,
        encode(

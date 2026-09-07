@@ -1038,6 +1038,11 @@ def test_every_signal_object_declares_what_it_is(migrated_engine: psycopg.Connec
         # may not read the flatten layer. Plain, because one view joins it and
         # nothing else does.
         "helena_signal_context_entity_ports": "VIEW",
+            # sql/migrations/0016: the TLS parameters a host negotiated, for
+            # part four of the triage rendering. Here for the same reason as
+            # the ports view -- the rendering may not reach into the flatten
+            # layer -- and plain because nothing joins it.
+            "helena_signal_context_tls": "VIEW",
         # The registrable-domain derivation of
         # sql/migrations/0008_public_suffix_list.sql. The two candidate views
         # are intermediates — nothing reads a single candidate — and the

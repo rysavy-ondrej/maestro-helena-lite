@@ -42,6 +42,7 @@ src/helena/          one package, one module per architecture component
   contracts/           the agent request/result pair, one frozen module per version
   taxonomy/            the two classification vocabularies, one frozen module per version
   hosts/               triage's closed host attribute set, one frozen module per version
+  rendering/           the five-part triage projection, one frozen module per version
   tools.py             approved providers as cache-first tools
   orchestration.py     deterministic routing, budgets, persistence, replay
   sink.py              egress of every assessed context to the output topic
@@ -217,6 +218,14 @@ version imports and therefore a way to edit `v1` through a side door.
 terms: `contracts.version("v1")` returns the `AgentRequest`, `AgentResult` and
 `AgentFailure` classes a stored assessment recording `schema_version = "v1"` is
 replayed against. See [The agent contract](#the-agent-contract) below.
+[`helena.hosts`](src/helena/hosts/__init__.py) is the third — the closed host
+attribute set triage's part one is built from, read from `config/hosts.toml` and
+from nothing else — and [`helena.rendering`](src/helena/rendering/__init__.py) is
+the fourth: `rendering.version("v1").render(projection, attributes)` builds the
+five-part projection an agent is given, and an assessment records which version
+built it. `docs/decisions/0018-the-triage-rendering.md` has the five parts, the
+line grammar, the TLS parameter subset and what the rendering deliberately does
+not carry.
 
 **Every source declares what it may say.** [`helena.enrichment`](src/helena/enrichment.py)
 holds the registry: a source's **tier** (A–D, describing the *source* and never

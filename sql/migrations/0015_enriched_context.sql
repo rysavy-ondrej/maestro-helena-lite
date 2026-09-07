@@ -155,7 +155,10 @@ FROM helena_reference_feed_snapshot;
 --           enriched-context view joins it and nothing else does, so there is no
 --           state worth materializing.
 -- Reads:    helena_flatten_flows, helena_signal_host_context
--- Read by:  helena_analytical_enriched_context below and tests/test_enriched.py.
+-- Read by:  helena_analytical_enriched_context below,
+--           src/helena/rendering/__init__.py (the addresses of the triage
+--           rendering, with the ports the host reached on each) and
+--           tests/test_enriched.py.
 --
 -- Destinations only. A port on the source side is the host's own ephemeral port
 -- and says nothing about what it reached, and `concept/02` keys a host by its
@@ -197,8 +200,15 @@ GROUP BY c.context_id, c.tenant, c.sensor, c.host, f.dst_address, f.dst_port;
 --           helena_reference_evidence, helena_reference_feed_snapshot,
 --           helena_reference_feed_snapshot_validity,
 --           helena_reference_feed_attempt_validity
--- Read by:  tests/test_enriched.py. The triage rendering (D4) is the reader this
---           exists for; nothing renders a context yet.
+-- Read by:  src/helena/rendering/__init__.py -- the triage rendering, which is
+--           the reader this view was built for -- tests/test_enriched.py and
+--           tests/test_acceptance_enrichment.py.
+--
+-- **What the rendering does NOT take from here is the entity list.** The source
+-- list below is the snapshot ledger, so before any feed has ever loaded this
+-- view yields no rows at all, and a rendering built on it would show a host that
+-- contacted nothing. `helena_signal_context_entities` is where the entities are;
+-- this is where what is *known* about them is.
 --
 -- **This view carries no verdict and computes no severity.** It is the evidence a
 -- verdict would be reasoned from, and `concept/02`'s composition rule -- "an

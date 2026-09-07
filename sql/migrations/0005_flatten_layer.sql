@@ -94,9 +94,11 @@
 --           layer aggregates it into a host context.
 -- Reads:    helena_normalized_events
 -- Read by:  helena_signal_host_context, helena_signal_context_entity_ports
---           (sql/migrations/0015) (the windowed aggregation) and
---           helena_signal_entity_observations (entity extraction), both in the
---           signal layer, and tests/test_context.py.
+--           (sql/migrations/0015) (the windowed aggregation),
+--           helena_signal_entity_observations (entity extraction) and
+--           helena_signal_context_tls (sql/migrations/0016, which places a
+--           handshake in a window by the flow it belongs to), all in the signal
+--           layer, and tests/test_context.py.
 --
 -- The counters stay in the two directions the input supplies.
 -- `concept/07-principles.md` keeps connection statistics bidirectional because
@@ -243,7 +245,9 @@ FROM helena_normalized_events e,
 -- Object:   VIEW (plain). Domain entities (from the SNI) and fingerprint
 --           entities (from the client JA3/JA4) are extracted from it.
 -- Reads:    helena_normalized_events
--- Read by:  helena_signal_entity_observations, and tests/test_context.py.
+-- Read by:  helena_signal_entity_observations, helena_signal_context_tls
+--           (sql/migrations/0016 -- the selected TLS parameters of the triage
+--           rendering), and tests/test_context.py.
 --
 -- `client_ja3`/`client_ja4` fingerprint the client and `server_ja3`/`server_ja4`
 -- the server -- the input's `ja3`/`ja4` and `ja3s`/`ja4s`. The prefix is here

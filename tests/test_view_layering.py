@@ -522,7 +522,7 @@ def test_a_superseded_by_that_is_not_a_migration_name_is_refused(tmp_path: Path)
 
 
 def test_the_repository_records_every_definition_the_engine_does_not_hold():
-    """Seven, all of them 0010's, and each one says so where it was written.
+    """Ten, seven of them 0010's, and each one says so where it was written.
 
     This is the assertion that keeps `Superseded by:` honest over the real tree
     rather than a synthetic one: `superseded()` is derived from the walk and the

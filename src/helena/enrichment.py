@@ -108,6 +108,7 @@ __all__ = [
     "EMPTY_EXPORT",
     "ENRICHMENT_EVIDENCE_VIEW",
     "ENRICHMENT_STATUSES",
+    "ENRICHMENT_TIER",
     "ENTITY_TYPES",
     "EnrichmentEvidence",
     "FAILURE_REASONS",
@@ -987,6 +988,21 @@ QUERY_FAILURE_REASONS = (
     TRANSPORT_ERROR,
     MALFORMED_RESPONSE,
 )
+
+#: How a claim got here, which is **not** how strong it is -- that is the A-D
+#: `Tier` above. `concept/05` splits the system's evidence in two: the enrichment
+#: tier is static feeds joined in SQL, and the analyst tier is live providers
+#: queried through tools.
+#:
+#: Only the enrichment tier has a name here because only the enrichment tier
+#: exists: no tool has been built, so nothing writes an `analyst` row and a
+#: constant for it would be a value with no producer. What this one is *for* is
+#: the filter on the other side -- `concept/04` gives triage `enrichment` only,
+#: and `helena.rendering` selects on this value as an allow-list. It is the
+#: Python copy of the literal in `sql/migrations/0014_feed_mapping_views.sql`,
+#: and `tests/test_rendering.py` asserts the two equal by asking the engine what
+#: the evidence view actually produces.
+ENRICHMENT_TIER = "enrichment"
 
 # The evidence shape is a VIEW over each feed's reference table, not a table a
 # loader writes -- `sql/migrations/0014_feed_mapping_views.sql` and
