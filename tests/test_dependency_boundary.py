@@ -34,8 +34,16 @@ APPROVED_RUNTIME_DISTRIBUTIONS = {
 
 APPROVED_DEV_DISTRIBUTIONS = {"pytest": "pytest"}
 
-# Absent by decision, not by accident. The model client enters in the increment
-# that first *calls* a model, not the one that first mentions one.
+# Absent by decision, not by accident.
+#
+# The rule used to be "the model client enters in the increment that first
+# *calls* a model, not the one that first mentions one". **That increment has
+# happened** — task 30 built `helena.agents` — and it did not adopt LangChain,
+# because `langchain-openai` resolves to 37 distributions including `langsmith`,
+# a hard dependency of `langchain-core`, and the hosted-tracing rule below is
+# "not at all" rather than "not yet". So this list is no longer a schedule: it is
+# an open escalation for the operator, and `docs/decisions/0020-the-model-client.md`
+# §1 is where it is recorded. The question returns with the analyst's tool loop.
 DELIBERATELY_ABSENT = (
     "langchain",
     "langchain_core",
@@ -144,7 +152,13 @@ def test_package_imports_nothing_unapproved():
 
 
 def test_the_model_client_is_still_absent():
-    """The absence is enforced, so that it stays a decision and not an oversight."""
+    """The absence is enforced, so that it stays a decision and not an oversight.
+
+    Still passing **after** the increment that first called a model, which is the
+    point: `helena.agents` reaches the OpenAI-compatible endpoint with `urllib`,
+    and the framework question is an open escalation rather than a deadline that
+    has quietly passed. See the comment on `DELIBERATELY_ABSENT`.
+    """
     declared = _declared("dependencies", _pyproject()["project"]) | _declared(
         "dev", _pyproject()["dependency-groups"]
     )

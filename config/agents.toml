@@ -1,0 +1,53 @@
+# The bound on schema retries — policy, not a constant in a branch.
+#
+# `concept/07-principles.md`: "schema-invalid model output is retried with the
+# validation error fed back, a **small bounded** number of times, and then
+# becomes a typed failure. Retries count against the budget, and the retry count
+# per model is itself a quality metric." And: "budget values are **policy**, not
+# constants in a branch". So the number lives here and `helena.agents.retry_policy()`
+# reads it; there is no default in the code and no fallback if this file is
+# missing.
+#
+# ## What the number bounds
+#
+# `attempts` counts **calls to the model for one assessment**, not retries: 1 is
+# a run with no retry at all, and `helena.contracts.v1.Cost.retries` records
+# `attempts spent - 1`. Every attempt's tokens are spent against
+# `AgentRequest.budgets.tokens`, so a run can end on the token budget before it
+# ends on this count — that outcome is a typed failure carrying a
+# `budget_exhausted` gap, and the two are distinguishable afterwards.
+#
+# It does not bound a tool loop. That is `Budgets.steps`, it is zero for triage,
+# and no tool loop exists yet.
+#
+# ## Where 3 came from, and what would change it
+#
+# Not measured — stated as a candidate, the way `config/rendering.toml`'s 25000
+# was until a real capture was rendered. No evaluation corpus exists, so no
+# model's schema-violation rate has been measured, and the rate is the only thing
+# that can settle this number.
+#
+# The reasoning behind 3 is a shape rather than a measurement:
+#
+#   1  no retry at all, which makes a single malformed answer a typed failure and
+#      throws away the case `concept/07` says is worth retrying;
+#   2  one retry — the model gets to see the validation error exactly once;
+#   3  two retries, which is what "the second attempt fed back a *different*
+#      error" needs in order to be observable at all;
+#   4+ a model that has failed three times on the same schema is a model that
+#      cannot emit it, and the fourth call spends triage's token budget on the
+#      high-volume path to learn nothing new.
+#
+# What would change it: a measured schema-violation rate per model. If the second
+# attempt almost always succeeds, 2 is cheaper on the path where latency
+# dominates; if the third attempt still recovers a measurable fraction of
+# contexts, 4 is worth what it costs. Both are questions for the evaluation
+# corpus, and until then this is a candidate and not a decision.
+#
+# Raising it is also not free in a direction that is easy to see: the retries of
+# one assessment are spent against that assessment's token budget, so a larger
+# bound makes a *failing* run more expensive without making a succeeding one any
+# better.
+
+[retry]
+attempts = 3

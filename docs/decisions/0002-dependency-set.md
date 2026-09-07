@@ -53,8 +53,8 @@ VIEW`, select from the view, drop. It reported
 
 | Absent | Until |
 | --- | --- |
-| **The model client library** (LangChain and anything like it) | **The increment that first *calls* a model** — not the one that first mentions one. `concept/06-technology.md` places LangChain in the technology table and states the absence rule in the same paragraph; `tests/test_dependency_boundary.py::test_the_model_client_is_still_absent` enforces it |
-| An HTTP client (`requests`, `httpx`) | The increment that first fetches a feed or calls a provider. Feed loaders will need one; nothing does yet |
+| **The model client library** (LangChain and anything like it) | **An open escalation, since task 30.** The rule was "until the increment that first *calls* a model"; that increment has now happened and did **not** adopt it, because `langchain-openai` resolves to 37 distributions including `langsmith` — a hard dependency of `langchain-core` — and hosted tracing is rejected rather than deferred. `helena.agents` calls the endpoint with `urllib`. The question returns with the analyst's tool loop, which is the half of LangChain's justification nothing has needed yet. See `docs/decisions/0020-the-model-client.md` §1 |
+| An HTTP client (`requests`, `httpx`) | The increment that first fetches a feed or calls a provider. Two now do — `helena.enrichment.fetch_public_suffix_list` and `helena.agents.ModelClient` — and both use `urllib`, because one GET and one POST do not earn a dependency |
 | A SQL toolkit or transformation framework | Not planned. Migrations are numbered `.sql` files applied in order, and a framework in the data path is machinery ahead of a measured need |
 | A graph or agent framework | Rejected, not deferred: two agents with deterministic routing is an `if`, and the checkpoint store such a framework brings is a second store |
 

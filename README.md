@@ -38,7 +38,7 @@ src/helena/          one package, one module per architecture component
   normalizer.py        per-format adapters, flow records -> validated events
   context.py           windowed host context, entity extraction, enriched view
   enrichment.py        feed loaders and snapshot-versioned reference tables
-  agents.py            the Triage and Analyst runners over one contract
+  agents.py            the model client, structured output, and the bounded retry
   contracts/           the agent request/result pair, one frozen module per version
   taxonomy/            the two classification vocabularies, one frozen module per version
   hosts/               triage's closed host attribute set, one frozen module per version
@@ -54,6 +54,7 @@ src/helena/          one package, one module per architecture component
 sql/migrations/      the engine's schema: NNNN_name.sql, applied in order
 config/hosts.toml    the fixed host attributes, and triage's only source of them
 config/rendering.toml the size budget the triage rendering is bounded by
+config/agents.toml   how many times one assessment may ask the model
 tests/               the one pytest suite, mirroring the package
 scripts/             dev-up / dev-down, the pin-and-endpoint check, migrate, replay,
                      and measure_rendering (what a real capture renders to)
@@ -790,7 +791,56 @@ failure therefore records no model version at all, because nothing answered, and
 recording the configured name there would be exactly the substitution the version
 registry exists to prevent.
 
-Nothing has been carried by any of it yet: no model has been called, no
-assessment has been stored or emitted, and no result has been replayed against a
-recorded `schema_version`. What is demonstrated is that the shapes refuse what the
-concept notes say they must refuse.
+What is demonstrated by the contract alone is that the shapes refuse what the
+concept notes say they must refuse. A model has now been called through them —
+see below — but no assessment has been stored or emitted, and no result has been
+replayed against a recorded `schema_version`.
+
+## Calling a model
+
+[`helena.agents`](src/helena/agents.py) is the model client:
+`ModelClient.for_agent(settings, agent)` resolves one agent's endpoint, token and
+model **purely from configuration**, and `assess(request, client=…, messages=…,
+policy=…)` returns a validated `AgentResult` or a typed `AgentFailure` and never
+raises for anything the model or the endpoint did.
+[`docs/decisions/0020-the-model-client.md`](docs/decisions/0020-the-model-client.md)
+carries the argument for every choice below.
+
+**There is no framework, and that is an open escalation rather than a
+preference.** `concept/06-technology.md` names LangChain for this increment and
+also settles hosted tracing as rejected; `langchain-openai` resolves to 37
+distributions including `langsmith`, a hard dependency of `langchain-core`, which
+the dependency boundary test asserts is not even importable. So the endpoint is
+reached with `urllib`, the way the feed loaders reach theirs, and the question
+returns with the analyst's tool loop — the half of LangChain's justification that
+nothing has needed yet.
+
+**The schema the model is given is derived from the contract, never written
+twice.** `AgentResult`'s three code-owned fields — `emitter`, `cost` and
+`versions`, which are what the run *spent* and what *produced* it — are removed,
+and the rest becomes the endpoint's `response_format` schema. What comes back is
+validated by constructing that same frozen class. Two things this had to learn by
+running rather than by reading: the closed vocabularies the contract enforces in
+`model_post_init` are **invisible** to `model_json_schema`, and a live model
+filled `stance` with a line of the rendering three attempts running until the
+enums were injected from the contract's own constants; and validating in
+Pydantic's *JSON* mode is what stops `strict=True` refusing every JSON array
+where the contract declares a tuple.
+
+**Schema-invalid output is retried, bounded, with the validation error fed back —
+and a repair call is refused by construction.** Each attempt is the *original*
+question plus one message saying what was wrong, so the invalid answer is
+discarded and never sent anywhere; `test_no_repair_call_path_exists` asserts that
+over the bytes the endpoint received, which a repair path could not pass. The
+bound is `config/agents.toml`, the retries are spent against the request's token
+budget, and `Cost.retries` records what they cost. Exhaustion is an
+`AgentFailure`, never a verdict.
+
+**What produced a result is recorded**: the model identity the *response*
+reported (never the configured name), and the endpoint host — host and port, with
+userinfo, path and query dropped rather than masked, so cross-wiring between two
+agents' endpoints is detectable. `helena.agents` never names an agent: a test
+parses the module and fails if `"triage"` or `"analyst"` appears as a string
+constant, because model choice is a configuration value and never a code path.
+The assessment row that should carry the endpoint host does not exist yet, and
+until it does the structured log is the only record of it.
