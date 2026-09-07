@@ -362,7 +362,7 @@
         "Filter to evidence tier `enrichment` only, so analyst-fetched data can never enter a triage rendering",
         "Version the rendering and record its version on every request"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D4 Rendering] Bounded rendering with visible truncation",
