@@ -348,7 +348,7 @@
         "Add a test that no code path can populate a host attribute from an assessment, a proposal or an enrichment row",
         "Version the attribute set and record its version on the rendering"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D4 Rendering] Triage rendering builder — the five-part bounded projection",
