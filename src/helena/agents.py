@@ -115,7 +115,7 @@ import time
 import tomllib
 import urllib.error
 import urllib.request
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -355,7 +355,10 @@ def proposable_fields(result_type: type[BaseModel]) -> tuple[str, ...]:
 
 
 def proposal_schema(
-    result_type: type[BaseModel], fields: Sequence[str] | None = None
+    result_type: type[BaseModel],
+    fields: Sequence[str] | None = None,
+    *,
+    vocabularies: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """The JSON schema for what the model may propose, derived from the contract.
 
@@ -363,6 +366,15 @@ def proposal_schema(
     triage result carrying an evidence package, a retrieval trace or a proposed
     claim, so offering a triage model those fields would be offering it a way to
     fail validation and nothing else. `None` means every proposable field.
+
+    `vocabularies` closes a **top-level** property the same way
+    `CLOSED_VOCABULARIES` closes a nested one, and it is a parameter rather than
+    another entry in that map because the one field that needs it —
+    `classification` — has a different closed set per emitter and per taxonomy
+    version. A constant here would be a second copy of `helena.taxonomy`'s
+    `emitter_roots`, and this module may not name an agent to choose between
+    them. The caller passes the set it looked up; `tests/test_triage.py` is what
+    asserts the looked-up set is the taxonomy's.
 
     `$defs` are pruned to what the kept properties actually reference, because the
     schema is sent on **every** call on the high-volume path: measured against the
@@ -385,6 +397,19 @@ def proposal_schema(
 
     full = result_type.model_json_schema()
     properties = {name: full["properties"][name] for name in selected}
+    for name, vocabulary in (vocabularies or {}).items():
+        if name not in properties:
+            raise AgentError(
+                f"a vocabulary was given for {name!r}, which this schema does not "
+                f"offer; the properties are {list(properties)}. A closed set on a "
+                f"field the model is never asked for is a constraint nothing applies."
+            )
+        if not vocabulary:
+            raise AgentError(
+                f"the vocabulary for {name!r} is empty, which would ask the model "
+                f"for a value and permit none"
+            )
+        properties[name] = {**properties[name], "enum": list(vocabulary)}
     definitions = _with_vocabularies(full.get("$defs", {}))
     return {
         "type": "object",
@@ -723,6 +748,7 @@ def assess(
     messages: Sequence[Message],
     policy: RetryPolicy,
     propose: Sequence[str] | None = None,
+    vocabularies: Mapping[str, Sequence[str]] | None = None,
 ) -> contract.AgentResult | contract.AgentFailure:
     """One assessment: call, validate, retry bounded, or a typed failure.
 
@@ -742,10 +768,13 @@ def assess(
       then checks the exchange. Doing it here would mean this module writing a
       gap into a verdict it did not produce.
     - It does not choose the prompt, the model or the field set. Those are the
-      caller's, from configuration and from a versioned prompt file.
+      caller's, from configuration and from a versioned prompt file. `propose`
+      and `vocabularies` are what the caller narrows the schema with; this
+      module cannot look either up, because looking them up means knowing which
+      agent is running.
     """
     result_type = contract.AgentResult
-    schema = proposal_schema(result_type, propose)
+    schema = proposal_schema(result_type, propose, vocabularies=vocabularies)
     started = time.monotonic()
     deadline = started + request.budgets.wall_clock_seconds
 

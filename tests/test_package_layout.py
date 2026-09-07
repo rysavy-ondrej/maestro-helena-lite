@@ -98,7 +98,17 @@ SUPPORT_MODULES = {
 # not in COMPONENT_MODULES because `concept/03-architecture.md` puts rendering
 # inside Orchestration -- "renders agent input" -- and the thing that has to stay
 # frozen is the projection, not the code that calls it.
-VERSIONED_PACKAGES = {"taxonomy", "contracts", "hosts", "rendering"}
+#
+# `triage` is the fifth, and it is the other half of the sentence ADR-0008 uses
+# of the rendering: "**prompt** and rendering versions follow the same shape".
+# An assessment records `prompt_version`, so the words the model was shown and
+# the result fields it was offered are frozen the moment a row records one, and a
+# reworded instruction is a `v2` rather than an edit to what every historical row
+# claims to have been asked. It is not in COMPONENT_MODULES for the reason
+# `rendering` is not: `concept/03-architecture.md` puts routing on the triage
+# result inside Orchestration, and what has to stay frozen is the prompt, not the
+# code that sends it.
+VERSIONED_PACKAGES = {"taxonomy", "contracts", "hosts", "rendering", "triage"}
 
 # What a file inside a versioned package may be called. Anything else -- a
 # helper, a shared base, a `common.py` -- is the thing that would let a later

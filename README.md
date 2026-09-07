@@ -43,6 +43,7 @@ src/helena/          one package, one module per architecture component
   taxonomy/            the two classification vocabularies, one frozen module per version
   hosts/               triage's closed host attribute set, one frozen module per version
   rendering/           the five-part triage projection, one frozen module per version
+  triage/              the triage runner, and its prompt, one frozen module per version
   tools.py             approved providers as cache-first tools
   orchestration.py     deterministic routing, budgets, persistence, replay
   sink.py              egress of every assessed context to the output topic
@@ -844,3 +845,56 @@ parses the module and fails if `"triage"` or `"analyst"` appears as a string
 constant, because model choice is a configuration value and never a code path.
 The assessment row that should carry the endpoint host does not exist yet, and
 until it does the structured log is the only record of it.
+
+## Triage: one rendering in, two labels out
+
+[`helena.triage`](src/helena/triage/__init__.py) is the runner and
+`helena.triage.v1` is the prompt, frozen the moment a row records
+`prompt_version = "v1"` — the shape
+[`docs/decisions/0008-version-registry.md`](docs/decisions/0008-version-registry.md)
+promised prompts in the same sentence as renderings. The call is
+`triage.run(request, client=…, policy=…, prompt=triage.version("v1"))`, and it
+returns a validated `AgentResult` or a typed `AgentFailure`, the same two
+terminal outcomes `assess` has.
+[`docs/decisions/0021-the-triage-runner.md`](docs/decisions/0021-the-triage-runner.md)
+carries the argument for each choice below.
+
+**Two labels, looked up rather than written down.** `concept/02`: *triage emits
+`normal` or `suspicious` and nothing else, and a context triage could not assess
+is a typed failure, not a third label.* The set comes from
+`helena.taxonomy.version(v).emitter_roots["triage"]` — resolved against the
+version the request records — and it is injected into the endpoint's schema as an
+enum, because a closed vocabulary the contract checks in `model_post_init` is
+invisible to `model_json_schema` and a model shown a bare string invents a value
+for it. A model that answers `malicious` or `unknown` anyway fails the contract,
+is retried with the error fed back, and becomes a typed failure with nowhere on
+it to put a verdict.
+
+**The rendering is data, and the frame is structural rather than persuasive.**
+Two turns: the frozen instructions, then the rendering alone between two marker
+lines. The markers are whole lines because `helena.rendering.v1.token`
+percent-encodes the newline, so no value a host chose can start a line of its own
+— saying "this is data" in the prompt is necessary and is not what makes it hold.
+`messages` refuses a rendering carrying a marker line anyway rather than trusting
+the property it depends on.
+
+**Binding no tools is asserted at the call site.** The contract already refuses a
+triage request that budgets a step or a live query and a triage result that
+reports having spent one; the runner checks the budgets it was handed and the
+field set it is about to offer, and a test asserts over the bytes the endpoint
+receives that no tool definition is sent.
+
+**Truncation stays visible on the outcome**, and the gap is written by code: what
+was dropped is a fact the rendering measured and the model cannot see records
+that are not there. The outcome is rebuilt through `model_validate`, not
+`model_copy`, so the contract's own rules run again. Then `check_exchange` is
+called — and a citation that resolves to nothing the run was given becomes a
+typed failure rather than a verdict with an unresolvable citation.
+
+**A triage failure escalates nothing.** `escalates` is the triage half of what
+reaches the analyst and returns `False` for every typed failure, by type rather
+than by reading a field. `concept/04` says failing closed is safe *because*
+deterministic escalation is independent of whether triage ran at all — and that
+evaluator does not exist yet, so until it does a context whose model call failed
+is dropped and nothing else looks at it. That is the one thing this stage leaves
+genuinely unsafe, and it is written down rather than left to a green suite.
