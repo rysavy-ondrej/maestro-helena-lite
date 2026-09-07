@@ -93,6 +93,28 @@ another Python minor under that name fails with no symptom at all** — it start
 serves SQL and reports the right version. [`docs/runbook.md`](docs/runbook.md)
 §1 has the measurements and the check that catches it.
 
+### Long runs over SSH
+
+`./implement.sh` runs PRD tasks through fresh Claude Code sessions, one per
+task, and a run of several tasks outlives a remote login. Start it detached and
+closing the SSH session no longer takes the run with it:
+
+```bash
+tmux new -d -s runner './implement.sh -n 5'   # start it detached
+tmux attach -t runner                         # watch it; Ctrl-b d leaves again
+```
+
+Without tmux, `setsid nohup ./implement.sh -n 5 > ~/runner.log 2>&1 < /dev/null &`
+detaches the same way without the live view. The runner drops terminal styling
+when stdout is not a terminal, so a redirected log stays readable, and it never
+reads stdin.
+
+**Keep that wrapper log outside the tree.** The linear-history gate runs `git
+status --porcelain`, which counts untracked files, so a stray log inside the
+repository makes the *next* invocation refuse to start (exit 5) before it has
+run anything. The runner's own per-session logs under `prds/logs/` are
+different: the session that writes one commits it.
+
 ## The engine schema
 
 The engine's view and model definitions are project source. They live in
