@@ -53,8 +53,10 @@ src/helena/          one package, one module per architecture component
   versions.py          the nine recorded version dimensions, and stamping
 sql/migrations/      the engine's schema: NNNN_name.sql, applied in order
 config/hosts.toml    the fixed host attributes, and triage's only source of them
+config/rendering.toml the size budget the triage rendering is bounded by
 tests/               the one pytest suite, mirroring the package
-scripts/             dev-up / dev-down, the pin-and-endpoint check, migrate, replay
+scripts/             dev-up / dev-down, the pin-and-endpoint check, migrate, replay,
+                     and measure_rendering (what a real capture renders to)
 demo/                one script that runs ingest and context and prints the result
 docs/decisions/      why each dependency and each layout choice is here
 docs/versions.md     the pinned binaries and their checksums
@@ -221,11 +223,25 @@ replayed against. See [The agent contract](#the-agent-contract) below.
 [`helena.hosts`](src/helena/hosts/__init__.py) is the third — the closed host
 attribute set triage's part one is built from, read from `config/hosts.toml` and
 from nothing else — and [`helena.rendering`](src/helena/rendering/__init__.py) is
-the fourth: `rendering.version("v1").render(projection, attributes)` builds the
-five-part projection an agent is given, and an assessment records which version
-built it. `docs/decisions/0018-the-triage-rendering.md` has the five parts, the
-line grammar, the TLS parameter subset and what the rendering deliberately does
-not carry.
+the fourth: `rendering.version("v1").render(projection, attributes, budget)`
+builds the five-part projection an agent is given, and an assessment records
+which version built it. `docs/decisions/0018-the-triage-rendering.md` has the
+five parts, the line grammar, the TLS parameter subset and what the rendering
+deliberately does not carry.
+
+**The rendering is bounded, and what it dropped is visible twice.** The budget is
+a number of characters in `config/rendering.toml` — policy in a file, because
+`concept/07` makes budget values policy and not constants in a branch, and
+`render` has no default to fall back on. A section that had to drop records opens
+with a `truncated kept=N total=N dropped=N` line *and* carries a
+`helena.contracts.v1.Truncation`, so the model and the code both see it; the host
+section, the connection statistics and every source header line are never
+dropped, because they are what says which lookups happened and what became of
+them. What is kept is a prefix of the section's neutral order and never the hits
+first — a dropped claim is not a lost alert, because deterministic escalation
+reads the store rather than the rendering.
+`docs/decisions/0019-the-rendering-size-budget.md` has the four rules and the
+measurement the number came from; `make rendering-size` re-measures it.
 
 **Every source declares what it may say.** [`helena.enrichment`](src/helena/enrichment.py)
 holds the registry: a source's **tier** (A–D, describing the *source* and never

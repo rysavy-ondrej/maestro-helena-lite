@@ -95,26 +95,54 @@ entity types cover an entity gets a record, and one with no row gets `missing` �
 which is what `helena.enrichment.feed_status` reports for the same source, for
 the same reason.
 
-Reads: the five relations above. Writes: nothing.
+Reads: the five relations above, and `config/rendering.toml` for the budget.
+Writes: nothing.
+
+## The size budget
+
+`concept/04` requires the rendering to be **bounded**, and *"truncation that is
+invisible is a correctness bug, not a formatting choice"*. The budget is
+`RenderingBudget` and it is a required argument to a version's `render`: there is
+no default anywhere in this package, because `concept/07` makes budget values
+**policy, not constants in a branch**, and a module-level number that a caller
+may leave alone is exactly such a constant. `config/rendering.toml` is where the
+value this deployment uses lives, and `budget()` is what reads it — the same
+shape `helena.hosts` uses for the host attribute file, and for the same reason:
+a location rather than a value in the environment.
+
+**Which section drops what is the version's decision, not this file's.** A budget
+is a number of characters; turning it into a set of kept records means knowing
+what a record is, and that is the line grammar, which is frozen per version.
+`v1.py` holds the selection, `docs/decisions/0019-the-rendering-size-budget.md`
+holds the argument for it, and `helena.contracts.v1.Truncation` is what says a
+section dropped something.
 
 Maturity: experimental — exercised by `tests/test_rendering.py` against a
 migrated engine holding a real capture and a real ThreatFox extract. **No agent
 has been given one of these renderings**, no model has read one, and nothing is
-stored: what is demonstrated is that the five parts are built from the store and
-keep the statuses apart, not that a model reasons better or worse from them. The
-rendering is **not yet bounded** — the size budget and the truncation record are
-the next increment's, and `helena.contracts.v1.Truncation` is the shape they
-land in.
+stored: what is demonstrated is that the five parts are built from the store,
+keep the statuses apart, and never drop a record without recording it — not that
+a model reasons better or worse from them, and not that the configured budget is
+the right number. `scripts/measure_rendering.py` is what measures the size a real
+capture produces, so the number is observed rather than assumed.
 """
 
 from __future__ import annotations
 
+import tomllib
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import psycopg
-from pydantic import BaseModel, ConfigDict, NonNegativeInt
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    NonNegativeInt,
+    PositiveInt,
+    ValidationError,
+)
 
 from helena.config import IngestionIdentity
 from helena.context import LIVE_HOST_CONTEXT_VIEW, Completeness, ContextOutsideRetention
@@ -127,6 +155,7 @@ from helena.enrichment import (
 )
 
 __all__ = [
+    "BUDGET_FILE",
     "CONTEXT_ENTITIES_VIEW",
     "CONTEXT_TLS_VIEW",
     "ENRICHED_CONTEXT_VIEW",
@@ -136,13 +165,23 @@ __all__ = [
     "ContextEntity",
     "ContextProjection",
     "EntityEnrichment",
+    "RenderingBudget",
     "RenderingError",
     "RenderingStore",
     "RenderingVersion",
     "TlsParameters",
     "UnknownVersion",
+    "budget",
     "version",
 ]
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+#: The fixed configuration the size budget is read from. A path and not an
+#: environment variable, for the reason `helena.hosts.ATTRIBUTES_FILE` gives: it
+#: is a location, and a deployment that keeps its policy elsewhere passes the
+#: path to `budget`. A missing file is a loud failure naming it, never a default.
+BUDGET_FILE = PROJECT_ROOT / "config" / "rendering.toml"
 
 #: The four relations this package selects from beside the live host context.
 #: Named once here so a test can ask the engine what it holds rather than read a
@@ -482,17 +521,97 @@ class ContextProjection(BaseModel):
         )
 
 
+class RenderingBudget(BaseModel):
+    """How large a rendering may be. Policy, supplied per render, never defaulted.
+
+    `concept/04`: the rendering "is bounded, and truncation that is invisible is a
+    correctness bug, not a formatting choice". `concept/07`: "budget values are
+    **policy**, not constants in a branch". Both are why this is a required
+    argument rather than a number a version module could carry — a default here
+    would be the constant in the branch, one call away from being nobody's
+    decision.
+
+    **Characters, not tokens.** A token count is what a model service charges
+    for, and counting tokens means a tokenizer: a dependency, per model, whose
+    vocabulary the OpenAI-compatible endpoint does not publish. Characters need
+    nothing, are deterministic, are the same number on every machine, and bound
+    the token count from above for every tokenizer that exists. What they are not
+    is *proportional* to it — this rendering is unusually token-hostile text
+    (hex digests, domain labels, `key=value` runs), so a character budget
+    converted to tokens by a ratio would be a guess.
+    `docs/decisions/0019-the-rendering-size-budget.md` records this and keeps the
+    conversion out of the code.
+
+    The budget covers the **five section bodies**, which is what a version
+    module produces. It does not cover the prompt around them: the prompt is a
+    later increment's, it is not attacker-influenced, and a budget that mixed the
+    two would make a rendering shrink because a prompt was reworded.
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    #: The largest total size, in characters, of the five section bodies.
+    characters: PositiveInt
+
+
+def budget(path: Path | str = BUDGET_FILE) -> RenderingBudget:
+    """Read the configured size budget, or fail naming what is wrong with the file.
+
+    TOML, so the file is `tomllib` and no dependency — the same reader
+    `helena.hosts.load` uses:
+
+        [budget]
+        characters = 24000
+
+    Every failure is loud and names the path. There is no fallback value: a
+    rendering built against a budget nobody chose is the silent default
+    `concept/instruction.md` §6 lists by name, and it would be invisible in
+    exactly the deployment where the budget mattered.
+    """
+    path = Path(path)
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError as absent:
+        raise RenderingError(
+            f"no rendering budget configuration at {path}. The rendering is "
+            f"bounded by policy and not by a constant in this package, so an "
+            f"absent file is a startup failure and never an unbounded rendering."
+        ) from absent
+    try:
+        document = tomllib.loads(raw.decode())
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as malformed:
+        raise RenderingError(f"{path} is not readable TOML: {malformed}") from malformed
+    unexpected = sorted(set(document) - {"budget"})
+    if unexpected:
+        raise RenderingError(
+            f"{path} has top-level keys {unexpected}; the file is one [budget] "
+            f"table. A key nothing reads is a policy somebody set and nothing "
+            f"applies."
+        )
+    table = document.get("budget")
+    if not isinstance(table, dict):
+        raise RenderingError(
+            f"{path} has no [budget] table; the budget is the whole of what this "
+            f"file says."
+        )
+    try:
+        return RenderingBudget(**table)
+    except ValidationError as refused:
+        raise RenderingError(f"{path}: {refused}") from refused
+
+
 @dataclass(frozen=True)
 class RenderingVersion:
     """One version's renderer: the shape every version module supplies.
 
     A callable rather than a class, because a rendering is a function of a
-    projection and a host attribute set and holds no state of its own — a class
-    here would be an object with one method and a constructor that does nothing.
+    projection, a host attribute set and a budget, and holds no state of its own
+    — a class here would be an object with one method and a constructor that does
+    nothing.
     """
 
     version: str
-    #: `(projection, host_attributes) -> helena.contracts.v1.Rendering`.
+    #: `(projection, host_attributes, budget) -> helena.contracts.v1.Rendering`.
     render: Any
 
 

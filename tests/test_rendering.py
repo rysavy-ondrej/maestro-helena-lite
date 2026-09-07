@@ -11,11 +11,11 @@ are things this file makes fail:
   "enriched, found nothing"** — five statuses, each built out of a real load
   against a real engine, and each rendering to a line that is not the others;
 - **the rendering is versioned**, and a request whose version set disagrees with
-  the rendering it carries is refused.
-
-The fourth — **bounded, with visible truncation** — is the next increment's, and
-the tests here assert only that nothing yet claims to be bounded: no section
-carries a `Truncation`, because nothing yet drops a record.
+  the rendering it carries is refused;
+- **it is bounded, and truncation that is invisible is a correctness bug** — the
+  budget is swept from "everything fits" down to "nothing does", and at every
+  step a section that rendered fewer records than the projection held has to say
+  so, in a `Truncation` and in its own first line.
 
 Every engine test re-stamps the layer-coverage capture into the window `now`
 falls in, the way `tests/test_context.py` does. The rendering reads
@@ -26,6 +26,7 @@ every fixture in this repository is dated 2024-06-01.
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -48,6 +49,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_CAPTURES = PROJECT_ROOT / "tests" / "fixtures" / "captures"
 LAYERS_CAPTURE = "ace6ca33f7bf8aa949f79124abf33fc115cfd0909e9dea798f4762cf87af8318"
 THREATFOX_FIXTURE = PROJECT_ROOT / "tests" / "fixtures" / "threatfox" / "export.json"
+#: The whole 62-record sample, for the one test that measures a host's own size.
+SAMPLE = PROJECT_ROOT / "data" / "ingest" / "flow-sample.jsonl"
 RAW = THREATFOX_FIXTURE.read_bytes()
 
 TENANT, SENSOR = "tenant-under-test", "sensor-under-test"
@@ -162,10 +165,20 @@ def project(connection: psycopg.Connection) -> rendering.ContextProjection:
     return store(connection).project(context_id(connection))
 
 
-def rendered(connection: psycopg.Connection) -> contract.Rendering:
+#: A budget nothing in this file can exceed, for the tests that are not about the
+#: budget. Not `rendering.budget()`: those tests would then start passing or
+#: failing because somebody edited `config/rendering.toml`, and what the
+#: configured value is worth is its own test below.
+UNBOUNDED = rendering.RenderingBudget(characters=1_000_000)
+
+
+def rendered(
+    connection: psycopg.Connection,
+    budget: rendering.RenderingBudget = UNBOUNDED,
+) -> contract.Rendering:
     projection = project(connection)
     attributes = hosts.load().attributes_for(projection.host)
-    return v1.render(projection, attributes)
+    return v1.render(projection, attributes, budget)
 
 
 def body(rendering_: contract.Rendering, section: str) -> str:
@@ -189,6 +202,60 @@ def line_for(rendering_: contract.Rendering, section: str, value: str) -> str:
     ]
     assert len(found) == 1, f"{value!r} appears on {len(found)} lines of {section}"
     return found[0]
+
+
+#: The first token of a record line, per section. A source header line begins
+#: `source` and a truncation marker begins `truncated`, and neither is a record —
+#: which is the whole of rules 1 and 4 in `helena.rendering.v1`, expressed as
+#: something a test can count.
+RECORD_KINDS = (v1.DOMAIN, v1.ADDRESS, v1.FINGERPRINT, "tls")
+
+
+def record_lines(section: contract.RenderedSection) -> list[str]:
+    """The lines of one rendered section that the budget selects over."""
+    return [
+        line
+        for line in section.body.splitlines()
+        if line.split(" ", 1)[0] in RECORD_KINDS
+    ]
+
+
+def record_totals(projection: rendering.ContextProjection) -> dict[str, int]:
+    """How many records each section would carry if nothing were dropped.
+
+    Computed from the projection rather than from a rendering, so the two cannot
+    agree by both being wrong.
+    """
+    return {
+        contract.HOST: 0,
+        contract.DOMAINS_CONTACTED: len(projection.entities_of(v1.DOMAIN)),
+        contract.ADDRESSES_CONTACTED: len(projection.entities_of(v1.ADDRESS)),
+        contract.TLS_PARAMETERS: len(projection.tls)
+        + len(projection.entities_of(v1.FINGERPRINT)),
+        contract.CONNECTION_STATISTICS: 0,
+    }
+
+
+def tightest(
+    projection: rendering.ContextProjection, attributes: hosts.HostAttributes
+) -> contract.Rendering:
+    """The rendering at the smallest budget that still renders at all.
+
+    Bisected rather than stepped: what a budget must cover before anything is
+    rendered — the two closed sections, the source headers and one marker per
+    truncatable section — does not depend on the budget, so "renders" is monotone
+    in it.
+    """
+    low, high = 1, 1_000_000
+    while low < high:
+        middle = (low + high) // 2
+        try:
+            v1.render(projection, attributes, rendering.RenderingBudget(characters=middle))
+        except rendering.RenderingError:
+            low = middle + 1
+        else:
+            high = middle
+    return v1.render(projection, attributes, rendering.RenderingBudget(characters=low))
 
 
 def an_entity(connection: psycopg.Connection, entity_type: str = "domain") -> str:
@@ -781,7 +848,9 @@ def test_a_citation_resolves_to_evidence_the_rendering_actually_showed(
         now=datetime.fromtimestamp(current_window(), tz=timezone.utc),
     )
     projection = project(live)
-    produced = v1.render(projection, hosts.load().attributes_for(projection.host))
+    produced = v1.render(
+        projection, hosts.load().attributes_for(projection.host), UNBOUNDED
+    )
     request = agent_request(projection, produced)
     shown = sorted(produced.evidence_ids)
     assert len(shown) == 1
@@ -817,20 +886,328 @@ def triage_result(evidence_id: str) -> contract.AgentResult:
     )
 
 
-# --- What the rendering does not yet claim ----------------------------------
+# --- The size budget, and the truncation it makes visible -------------------
+
+
+def test_the_budget_is_read_from_the_configuration_file():
+    """The number is policy in a file, not a constant in this package.
+
+    `concept/07`: "budget values are **policy**, not constants in a branch".
+    `docs/decisions/0019-the-rendering-size-budget.md` §3 says where 25 000 came
+    from; this asserts the file the code reads is the file the note describes.
+    """
+    assert rendering.BUDGET_FILE == PROJECT_ROOT / "config" / "rendering.toml"
+    assert rendering.budget() == rendering.RenderingBudget(characters=25_000)
+
+
+def test_there_is_no_budget_anywhere_in_the_code_to_fall_back_to(tmp_path: Path):
+    """An absent file is a startup failure, never an unbounded rendering.
+
+    The silent configuration default `concept/instruction.md` §6 lists by name,
+    in the one place where its absence would be invisible: a rendering built
+    against nobody's budget looks exactly like one built against the right one.
+    """
+    with pytest.raises(rendering.RenderingError, match="never an unbounded rendering"):
+        rendering.budget(tmp_path / "absent.toml")
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        ("[budget]\ncharacters = 24000\nhorizon = 5\n", "Extra inputs"),
+        ("[budget]\ncharacters = 0\n", "greater than 0"),
+        ('[budget]\ncharacters = "24000"\n', "valid integer"),
+        ("[budget]\n", "Field required"),
+        ("# a file with the budget commented out\n", "no [budget] table"),
+        ("[budget]\ncharacters = 1\n[retention]\nhours = 24\n", "top-level keys"),
+        ("[budget", "not readable TOML"),
+    ],
+)
+def test_a_budget_file_that_is_not_one_is_refused(
+    tmp_path: Path, document: str, expected: str
+):
+    """Every way the file can be wrong fails naming the file, none defaults."""
+    path = tmp_path / "rendering.toml"
+    path.write_text(document)
+    with pytest.raises(rendering.RenderingError, match=re.escape(expected)):
+        rendering.budget(path)
+
+
+def test_the_budget_is_shared_max_min_fair_between_the_sections():
+    """Rule 3. A section that wants less than its share gives the rest back.
+
+    The alternative — each section in order taking what it needs — is what this
+    is not: under that rule the 5 characters the TLS section wanted would never
+    be reached, because the domains would have spent the lot first.
+    """
+    needs = {
+        contract.DOMAINS_CONTACTED: 100,
+        contract.ADDRESSES_CONTACTED: 10,
+        contract.TLS_PARAMETERS: 5,
+    }
+    assert v1._allocate(needs, 200) == needs
+    assert v1._allocate(needs, 60) == {
+        contract.DOMAINS_CONTACTED: 45,
+        contract.ADDRESSES_CONTACTED: 10,
+        contract.TLS_PARAMETERS: 5,
+    }
+    # Nobody's need fits an equal share: an even split, and the remainder to the
+    # earliest section in the contract's own order rather than to whichever key
+    # a dict happened to yield first.
+    assert v1._allocate(needs, 11) == {
+        contract.DOMAINS_CONTACTED: 4,
+        contract.ADDRESSES_CONTACTED: 4,
+        contract.TLS_PARAMETERS: 3,
+    }
 
 
 @pytest.mark.integration
-def test_no_section_claims_to_have_been_truncated(live: psycopg.Connection):
-    """This increment does not bound the rendering, and does not pretend to.
+def test_a_rendering_inside_the_configured_budget_drops_nothing(
+    live: psycopg.Connection,
+):
+    """The configured value against a real context, so the two cannot drift apart.
 
-    `helena.contracts.v1.Truncation` refuses a record that dropped nothing, so a
-    renderer that emitted one here would be saying something false. The size
-    budget and the selection under it are the next increment's, and this is the
-    assertion that will have to change when they land.
+    `Truncation` refuses a record that dropped nothing, so a renderer that
+    emitted one here would be saying something false. The claim the number is
+    chosen to make true (ADR-0019 §3) is that a real host's window renders whole.
     """
-    produced = rendered(live)
+    configured = rendering.budget()
+    produced = rendered(live, configured)
     assert produced.truncations == ()
+    assert sum(len(part.body) for part in produced.sections) < configured.characters
+
+
+@pytest.mark.integration
+def test_no_section_can_shrink_without_saying_so(live: psycopg.Connection):
+    """The whole of the budget, swept from "everything fits" to "nothing does".
+
+    At every budget: the rendering is inside it, every section's record lines are
+    either all of them or exactly what its `Truncation` says, and a section that
+    kept everything carries no record. This is the test the task asks for — *a
+    rendering exceeding the budget always carries a truncation record, and no
+    section can silently shrink* — and it is a sweep rather than one budget
+    because the interesting failures are at the boundaries between the two.
+    """
+    projection = project(live)
+    attributes = hosts.load().attributes_for(projection.host)
+    expected = record_totals(projection)
+    whole = sum(len(part.body) for part in v1.render(projection, attributes, UNBOUNDED).sections)
+
+    truncated, refused = 0, 0
+    for characters in range(whole + 50, 0, -13):
+        budget = rendering.RenderingBudget(characters=characters)
+        try:
+            produced = v1.render(projection, attributes, budget)
+        except rendering.RenderingError:
+            refused += 1
+            continue
+        assert sum(len(part.body) for part in produced.sections) <= characters, (
+            f"the rendering is over its own budget of {characters}"
+        )
+        for part in produced.sections:
+            kept, total = len(record_lines(part)), expected[part.section]
+            if kept == total:
+                assert part.truncation is None, (
+                    f"{part.section} kept all {total} records and claims a truncation"
+                )
+                continue
+            assert part.truncation is not None, (
+                f"{part.section} rendered {kept} of {total} records at a budget of "
+                f"{characters} and recorded nothing. Silent truncation is a "
+                f"correctness bug, not a formatting choice."
+            )
+            assert (part.truncation.kept, part.truncation.total) == (kept, total)
+            truncated += 1
+    assert truncated, "the sweep never truncated anything"
+    assert refused, "the sweep never reached a budget too small to render at all"
+
+
+@pytest.mark.integration
+def test_a_truncated_section_says_so_in_its_own_first_line(live: psycopg.Connection):
+    """Rule 4: the structured record for code, the line for the model.
+
+    First, because a reader has to know a list is partial before reading it — and
+    a model that read fifty domains and then a footnote has already reasoned.
+    """
+    projection = project(live)
+    attributes = hosts.load().attributes_for(projection.host)
+    produced = tightest(projection, attributes)
+    assert produced.truncations, "the tightest renderable budget dropped nothing"
+    for part in produced.sections:
+        first = part.body.splitlines()[0]
+        if part.truncation is None:
+            assert not first.startswith(v1.TRUNCATED)
+            continue
+        assert first == (
+            f"{v1.TRUNCATED} kept={part.truncation.kept} "
+            f"total={part.truncation.total} "
+            f"dropped={part.truncation.total - part.truncation.kept}"
+        )
+
+
+@pytest.mark.integration
+def test_the_host_section_and_the_statistics_are_never_truncated(
+    live: psycopg.Connection,
+):
+    """Rule 1, first half: what they cost does not depend on what the host did.
+
+    So they are the same at the tightest budget that renders as at no budget at
+    all — which is also what lets the budget treat them as a constant.
+    """
+    projection = project(live)
+    attributes = hosts.load().attributes_for(projection.host)
+    whole = v1.render(projection, attributes, UNBOUNDED)
+    tight = tightest(projection, attributes)
+    for section in (contract.HOST, contract.CONNECTION_STATISTICS):
+        assert body(tight, section) == body(whole, section)
+        assert next(
+            part.truncation for part in tight.sections if part.section == section
+        ) is None
+
+
+@pytest.mark.integration
+def test_a_source_header_is_never_dropped_however_tight_the_budget(
+    live: psycopg.Connection,
+):
+    """Rule 1, second half, and it is the rule with the most to lose.
+
+    The header is where `status=` and the snapshot live. A budget that dropped it
+    would render a name nobody could look up as a name with nothing against it,
+    which is the collapse `concept/instruction.md` §2 forbids "including in
+    whatever is rendered to an agent" — and it would do it *silently*, because
+    the truncation record counts records and a header is not one.
+    """
+    projection = project(live)
+    attributes = hosts.load().attributes_for(projection.host)
+    whole = v1.render(projection, attributes, UNBOUNDED)
+    tight = tightest(projection, attributes)
+    for section in (
+        contract.DOMAINS_CONTACTED,
+        contract.ADDRESSES_CONTACTED,
+        contract.TLS_PARAMETERS,
+    ):
+        headers = lines(whole, section, "source")
+        assert headers, f"{section} has no source header to keep"
+        assert lines(tight, section, "source") == headers
+
+
+@pytest.mark.integration
+def test_a_budget_too_small_for_the_statuses_is_refused_not_rendered(
+    live: psycopg.Connection,
+):
+    """A rendering that cannot say what happened to a lookup is not a rendering.
+
+    The failure names the two numbers, because "it did not fit" is only
+    actionable if an operator can see by how much.
+    """
+    projection = project(live)
+    attributes = hosts.load().attributes_for(projection.host)
+    smallest = len(
+        body(tightest(projection, attributes), contract.HOST)
+    )  # certainly below the mandatory cost
+    with pytest.raises(rendering.RenderingError, match="hide a missing or failed"):
+        v1.render(projection, attributes, rendering.RenderingBudget(characters=smallest))
+
+
+@pytest.mark.integration
+def test_render_refuses_anything_that_is_not_a_budget(live: psycopg.Connection):
+    """A number is not a budget: the type is what says whose decision it was."""
+    projection = project(live)
+    attributes = hosts.load().attributes_for(projection.host)
+    with pytest.raises(rendering.RenderingError, match="takes a RenderingBudget"):
+        v1.render(projection, attributes, 25_000)
+
+
+@pytest.mark.integration
+def test_a_dropped_record_takes_its_citation_with_it(live: psycopg.Connection):
+    """The section lists what it rendered, never what the projection held.
+
+    `check_exchange` resolves a citation against `Rendering.evidence_ids`, so a
+    section that advertised an identifier it dropped would let a result cite
+    evidence no model was ever shown — and the contract would accept it. This is
+    the one place where a truncation bug becomes a false audit trail rather than
+    a short rendering.
+    """
+    value = an_entity(live)
+    load(
+        live,
+        targeted(RAW, value),
+        now=datetime.fromtimestamp(current_window(), tz=timezone.utc),
+    )
+    projection = project(live)
+    attributes = hosts.load().attributes_for(projection.host)
+    whole = v1.render(projection, attributes, UNBOUNDED)
+    shown = sorted(whole.evidence_ids)
+    assert len(shown) == 1
+
+    tight = tightest(projection, attributes)
+    assert not lines(tight, contract.DOMAINS_CONTACTED, "domain"), (
+        "the tightest budget kept a domain record, so this proves nothing"
+    )
+    assert shown[0] not in tight.evidence_ids
+    request = agent_request(projection, tight)
+    with pytest.raises(ContractError, match="which the rendering did not show"):
+        contract.check_exchange(request, truncated_result(shown[0]))
+
+
+@pytest.mark.integration
+def test_the_truncation_reaches_the_request_and_forces_a_gap(
+    live: psycopg.Connection,
+):
+    """`concept/04`: the request carries "the rendering with explicit truncation".
+
+    It is carried rather than re-derived — `AgentRequest.rendering` is the
+    `Rendering`, and `Rendering.truncations` is what the agent runner and
+    `check_exchange` read. The rule that a truncated rendering forces a
+    `truncated` gap on the outcome is the contract's (task 26); this is the first
+    increment that can actually produce one to give it.
+    """
+    projection = project(live)
+    attributes = hosts.load().attributes_for(projection.host)
+    tight = tightest(projection, attributes)
+    request = agent_request(projection, tight)
+    assert request.rendering.truncations == tight.truncations
+    assert {record.section for record in request.rendering.truncations} <= set(
+        contract.SECTIONS
+    )
+
+    verdict = normal_result()
+    with pytest.raises(ContractError, match="Silent truncation is a correctness bug"):
+        contract.check_exchange(request, verdict)
+    contract.check_exchange(
+        request,
+        verdict.model_copy(
+            update={
+                "gaps": (
+                    contract.Gap(
+                        kind=contract.TRUNCATED,
+                        detail="the rendering was truncated to fit its budget",
+                    ),
+                )
+            }
+        ),
+    )
+
+
+def normal_result() -> contract.AgentResult:
+    """A clean triage verdict. `concept/04` exempts `normal` from citations."""
+    return triage_result("never-cited").model_copy(
+        update={"classification": "normal", "citations": ()}
+    )
+
+
+def truncated_result(evidence_id: str) -> contract.AgentResult:
+    """A citing result with the `truncated` gap the contract will insist on."""
+    return triage_result(evidence_id).model_copy(
+        update={
+            "gaps": (
+                contract.Gap(
+                    kind=contract.TRUNCATED,
+                    detail="the rendering was truncated to fit its budget",
+                ),
+            )
+        }
+    )
 
 
 @pytest.mark.integration
@@ -888,7 +1265,7 @@ def test_one_host_s_attributes_are_never_rendered_beside_another_s_traffic(
     projection = project(live)
     other = hosts.load().attributes_for("198.51.100.7")
     with pytest.raises(rendering.RenderingError, match="pairs one host's configured"):
-        v1.render(projection, other)
+        v1.render(projection, other, UNBOUNDED)
 
 
 def test_an_entity_type_with_no_section_and_no_exemption_fails_loudly(monkeypatch):
@@ -1132,3 +1509,65 @@ def test_the_tls_view_counts_flows_and_not_rows(live: psycopg.Connection):
         "SELECT count(*) FROM helena_flatten_tls WHERE client_version IS NOT NULL"
     ).fetchone()[0]
     assert sum(row[3] for row in found) == handshakes
+
+
+# --- The instrumentation: how big a real host's window actually is ----------
+
+
+@pytest.mark.integration
+def test_the_whole_flow_sample_renders_to_the_size_the_notes_record(
+    migrated_engine: psycopg.Connection, tmp_path: Path
+):
+    """122 entity rows and 12 115 characters, measured rather than assumed.
+
+    Task 29's own premise is that "how many entity rows a busy host produces is
+    unmeasured — the fixture is one host for two minutes", so this is the
+    measurement, pinned here so that `config/rendering.toml` and
+    `docs/decisions/0019-the-rendering-size-budget.md` cannot quietly go stale
+    against the code. `scripts/measure_rendering.py` reports the same numbers for
+    any capture; this asserts the ones the budget was chosen from.
+
+    Every `ts` is moved forward a whole number of windows rather than into one
+    window: the sample is 130.8 s and crosses a boundary, so it is two contexts,
+    and collapsing them would measure a host that does not exist.
+    """
+    records = [json.loads(line) for line in SAMPLE.read_bytes().splitlines()]
+    shift = (
+        current_window() - int(max(record["ts"] for record in records) // WINDOW_SECONDS)
+        * WINDOW_SECONDS
+    )
+    store_records(
+        migrated_engine,
+        tmp_path / "whole-sample.jsonl",
+        [{**record, "ts": record["ts"] + shift} for record in records],
+    )
+    contexts = migrated_engine.execute(
+        "SELECT context_id FROM helena_signal_host_context_live ORDER BY window_start"
+    ).fetchall()
+    assert len(contexts) == 2, "the sample crosses one window boundary"
+
+    configuration = hosts.load()
+    measured = []
+    for (context_id,) in contexts:
+        projection = store(migrated_engine).project(context_id)
+        counted: dict[str, int] = {}
+        for entity in projection.entities:
+            counted[entity.entity_type] = counted.get(entity.entity_type, 0) + 1
+        produced = v1.render(
+            projection, configuration.attributes_for(projection.host), UNBOUNDED
+        )
+        measured.append(
+            (counted, sum(len(part.body) for part in produced.sections))
+        )
+
+    busiest, quietest = measured
+    assert busiest == (
+        # 32 of these are `url` entities, which rendering v1 does not carry --
+        # so the rendering is smaller than the context before any budget applies.
+        {"domain": 55, "address": 31, "fingerprint": 4, "url": 32},
+        12_115,
+    )
+    assert quietest == ({"domain": 6, "address": 2, "fingerprint": 2}, 1_770)
+    assert sum(busiest[0].values()) == 122
+    # The reason 25 000 is the configured number: over twice the larger of the two.
+    assert busiest[1] * 2 <= rendering.budget().characters

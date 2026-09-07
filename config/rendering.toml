@@ -1,0 +1,47 @@
+# The size budget for the triage rendering — policy, not a constant in a branch.
+#
+# `concept/04-the-two-agents.md`: the rendering "is bounded, and truncation that
+# is invisible is a correctness bug, not a formatting choice".
+# `concept/07-principles.md`: "budget values are **policy**, not constants in a
+# branch". So the number lives here and `helena.rendering.budget()` reads it;
+# there is no default in the code and no fallback if this file is missing.
+#
+# ## What the number bounds
+#
+# The total size, in characters, of the five section bodies a rendering carries.
+# Not tokens: counting tokens needs a tokenizer per model, and the
+# OpenAI-compatible endpoint this project uses does not publish its vocabulary.
+# Characters bound the token count from above for every tokenizer there is, and
+# they are the same number on every machine — but they are not *proportional* to
+# it, so do not convert this value with a ratio.
+# `docs/decisions/0019-the-rendering-size-budget.md` records why.
+#
+# It does not bound the prompt around the rendering. That is a later increment's,
+# it is not attacker-influenced, and a budget covering both would make a
+# rendering shrink because somebody reworded an instruction.
+#
+# ## Where 25000 came from, and what would change it
+#
+# Measured, not assumed — `make rendering-size` (scripts/measure_rendering.py)
+# re-measures it against a real capture at any time. Over
+# `data/ingest/flow-sample.jsonl`, 62 real flow records of one managed Windows
+# endpoint across 130.8 seconds, the busier of the two windows holds **122 entity
+# rows** — 55 domains, 31 addresses, 4 fingerprints and 32 URLs, which this
+# rendering version does not carry — and renders to **12 115 characters**. The
+# quieter window holds 10 entity rows and renders to 1 770.
+#
+# 25000 is over twice the larger of those. The criterion is that a real quiet
+# host's window renders whole with headroom, so truncation is the busy-host case
+# rather than the normal one — a budget that truncated the project's own fixture
+# would make the truncation record the thing nobody reads.
+#
+# **It is a candidate, not a decision**, in exactly the sense
+# `sql/migrations/0009_retention_boundary.sql` means it of the 24-hour retention
+# horizon: `concept/08-open-questions.md` lists the numeric budget values as open,
+# and what settles this one is a busy host observed through the truncation records
+# rather than an argument. Nothing has yet run a model against a rendering, so
+# whether 25000 characters is a comfortable input for a small fast model on the
+# high-volume path is **unmeasured**.
+
+[budget]
+characters = 25000

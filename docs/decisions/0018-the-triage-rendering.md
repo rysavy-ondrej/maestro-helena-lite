@@ -315,3 +315,13 @@ costs a store that has already migrated.
   difference is almost all of it the `classification=no_match` token on every
   record and the snapshot digest in two section headers; the enrichment adds
   about 19 % to a rendering, and one hit adds 190 characters.
+
+  **Superseded by `0019-the-rendering-size-budget.md`.** Task 29 bounded the
+  rendering, so "no section produced here carries one" is no longer true of
+  `v1`: a section that drops a record now carries a `Truncation` and opens with a
+  `truncated` line. Everything else in this note still holds — the record order
+  is still neutral and it is what the budget selects a prefix of. The measurement
+  above also turned out to be the small case: over the whole of
+  `data/ingest/flow-sample.jsonl` the busier window holds **122 entity rows** and
+  renders to **12 115 characters**, which is where `config/rendering.toml`'s
+  number comes from.

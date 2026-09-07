@@ -3,7 +3,7 @@
 # Everything runs through `uv run`, against the `.venv/` that is already at the
 # project root. Never `pip`, never a second virtualenv, never a system python.
 
-.PHONY: help sync test check acceptance lint typecheck dev-up dev-down migrate storage
+.PHONY: help sync test check acceptance lint typecheck dev-up dev-down migrate storage rendering-size
 
 help:
 	@echo "sync       install the locked environment (uv sync)"
@@ -14,6 +14,7 @@ help:
 	@echo "dev-down   stop them again"
 	@echo "migrate    apply sql/migrations/ to the configured engine"
 	@echo "storage    what each relation of the migrated schema stores"
+	@echo "rendering-size  what a real capture renders to, against the configured budget"
 	@echo "lint       not yet available - see docs/decisions/0003-lint-and-typecheck-tooling.md"
 	@echo "typecheck  not yet available - see docs/decisions/0003-lint-and-typecheck-tooling.md"
 
@@ -46,6 +47,12 @@ migrate:
 # docs/decisions/0016-view-layering-and-materialization-policy.md.
 storage:
 	uv run scripts/dev_check.py --storage
+
+# What a real capture actually renders to - entity rows per host and characters
+# per section, read off the engine rather than assumed. config/rendering.toml
+# cites what this produced; see docs/decisions/0019-the-rendering-size-budget.md.
+rendering-size:
+	uv run scripts/measure_rendering.py
 
 check:
 	uv lock --check
