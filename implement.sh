@@ -150,19 +150,19 @@ USAGE_STALE_SECONDS=1800    # fall back to a reading this old if the call fails
 # Prints "<remaining>|<binding limit>|<resets_at>|<human>|<source>"
 # or      "unavailable|<reason>|||"
 budget_probe() {
-  local token http body cached hdr retry_after
+  local token http body cached hdr retry_after out
   cached="$(python3 - "$USAGE_CACHE" "$USAGE_FRESH_SECONDS" <<'PY'
-import json, os, sys, time
+import json, sys, time
 p, ttl = sys.argv[1], int(sys.argv[2])
-if os.path.exists(p):
-    try:
-        c = json.load(open(p))
-        if time.time() - c["at"] <= ttl:
-            print(c["line"] + "|cached")
-    except Exception:
-        pass
+try:
+    c = json.load(open(p))
+    at, line = float(c["at"]), str(c["line"])
+    if len(line.split("|")) >= 4 and time.time() - at <= ttl:
+        print(line + "|cached")
+except Exception:
+    pass        # absent, half-written or an older format: just ask the endpoint
 PY
-)"
+)" || cached=""
   if [ -n "$cached" ]; then printf '%s\n' "$cached"; return 0; fi
 
   if [ ! -f "$CREDS" ]; then
@@ -189,8 +189,13 @@ except Exception: print('')
   retry_after="$(awk 'tolower($1) == "retry-after:" { gsub(/\r/, "", $2); print $2 }' "$hdr" | tail -1)"
   rm -f "$hdr"
 
-  python3 - "$body" "$http" "$USAGE_CACHE" "$USAGE_STALE_SECONDS" "$retry_after" <<'PY'
-import json, os, sys, time, datetime
+  # This is the last command in the function and the function is read through
+  # $(...) under `set -e`, so an exception in here would take the whole run down
+  # with a traceback printed where the budget line should be. It must not: an
+  # unreadable budget is a thing the gate already knows how to handle, and a
+  # crash is not. Anything that is not a well-formed line becomes "unavailable".
+  out="$(python3 - "$body" "$http" "$USAGE_CACHE" "$USAGE_STALE_SECONDS" "$retry_after" <<'PY'
+import json, sys, time, datetime
 
 body, http, cache = sys.argv[1], sys.argv[2], sys.argv[3]
 stale_ttl = int(sys.argv[4])
@@ -218,26 +223,35 @@ def _refresh(line):
         parts[3] = f"{t.astimezone():%Y-%m-%d %H:%M %Z} (in {mins//60}h {mins%60}m)"
     return "|".join(parts)
 
+def _cached():
+    """(written_at, line) from the cache, or None.
+
+    Every field is validated here rather than trusted. A cache file that is
+    half-written, hand-edited or left over from an older format used to raise
+    out of fallback() and end the run with a traceback instead of a budget."""
+    try:
+        c = json.load(open(cache))
+        at, line = float(c["at"]), str(c["line"])
+        return (at, line) if len(line.split("|")) >= 4 else None
+    except Exception:
+        return None
+
 def fallback(reason, keep_any_age=False):
-    c = None
-    if os.path.exists(cache):
-        try:
-            c = json.load(open(cache))
-        except Exception:
-            c = None
+    c = _cached()
     if c:
-        age = int(time.time() - c["at"])
+        at, line = c
+        age = int(time.time() - at)
         if age <= stale_ttl:
-            print(f'{_refresh(c["line"])}|cached {age//60}m ago, live check {reason}')
+            print(f'{_refresh(line)}|cached {age//60}m ago, live check {reason}')
             return
         # A rate-limited endpoint means "cannot ask right now", not "the budget
         # is unknown". The cached reading still describes the CURRENT limit
         # window as long as that window has not reset -- and a reading from a
         # window that HAS reset is meaningless whatever its age, so the reset
         # timestamp is the right test rather than a duration.
-        t = _reset_at(c["line"])
+        t = _reset_at(line)
         if keep_any_age and t and t > _now():
-            print(f'{_refresh(c["line"])}|cached {age//60}m ago, kept: {reason}')
+            print(f'{_refresh(line)}|cached {age//60}m ago, kept: {reason}')
             return
     print(f"unavailable|{reason}|||")
 
@@ -289,19 +303,38 @@ except Exception:
     pass
 print(line + "|live")
 PY
+)" || out=""
+  case "$out" in
+    *'|'*'|'*'|'*) printf '%s\n' "$out" ;;
+    *) printf 'unavailable|could not read the usage endpoint (HTTP %s)|||\n' "$http" ;;
+  esac
+}
+
+# Splits a probe line into the four globals below. A reading that is not a plain
+# integer percentage is reported as unavailable rather than compared: `[ x -lt
+# 10 ]` on a non-number is false, which would have let a garbled reading through
+# the gate as "budget ok" -- the one answer the gate exists to prevent.
+budget_parse() {
+  BUDGET_REMAINING="${1%%|*}"
+  BUDGET_KIND="$(printf '%s' "$1"   | cut -d'|' -f2)"
+  BUDGET_HUMAN="$(printf '%s' "$1"  | cut -d'|' -f4)"
+  BUDGET_SOURCE="$(printf '%s' "$1" | cut -d'|' -f5)"
+  case "$BUDGET_REMAINING" in
+    ''|*[!0-9]*)
+      [ "$BUDGET_REMAINING" = "unavailable" ] \
+        || BUDGET_KIND="unreadable budget reading: '$1'"
+      BUDGET_REMAINING="unavailable" ;;
+  esac
 }
 
 budget_report() {
-  local probe remaining kind human source
-  probe="$(budget_probe)"
-  remaining="${probe%%|*}"
-  kind="$(printf '%s' "$probe"   | cut -d'|' -f2)"
-  human="$(printf '%s' "$probe"  | cut -d'|' -f4)"
-  source="$(printf '%s' "$probe" | cut -d'|' -f5)"
-  if [ "$remaining" = "unavailable" ]; then
-    say "Budget:   ${ylw}unknown${rst} — $kind"
+  local probe
+  probe="$(budget_probe)" || probe="unavailable|the budget probe failed|||"
+  budget_parse "$probe"
+  if [ "$BUDGET_REMAINING" = "unavailable" ]; then
+    say "Budget:   ${ylw}unknown${rst} — $BUDGET_KIND"
   else
-    say "Budget:   ${remaining}% remaining (binding: $kind, resets $human) ${dim}[$source]${rst}"
+    say "Budget:   ${BUDGET_REMAINING}% remaining (binding: $BUDGET_KIND, resets $BUDGET_HUMAN) ${dim}[$BUDGET_SOURCE]${rst}"
   fi
 }
 
@@ -365,17 +398,14 @@ budget_gate() {
     warn "budget check skipped (--no-budget-check)"
     return 0
   fi
-  local probe remaining kind human source
-  probe="$(budget_probe)"
-  remaining="${probe%%|*}"
-  kind="$(printf '%s' "$probe"   | cut -d'|' -f2)"
-  human="$(printf '%s' "$probe"  | cut -d'|' -f4)"
-  source="$(printf '%s' "$probe" | cut -d'|' -f5)"
+  local probe
+  probe="$(budget_probe)" || probe="unavailable|the budget probe failed|||"
+  budget_parse "$probe"
 
-  if [ "$remaining" = "unavailable" ]; then
+  if [ "$BUDGET_REMAINING" = "unavailable" ]; then
     say ""
     say "${red}${bold}Cannot verify the remaining budget.${rst}"
-    say "  reason: $kind"
+    say "  reason: $BUDGET_KIND"
     say ""
     say "  ${bold}Nothing was started.${rst} A task begun without knowing the budget can"
     say "  ${dim}stop mid-edit and leave the tree half-changed.${rst}"
@@ -383,15 +413,15 @@ budget_gate() {
     say "  Retry in a minute, or run with --no-budget-check to proceed anyway."
     return 3
   fi
-  if [ "$remaining" -lt "$MIN_REMAINING" ]; then
+  if [ "$BUDGET_REMAINING" -lt "$MIN_REMAINING" ]; then
     say ""
     say "${red}${bold}Budget too low to start a task.${rst}"
-    say "  remaining:      ${remaining}%  (threshold: ${MIN_REMAINING}%)"
-    say "  binding limit:  $kind"
-    if [ -n "$human" ]; then
-      say "  resets at:      $human"
+    say "  remaining:      ${BUDGET_REMAINING}%  (threshold: ${MIN_REMAINING}%)"
+    say "  binding limit:  $BUDGET_KIND"
+    if [ -n "$BUDGET_HUMAN" ]; then
+      say "  resets at:      $BUDGET_HUMAN"
       say ""
-      say "  ${bold}Re-run ./implement.sh after $human.${rst}"
+      say "  ${bold}Re-run ./implement.sh after $BUDGET_HUMAN.${rst}"
     else
       say ""
       say "  ${bold}Re-run ./implement.sh once the limit resets.${rst}"
@@ -400,7 +430,7 @@ budget_gate() {
     say "  ${dim}Nothing was started, so no task is half-done.${rst}"
     return 3
   fi
-  info "budget ok — ${remaining}% remaining (binding: $kind, resets $human) [$source]"
+  info "budget ok — ${BUDGET_REMAINING}% remaining (binding: $BUDGET_KIND, resets $BUDGET_HUMAN) [$BUDGET_SOURCE]"
   return 0
 }
 
