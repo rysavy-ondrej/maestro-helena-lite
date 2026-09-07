@@ -38,7 +38,8 @@ src/helena/          one package, one module per architecture component
   normalizer.py        per-format adapters, flow records -> validated events
   context.py           windowed host context, entity extraction, enriched view
   enrichment.py        feed loaders and snapshot-versioned reference tables
-  agents.py            the versioned agent contract, Triage and Analyst
+  agents.py            the Triage and Analyst runners over one contract
+  contracts/           the agent request/result pair, one frozen module per version
   tools.py             approved providers as cache-first tools
   orchestration.py     deterministic routing, budgets, persistence, replay
   sink.py              egress of every assessed context to the output topic
@@ -186,6 +187,11 @@ cannot be validated is a different thing from one that fails.
 `tests/test_package_layout.py` refuses anything but `__init__.py` and `vN.py`
 inside such a package, because a shared helper in there is a file every frozen
 version imports and therefore a way to edit `v1` through a side door.
+
+[`helena.contracts`](src/helena/contracts/__init__.py) is the second, on the same
+terms: `contracts.version("v1")` returns the `AgentRequest`, `AgentResult` and
+`AgentFailure` classes a stored assessment recording `schema_version = "v1"` is
+replayed against. See [The agent contract](#the-agent-contract) below.
 
 **Every source declares what it may say.** [`helena.enrichment`](src/helena/enrichment.py)
 holds the registry: a source's **tier** (A–D, describing the *source* and never
@@ -674,3 +680,67 @@ Every fixture in this repository is dated 2024-06-01, so **the retained views
 are empty over the fixtures**, and the tests reach the inside of the boundary
 with a real record whose `ts` is re-stamped. The same holds for a deployment:
 replaying an archived capture produces contexts the boundary does not show.
+
+## The agent contract
+
+One versioned typed request/result pair covers **both** agents
+(`concept/04-the-two-agents.md`). Agents never exchange free-form
+natural-language messages, and nothing crosses an agent boundary except validated
+typed fields. [`helena.contracts.v1`](src/helena/contracts/v1.py) is the first
+version; [`docs/decisions/0017-the-agent-contract.md`](docs/decisions/0017-the-agent-contract.md)
+carries the argument for every shape in it.
+
+**Three fields are deliberately absent**, and they are refused three ways rather
+than one: no such field exists, `extra="forbid"` on every model means no caller
+can add one at runtime, and `tests/test_contracts.py` asserts the absence by name
+over every model *and* over the module's AST.
+
+| Absent | `concept/04`'s reason |
+| --- | --- |
+| a free-text **task** per invocation | "a varying instruction channel into the model … and [it] gives attacker-influenced content a route into the instruction position" |
+| loose **observations** / **relevant context** | they would carry the rendering's content "without the guarantees that make an assessment replayable" |
+| **recommended actions** | "has no consumer and invites the remediation channel the concept excludes" |
+
+**There is one result class and the asymmetry is rules on it**, not a second
+shape — two classes would be two places every later rule has to be written, and
+the first one forgotten is a triage run that quietly returned `malicious`. So a
+triage request may not carry a step or live-query budget at all, a triage result
+may not carry an evidence package, a retrieval trace, a proposed claim or a cost
+reporting any tool use, and the closed root set per emitter is
+`helena.taxonomy`'s, already frozen per taxonomy version.
+
+**The citation rule has exactly two exemptions.** A `normal` **triage** decision
+returns verdict and confidence only. `unknown` is exempt because a run whose
+enrichment entirely failed has no evidence row to point at — and its `gaps` list
+is *mandatory* instead, which is what stops the exemption becoming an
+unfalsifiable shrug. Everything else, an analyst `normal` included, requires at
+least one citation.
+
+**A citation has to resolve to something the run was given.** Every rendered
+section lists the stable evidence identifiers it showed, so `check_exchange`
+refuses a result citing an id the rendering never showed and the retrieval trace
+never produced. It also refuses an outcome that does not echo the request's eight
+known version dimensions, and an outcome carrying no `truncated` gap when the
+rendering dropped something — silent truncation is a correctness bug, and it has
+to stay visible in the record of the run and not only in the input to it.
+
+**The typed failure has nowhere to put a verdict.** `AgentFailure` has no
+`classification`, no `root`, no `confidence` and no `citations`, and
+`extra="forbid"` means one cannot be added — the same way
+`helena.enrichment.QueryFailure` enforces its own rule. Its three reasons are
+`schema_invalid`, `model_unavailable` and `timed_out`; **budget exhaustion is not
+one of them**, because `concept/07-principles.md` requires a budget-exhausted run
+to return a verdict on what it gathered, degraded to `unknown` and never `normal`.
+
+**A request cannot record the model that answered it.** `RequestVersions` carries
+the eight version dimensions known before the call plus `model_requested` — what
+this deployment asked for — and `completed_by()` produces the nine-dimension
+`VersionSet` once a response has said what actually answered. A `model_unavailable`
+failure therefore records no model version at all, because nothing answered, and
+recording the configured name there would be exactly the substitution the version
+registry exists to prevent.
+
+Nothing has been carried by any of it yet: no model has been called, no
+assessment has been stored or emitted, and no result has been replayed against a
+recorded `schema_version`. What is demonstrated is that the shapes refuse what the
+concept notes say they must refuse.

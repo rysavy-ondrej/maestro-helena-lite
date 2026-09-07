@@ -74,7 +74,15 @@ SUPPORT_MODULES = {
 # the vocabulary.
 #
 # Adding one is a deliberate edit here, exactly as adding a support module is.
-VERSIONED_PACKAGES = {"taxonomy"}
+# `contracts` is here for the same reason `taxonomy` is, and ADR-0008 named it in
+# advance: "agent output schemas are the same [as the taxonomy]: historical
+# versions are retained as frozen Pydantic classes, and replay validates against
+# the recorded one." It is not in COMPONENT_MODULES because it is not a stage --
+# `helena.agents` is the component `concept/03-architecture.md` names, and the
+# request/result pair it exchanges is the thing that has to stay frozen once a
+# row records a `schema_version`. A frozen class inside `agents.py` would be a
+# version that could be edited every time the runner around it changed.
+VERSIONED_PACKAGES = {"taxonomy", "contracts"}
 
 # What a file inside a versioned package may be called. Anything else -- a
 # helper, a shared base, a `common.py` -- is the thing that would let a later
