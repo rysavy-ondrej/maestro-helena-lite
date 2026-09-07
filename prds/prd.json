@@ -389,7 +389,7 @@
         "Add a test asserting no repair-call path exists",
         "Record the endpoint host and the model identity and version on every assessment — enough to know what produced a result, nothing that authenticates as anyone"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D4 Triage] Triage Agent runner — one rendering in, two labels out",
