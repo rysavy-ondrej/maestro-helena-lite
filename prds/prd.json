@@ -336,7 +336,7 @@
         "Add a contract test asserting no free-text task, observations, relevant-context or recommended-actions field exists",
         "Set up `helena/contracts/v1.py` as a frozen module and document the add-a-version-never-edit rule"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D4 Rendering] Closed, versioned host attribute set from fixed configuration",
