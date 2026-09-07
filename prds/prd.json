@@ -375,7 +375,7 @@
         "Add a test that a rendering exceeding the budget always carries a truncation record, and that no section can silently shrink",
         "Add an instrumentation task output: measure entity rows per host over the fixture and record the number rather than assuming it"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D4 Agents] Model client, structured output and bounded schema retry",
