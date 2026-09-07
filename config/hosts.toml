@@ -1,0 +1,40 @@
+# The fixed host attribute configuration — the ONLY source of triage's host
+# knowledge (`concept/04-the-two-agents.md`).
+#
+# `helena.hosts.load()` reads this file and nothing else reads it. There is no
+# fallback: not the store, not a prior assessment, not an inference from the
+# host's own traffic. That is what keeps triage input independent of any prior
+# agent output, and therefore what keeps assessments comparable across hosts and
+# across time.
+#
+# ## The rules this file is held to
+#
+# - `version` names the attribute set this file was written against. The loader
+#   refuses a version this tree does not hold, rather than reading the tables
+#   below against a different set of fields. `src/helena/hosts/v1.py` is the set.
+# - A host's table may carry only the fields that set declares — every one is
+#   optional, and a field it does not declare is a startup failure rather than a
+#   silently ignored line. A typo that was ignored would render as `unknown` and
+#   look exactly like an unconfigured host.
+# - **Leave an attribute out rather than writing `unknown`.** An absent attribute
+#   renders as `unknown` on its own; writing the word would make a recorded
+#   "nobody knows" and an unrecorded one one value carrying two facts.
+# - The address is the key of the table, never a field inside it.
+# - A host that is not listed here is not an error. It renders with every
+#   attribute `unknown`, because refusing to render would make triage skip
+#   exactly the hosts nobody has inventoried.
+#
+# ## What is in here now
+#
+# One entry, and it is the host in `data/ingest/flow-sample.jsonl` — the 62 real
+# flow records the ingest path is built and tested against, from the
+# maintainer's own network. Its `device_type` is not invented for the file: the
+# fixture's datasheet (`data/ingest/README.md`, *Traffic profile*) describes the
+# capture as "one Windows 10 endpoint" and "a managed enterprise endpoint", and
+# that is what is recorded here. A fleet's worth of entries belongs to a
+# deployment, not to this repository.
+
+version = "v1"
+
+[hosts."10.127.0.100"]
+device_type = "managed Windows 10 endpoint"

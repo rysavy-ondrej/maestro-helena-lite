@@ -82,7 +82,14 @@ SUPPORT_MODULES = {
 # request/result pair it exchanges is the thing that has to stay frozen once a
 # row records a `schema_version`. A frozen class inside `agents.py` would be a
 # version that could be edited every time the runner around it changed.
-VERSIONED_PACKAGES = {"taxonomy", "contracts"}
+#
+# `hosts` is the third, and it is versioned for the reason the other two are:
+# `concept/04-the-two-agents.md` makes triage's host knowledge "a closed,
+# **versioned** field set from fixed configuration only", and a rendering records
+# which set produced it. A `v2` that adds or retires a field must leave `v1`
+# meaning what it meant, so the field set is a frozen module and the loader,
+# the configuration reader and the renderer are the machinery beside it.
+VERSIONED_PACKAGES = {"taxonomy", "contracts", "hosts"}
 
 # What a file inside a versioned package may be called. Anything else -- a
 # helper, a shared base, a `common.py` -- is the thing that would let a later

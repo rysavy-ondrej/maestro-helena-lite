@@ -40,6 +40,8 @@ src/helena/          one package, one module per architecture component
   enrichment.py        feed loaders and snapshot-versioned reference tables
   agents.py            the Triage and Analyst runners over one contract
   contracts/           the agent request/result pair, one frozen module per version
+  taxonomy/            the two classification vocabularies, one frozen module per version
+  hosts/               triage's closed host attribute set, one frozen module per version
   tools.py             approved providers as cache-first tools
   orchestration.py     deterministic routing, budgets, persistence, replay
   sink.py              egress of every assessed context to the output topic
@@ -49,6 +51,7 @@ src/helena/          one package, one module per architecture component
   migrations.py        applies sql/migrations/ and records what it applied
   versions.py          the nine recorded version dimensions, and stamping
 sql/migrations/      the engine's schema: NNNN_name.sql, applied in order
+config/hosts.toml    the fixed host attributes, and triage's only source of them
 tests/               the one pytest suite, mirroring the package
 scripts/             dev-up / dev-down, the pin-and-endpoint check, migrate, replay
 demo/                one script that runs ingest and context and prints the result
