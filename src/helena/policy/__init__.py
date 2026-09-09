@@ -126,6 +126,7 @@ from helena.rendering import ContextProjection
 
 __all__ = [
     "BUDGET_KEYS",
+    "DISCLOSURE_KEYS",
     "POLICY_FILE",
     "PolicyError",
     "PolicyVersion",
@@ -150,17 +151,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 POLICY_FILE = PROJECT_ROOT / "config" / "policy.toml"
 
 #: The top-level keys of that file `thresholds()` reads, and the ones
-#: `helena.budgets.load` reads out of the same file. Two tables of one policy
-#: file, because `concept/07-principles.md` puts budget values and confidence
-#: thresholds in one sentence as the two things that are policy rather than
-#: constants in a branch.
+#: `helena.budgets.load` and `helena.disclosure.send_policy` read out of the same
+#: file. Three tables of one policy file, because `concept/07-principles.md` puts
+#: budget values and confidence thresholds in one sentence as the two things that
+#: are policy rather than constants in a branch, and puts *what may be sent to
+#: which source* under "governed policy" in the same note.
 #:
-#: Both sets are named here, in the module that owns the path, so that neither
-#: loader can drift into rejecting a key the other one requires: each refuses a
-#: key **nothing** reads and neither refuses a key the other reads.
-#: `helena.budgets` imports both rather than keeping a second copy.
+#: All three sets are named here, in the module that owns the path, so that no
+#: loader can drift into rejecting a key another one requires: each refuses a key
+#: **nothing** reads and none refuses a key another reads. `helena.budgets` and
+#: `helena.disclosure` import them rather than keeping a second copy.
 THRESHOLD_KEYS = frozenset({"policy_version", "thresholds_version", "thresholds"})
 BUDGET_KEYS = frozenset({"budgets", "rate_limits"})
+DISCLOSURE_KEYS = frozenset({"send_policy", "send_policy_version"})
 
 #: The one tier whose independent escalation is conditional on a number.
 #: `concept/02`: Tier A "may establish `malicious` by itself if scope and
@@ -457,12 +460,13 @@ def thresholds(path: Path | str = POLICY_FILE) -> Thresholds:
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as malformed:
         raise PolicyError(f"{path} is not readable TOML: {malformed}") from malformed
 
-    unexpected = sorted(set(document) - THRESHOLD_KEYS - BUDGET_KEYS)
+    unexpected = sorted(set(document) - THRESHOLD_KEYS - BUDGET_KEYS - DISCLOSURE_KEYS)
     if unexpected:
         raise PolicyError(
             f"{path} has top-level keys {unexpected}; this loader reads "
-            f"{sorted(THRESHOLD_KEYS)} and `helena.budgets.load` reads "
-            f"{sorted(BUDGET_KEYS)}. A key nothing reads is a policy somebody "
+            f"{sorted(THRESHOLD_KEYS)}, `helena.budgets.load` reads "
+            f"{sorted(BUDGET_KEYS)} and `helena.disclosure.send_policy` reads "
+            f"{sorted(DISCLOSURE_KEYS)}. A key nothing reads is a policy somebody "
             f"set and nothing applies."
         )
     declared = {

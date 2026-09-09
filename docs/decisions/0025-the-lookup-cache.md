@@ -166,6 +166,11 @@ That field is a local log line and **not** the disclosure record `concept/03`
 asks for; the send policy and the disclosure row are the next increment's, and
 this decision does not pre-empt them.
 
+> Landed since, in [0027](0027-disclosure-and-the-send-policy.md): the record is a
+> row on the run's `helena.disclosure.Disclosures` ledger, one per outbound call
+> and none for a hit, and it reconciles with `RunBudget.live_queries_spent`. The
+> log field above is unchanged and is still the local line.
+
 ## 6. The response is stored before it is evaluated
 
 `concept/05` rule 5: *"store the response before it is evaluated, cited by stable

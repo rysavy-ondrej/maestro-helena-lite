@@ -40,6 +40,7 @@ import pytest
 from helena import agents, observability, taxonomy, triage
 from helena.agents import Message, ModelClient, RetryPolicy
 from helena.config import ModelSettings, Secret, Settings
+from helena.disclosure import MODEL_INFERENCE, Disclosures, send_policy
 from helena.contracts.v1 import (
     CONTRACT_VERSION,
     MODEL_UNAVAILABLE,
@@ -246,12 +247,30 @@ SUSPICIOUS = said(
 )
 
 
+#: The project's own send policy. Triage queries no provider, and it discloses
+#: anyway: `concept/03` makes hosted inference egress, so the prompt leaves the
+#: monitored network on every context triage runs on.
+POLICY = send_policy()
+
+
+def disclosures(the_request: AgentRequest) -> Disclosures:
+    """The run's disclosure ledger, which `run` takes and does not build.
+
+    The budget ledger leaves on `AgentResult.cost`; a disclosure row has no
+    contract field to leave on, so the ledger belongs to the caller that will
+    store it (`helena.triage.run`).
+    """
+    return Disclosures.of(the_request, policy=POLICY)
+
+
 def run(endpoint: _Endpoint, *, policy: RetryPolicy = THREE_ATTEMPTS, **overrides: object):
+    asked = request(**overrides)
     return triage.run(
-        request(**overrides),
+        asked,
         client=endpoint.client(),
         policy=policy,
         prompt=PROMPT,
+        disclosures=disclosures(asked),
     )
 
 
@@ -435,6 +454,7 @@ def test_a_budget_that_permits_a_lookup_is_refused_at_the_call_site():
             client=ModelClient(model_settings("http://127.0.0.1:1/v1/"), logger=logger(io.StringIO())),
             policy=ONE_ATTEMPT,
             prompt=PROMPT,
+            disclosures=disclosures(request()),
         )
 
 
@@ -451,6 +471,7 @@ def test_a_prompt_offering_a_tool_shaped_field_is_a_startup_failure():
             client=ModelClient(model_settings("http://127.0.0.1:1/v1/"), logger=logger(io.StringIO())),
             policy=ONE_ATTEMPT,
             prompt=reaching,
+            disclosures=disclosures(request()),
         )
 
 
@@ -465,6 +486,7 @@ def test_the_prompt_version_the_request_records_is_the_one_that_ran():
             client=ModelClient(model_settings("http://127.0.0.1:1/v1/"), logger=logger(io.StringIO())),
             policy=ONE_ATTEMPT,
             prompt=PROMPT,
+            disclosures=disclosures(request()),
         )
 
 
@@ -624,6 +646,7 @@ def test_no_prompt_and_no_rendering_ever_reaches_the_log():
             client=endpoint.client(stream),
             policy=THREE_ATTEMPTS,
             prompt=PROMPT,
+            disclosures=disclosures(request()),
         )
     written = stream.getvalue()
     assert written
@@ -691,6 +714,7 @@ def test_the_configured_triage_model_answers_this_prompt():
             client=client,
             policy=agents.retry_policy(),
             prompt=PROMPT,
+            disclosures=disclosures(request()),
         )
     except (urllib.error.URLError, OSError) as unreachable:  # pragma: no cover
         pytest.skip(f"cannot reach the configured endpoint: {unreachable}")
@@ -716,3 +740,30 @@ def test_every_message_this_prompt_builds_is_a_declared_role():
     built = PROMPT.messages(request(), classifications=("normal", "suspicious"))
     assert all(isinstance(message, Message) for message in built)
     assert "assistant" not in [message.role for message in built]
+
+
+def test_a_triage_run_records_the_disclosure_the_prompt_made():
+    """Triage runs on every context, and every one of them discloses.
+
+    `concept/03`: inference is hosted, so the rendering leaves the monitored
+    network. The high-volume stage is where that adds up, and the record is on the
+    ledger the caller passed in rather than on the result — a disclosure row has
+    no contract field to leave on, so `run` cannot be the thing that owns it.
+    """
+    asked = request()
+    recorded = disclosures(asked)
+    with _Endpoint([answer(NORMAL)]) as endpoint:
+        outcome = triage.run(
+            asked,
+            client=endpoint.client(),
+            policy=THREE_ATTEMPTS,
+            prompt=PROMPT,
+            disclosures=recorded,
+        )
+    assert isinstance(outcome, AgentResult)
+    (row,) = recorded.rows
+    assert row.channel == MODEL_INFERENCE
+    assert row.disclosed_to == endpoint.client().endpoint_host
+    assert recorded.context_id == asked.context_id
+    # The rendering the prompt carried is not copied into the record.
+    assert RENDERED_BODY not in row.model_dump_json()

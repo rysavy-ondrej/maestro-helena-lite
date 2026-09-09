@@ -35,6 +35,15 @@ from pydantic import ValidationError
 
 from helena import enrichment, observability, tools
 from helena.budgets import BudgetExhausted, RunBudget
+from helena.disclosure import (
+    PROVIDER_LOOKUP,
+    SENDABLE_FIELDS,
+    DisclosureError,
+    Disclosures,
+    SendPolicy,
+    SourcePermission,
+    send_policy,
+)
 from helena.config import REDACTED, Secret, Settings
 from helena.contracts.v1 import (
     BUDGET_EXHAUSTED,
@@ -59,6 +68,7 @@ EXPORT = PROJECT_ROOT / "tests" / "fixtures" / "threatfox" / "export.json"
 pytestmark = pytest.mark.integration
 
 SOURCE = enrichment.THREATFOX_SOURCE
+SOURCE_DESCRIPTOR = enrichment.source(SOURCE)
 TENANT, SENSOR = "acme", "sensor-1"
 KEY = "abusech-key-under-test"
 NOW = datetime(2026, 9, 9, 12, 0, tzinfo=timezone.utc)
@@ -219,6 +229,56 @@ def settings(**overrides: str) -> Settings:
     return Settings.load(environ={**ENVIRONMENT, **overrides}, env_file=None)
 
 
+#: The send policy every tool in this module is built with: the project's own,
+#: read from `config/policy.toml`. The real file rather than a fixture, because
+#: what may be sent is a decision recorded there and a test policy would let the
+#: file and the code drift apart without a test noticing.
+POLICY = send_policy()
+
+
+def permitting(
+    *,
+    source_id: str = SOURCE,
+    entity_types: tuple[str, ...] | None = None,
+    fields: tuple[str, ...] = SENDABLE_FIELDS,
+    disclosed_to: str = "provider.invalid",
+    version: str | None = None,
+) -> SendPolicy:
+    """A send policy narrower than the shipped one, for the refusal cases.
+
+    Built rather than loaded, because what is under test is the enforcement and a
+    file that forbade something would forbid it for the whole project.
+    """
+    permitted = (
+        entity_types
+        if entity_types is not None
+        else tuple(sorted(enrichment.source(source_id).entity_types))
+    )
+    return SendPolicy(
+        version=version or POLICY.version,
+        by_source={
+            source_id: SourcePermission(
+                source_id=source_id,
+                disclosed_to=disclosed_to,
+                entity_types=permitted,
+                fields=fields,
+                send_policy_version=version or POLICY.version,
+            )
+        },
+    )
+
+
+def disclosures(policy: SendPolicy | None = None) -> Disclosures:
+    """One run's disclosure ledger. Not optional: a lookup records what it sent."""
+    return Disclosures(
+        tenant=TENANT,
+        sensor=SENSOR,
+        context_id="ctx-1",
+        emitter=ANALYST,
+        policy=policy or POLICY,
+    )
+
+
 def tool(
     *,
     source_id: str = SOURCE,
@@ -228,6 +288,7 @@ def tool(
     stream: io.StringIO | None = None,
     configured: Settings | None = None,
     retention_seconds: int = RETENTION,
+    policy: SendPolicy | None = None,
 ) -> tools.ProviderTool:
     configured = configured or settings()
     return tools.ProviderTool(
@@ -237,6 +298,7 @@ def tool(
         ask=ask or adapter(),
         cache=cache(),
         retention_seconds=retention_seconds,
+        send_policy=policy or POLICY,
         logger=observability.logger("tools", configured, stream=stream or io.StringIO()),
         redactor=observability.Redactor.from_settings(configured),
     )
@@ -315,7 +377,7 @@ def lookup(
 ):
     return tool(**kwargs).lookup(
         {"entity_type": entity_type, "entity_value": entity_value},
-        scope=scope(), budget=ledger(),
+        scope=scope(), budget=ledger(), disclosures=disclosures(),
         now=at,
     )
 
@@ -373,7 +435,7 @@ def test_the_scope_comes_from_the_request_and_not_from_the_model():
 
     refused = tool().lookup(
         {"entity_type": "domain", "entity_value": LISTED, "tenant": "somebody-else"},
-        scope=scope(), budget=ledger(),
+        scope=scope(), budget=ledger(), disclosures=disclosures(),
         now=NOW,
     )
     assert refused.refusal.reason == tools.MALFORMED_ARGUMENTS
@@ -391,8 +453,8 @@ def test_two_tenants_asking_the_same_question_get_different_evidence_identifiers
     """The tenant is in the digest, so one store cannot upsert across deployments."""
     provider = tool()
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    mine = provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
-    theirs = provider.lookup(arguments, scope=scope(tenant="other"), budget=ledger(), now=NOW)
+    mine = provider.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
+    theirs = provider.lookup(arguments, scope=scope(tenant="other"), budget=ledger(), disclosures=disclosures(), now=NOW)
     assert {record.evidence_id for record in mine.answer.evidence}.isdisjoint(
         record.evidence_id for record in theirs.answer.evidence
     )
@@ -629,7 +691,7 @@ def test_a_tool_answer_cannot_be_tagged_enrichment():
 )
 def test_a_call_that_is_not_a_tool_call_is_refused_and_nothing_is_queried(arguments):
     calls: list = []
-    result = tool(ask=adapter(calls=calls)).lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    result = tool(ask=adapter(calls=calls)).lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
     assert result.refusal.reason == tools.MALFORMED_ARGUMENTS
     assert calls == []
     assert result.native is None
@@ -710,12 +772,12 @@ def test_no_agent_visible_object_exposes_a_credential_a_url_or_an_http_client():
     surfaces: list[str] = [repr(provider), json.dumps(provider.declaration())]
     for result in (
         provider.lookup(
-            {"entity_type": "domain", "entity_value": LISTED}, scope=scope(), budget=ledger(), now=NOW
+            {"entity_type": "domain", "entity_value": LISTED}, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW
         ),
         provider.lookup(
-            {"entity_type": "domain", "entity_value": UNLISTED}, scope=scope(), budget=ledger(), now=NOW
+            {"entity_type": "domain", "entity_value": UNLISTED}, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW
         ),
-        provider.lookup({"entity_type": "nonsense"}, scope=scope(), budget=ledger(), now=NOW),
+        provider.lookup({"entity_type": "nonsense"}, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW),
     ):
         surfaces.append(tools.content(result))
         for text in agent_visible(result):
@@ -859,8 +921,8 @@ def test_a_second_identical_call_is_served_from_the_store_and_sends_nothing():
     provider = tool(ask=adapter(calls=calls))
     arguments = {"entity_type": "domain", "entity_value": LISTED}
 
-    first = provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
-    second = provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW + timedelta(seconds=30))
+    first = provider.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
+    second = provider.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW + timedelta(seconds=30))
 
     assert len(calls) == 1
     assert [step.outcome for step in first.answer.steps] == [LIVE_QUERY]
@@ -876,9 +938,9 @@ def test_a_cache_hit_carries_the_retrieval_time_of_the_underlying_record():
     """
     provider = tool()
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    provider.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
     later = NOW + timedelta(minutes=17)
-    (step,) = provider.lookup(arguments, scope=scope(), budget=ledger(), now=later).answer.steps
+    (step,) = provider.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=later).answer.steps
 
     assert step.outcome == CACHE_HIT
     assert step.retrieved_at == NOW
@@ -893,8 +955,8 @@ def test_two_runs_differing_only_in_cache_state_are_distinguishable_afterwards()
     """
     provider = tool()
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    live = provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
-    hit = provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW + timedelta(minutes=1))
+    live = provider.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
+    hit = provider.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW + timedelta(minutes=1))
 
     assert {step.outcome for step in live.answer.steps} == {LIVE_QUERY}
     assert {step.outcome for step in hit.answer.steps} == {CACHE_HIT}
@@ -915,8 +977,8 @@ def test_a_negative_result_is_cached_too_and_the_decision_is_recorded():
     provider = tool(ask=adapter(calls=calls))
     arguments = {"entity_type": "domain", "entity_value": UNLISTED}
 
-    first = provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
-    second = provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW + timedelta(minutes=1))
+    first = provider.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
+    second = provider.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW + timedelta(minutes=1))
 
     assert len(calls) == 1
     assert first.answer.evidence[0].classification == NO_MATCH
@@ -935,13 +997,13 @@ def test_a_failed_query_is_not_cached_and_the_decision_is_recorded():
         ask=adapter(calls=calls, fail=tools.ProviderQueryFailed(enrichment.TIMEOUT))
     )
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    failing.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
-    failing.lookup(arguments, scope=scope(), budget=ledger(), now=NOW + timedelta(seconds=1))
+    failing.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
+    failing.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW + timedelta(seconds=1))
     assert len(calls) == 2
 
     # And the next working call is a live query, not a cached failure.
     recovered = tool(ask=adapter()).lookup(
-        arguments, scope=scope(), budget=ledger(), now=NOW + timedelta(seconds=2)
+        arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW + timedelta(seconds=2)
     )
     assert recovered.answer.steps[0].outcome == LIVE_QUERY
     assert recovered.answer.evidence[0].classification == "malicious"
@@ -951,8 +1013,8 @@ def test_an_entry_past_its_retention_is_queried_again():
     calls: list = []
     provider = tool(ask=adapter(calls=calls))
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
-    fresh = provider.lookup(arguments, scope=scope(), budget=ledger(), now=LATER)
+    provider.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
+    fresh = provider.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=LATER)
 
     assert len(calls) == 2
     assert fresh.answer.steps[0].outcome == LIVE_QUERY
@@ -969,12 +1031,12 @@ def test_an_expired_entry_is_served_explicitly_stale_when_the_provider_is_unreac
     the outage is still countable and the agent is not told the answer is fresh.
     """
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    tool().lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    tool().lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
 
     unreachable = tool(
         ask=adapter(fail=tools.ProviderQueryFailed(enrichment.TRANSPORT_ERROR, "down"))
     )
-    served = unreachable.lookup(arguments, scope=scope(), budget=ledger(), now=LATER)
+    served = unreachable.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=LATER)
 
     (record,) = served.answer.evidence
     assert record.status == enrichment.STALE
@@ -999,10 +1061,10 @@ def test_an_expired_entry_is_served_explicitly_stale_when_the_provider_is_unreac
 def test_a_stale_fallback_is_the_same_claim_the_fresh_one_was():
     """The status is deliberately not in `evidence_id`: a claim that ages is one claim."""
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    fresh = tool().lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    fresh = tool().lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
     stale = tool(
         ask=adapter(fail=tools.ProviderQueryFailed(enrichment.TIMEOUT))
-    ).lookup(arguments, scope=scope(), budget=ledger(), now=LATER)
+    ).lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=LATER)
 
     assert [record.evidence_id for record in stale.answer.evidence] == [
         record.evidence_id for record in fresh.answer.evidence
@@ -1065,8 +1127,8 @@ def test_a_response_that_produced_no_claim_is_not_a_cache_entry():
     calls: list = []
     provider = tool(ask=adapter(calls=calls, path="suspicious"))
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
-    provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW + timedelta(seconds=1))
+    provider.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
+    provider.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW + timedelta(seconds=1))
     assert len(calls) == 2
 
 
@@ -1075,8 +1137,8 @@ def test_a_cache_hit_returns_the_provider_bytes_exactly_as_they_arrived():
     body = json.dumps([{"weird": "é", "n": None}]).encode()
     provider = tool(ask=adapter(body=body))
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
-    hit = provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW + timedelta(seconds=5))
+    provider.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
+    hit = provider.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW + timedelta(seconds=5))
 
     assert hit.native.body == body
     assert hit.native.response_version == tools.response_version(body)
@@ -1088,8 +1150,8 @@ def test_the_cache_is_scoped_to_the_tenant():
     calls: list = []
     provider = tool(ask=adapter(calls=calls))
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
-    theirs = provider.lookup(arguments, scope=scope(tenant="other"), budget=ledger(), now=NOW)
+    provider.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
+    theirs = provider.lookup(arguments, scope=scope(tenant="other"), budget=ledger(), disclosures=disclosures(), now=NOW)
 
     assert len(calls) == 2
     assert theirs.answer.steps[0].outcome == LIVE_QUERY
@@ -1100,10 +1162,10 @@ def test_the_endpoint_is_part_of_the_cache_key():
     calls: list = []
     arguments = {"entity_type": "domain", "entity_value": LISTED}
     tool(ask=adapter(calls=calls), endpoint="indicator").lookup(
-        arguments, scope=scope(), budget=ledger(), now=NOW
+        arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW
     )
     other = tool(ask=adapter(calls=calls), endpoint="tag").lookup(
-        arguments, scope=scope(), budget=ledger(), now=NOW
+        arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW
     )
 
     assert len(calls) == 2
@@ -1121,15 +1183,15 @@ def test_retention_is_configured_per_source_and_per_endpoint():
     calls: list = []
     long_lived = tool(ask=adapter(calls=calls), endpoint="registration", retention_seconds=86400)
     short_lived = tool(ask=adapter(calls=calls), endpoint="score", retention_seconds=60)
-    long_lived.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
-    short_lived.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    long_lived.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
+    short_lived.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
     assert len(calls) == 2
 
     moment = NOW + timedelta(seconds=600)
-    assert long_lived.lookup(arguments, scope=scope(), budget=ledger(), now=moment).answer.steps[
+    assert long_lived.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=moment).answer.steps[
         0
     ].outcome == CACHE_HIT
-    assert short_lived.lookup(arguments, scope=scope(), budget=ledger(), now=moment).answer.steps[
+    assert short_lived.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=moment).answer.steps[
         0
     ].outcome == LIVE_QUERY
 
@@ -1220,11 +1282,11 @@ def test_a_differently_spelled_indicator_hits_the_same_stored_record():
     calls: list = []
     provider = tool(ask=adapter(calls=calls))
     first = provider.lookup(
-        {"entity_type": "domain", "entity_value": LISTED}, scope=scope(), budget=ledger(), now=NOW
+        {"entity_type": "domain", "entity_value": LISTED}, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW
     )
     second = provider.lookup(
         {"entity_type": "domain", "entity_value": f"{LISTED.upper()}."},
-        scope=scope(), budget=ledger(),
+        scope=scope(), budget=ledger(), disclosures=disclosures(),
         now=NOW + timedelta(seconds=1),
     )
 
@@ -1242,7 +1304,7 @@ def test_what_was_disclosed_is_kept_beside_the_normalized_key():
     provider = tool()
     provider.lookup(
         {"entity_type": "domain", "entity_value": f"{LISTED.upper()}."},
-        scope=scope(), budget=ledger(),
+        scope=scope(), budget=ledger(), disclosures=disclosures(),
         now=NOW,
     )
     connection = _ENGINE[-1]
@@ -1353,9 +1415,9 @@ def test_two_endpoints_that_read_the_same_claim_keep_two_rows():
     """
     arguments = {"entity_type": "domain", "entity_value": LISTED}
     tool(endpoint="registration", retention_seconds=86400).lookup(
-        arguments, scope=scope(), budget=ledger(), now=NOW
+        arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW
     )
-    tool(endpoint="score", retention_seconds=60).lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    tool(endpoint="score", retention_seconds=60).lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
 
     connection = _ENGINE[-1]
     connection.execute("FLUSH")
@@ -1434,7 +1496,7 @@ def test_every_accepted_call_costs_a_step_including_one_refused_as_malformed():
     provider = tool(ask=adapter(calls=calls))
     budget = ledger(steps=2)
 
-    malformed = provider.lookup({"entity_type": "nonsense"}, scope=scope(), budget=budget, now=NOW)
+    malformed = provider.lookup({"entity_type": "nonsense"}, scope=scope(), budget=budget, disclosures=disclosures(), now=NOW)
     assert malformed.refusal.reason == tools.MALFORMED_ARGUMENTS
     assert budget.steps_spent == 1
     assert calls == []
@@ -1442,7 +1504,7 @@ def test_every_accepted_call_costs_a_step_including_one_refused_as_malformed():
     answered = provider.lookup(
         {"entity_type": "domain", "entity_value": LISTED},
         scope=scope(),
-        budget=budget,
+        budget=budget, disclosures=disclosures(),
         now=NOW,
     )
     assert answered.answer is not None
@@ -1455,8 +1517,8 @@ def test_a_spent_step_budget_refuses_the_call_and_queries_nothing():
     budget = ledger(steps=1)
     arguments = {"entity_type": "domain", "entity_value": LISTED}
 
-    provider.lookup(arguments, scope=scope(), budget=budget, now=NOW)
-    refused = provider.lookup(arguments, scope=scope(), budget=budget, now=NOW)
+    provider.lookup(arguments, scope=scope(), budget=budget, disclosures=disclosures(), now=NOW)
+    refused = provider.lookup(arguments, scope=scope(), budget=budget, disclosures=disclosures(), now=NOW)
 
     assert refused.answer is None
     assert refused.refusal.reason == tools.BUDGET_EXHAUSTED
@@ -1480,12 +1542,12 @@ def test_a_cache_hit_still_answers_after_the_live_query_quota_is_spent():
     budget = ledger(live_queries=1)
     arguments = {"entity_type": "domain", "entity_value": LISTED}
 
-    live = provider.lookup(arguments, scope=scope(), budget=budget, now=NOW)
+    live = provider.lookup(arguments, scope=scope(), budget=budget, disclosures=disclosures(), now=NOW)
     assert live.answer.steps[0].outcome == LIVE_QUERY
     assert budget.remaining_live_queries == 0
 
     hit = provider.lookup(
-        arguments, scope=scope(), budget=budget, now=NOW + timedelta(seconds=30)
+        arguments, scope=scope(), budget=budget, disclosures=disclosures(), now=NOW + timedelta(seconds=30)
     )
     assert {step.outcome for step in hit.answer.steps} == {CACHE_HIT}
     assert len(calls) == 1
@@ -1504,10 +1566,10 @@ def test_a_spent_live_query_budget_refuses_a_miss_rather_than_serving_a_stale_re
     calls: list = []
     provider = tool(ask=adapter(calls=calls))
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    provider.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
 
     budget = ledger(live_queries=0)
-    refused = provider.lookup(arguments, scope=scope(), budget=budget, now=LATER)
+    refused = provider.lookup(arguments, scope=scope(), budget=budget, disclosures=disclosures(), now=LATER)
 
     assert refused.answer is None
     assert refused.refusal.reason == tools.BUDGET_EXHAUSTED
@@ -1522,12 +1584,12 @@ def test_a_spent_wall_clock_refuses_the_call_before_the_cache_is_even_read():
     calls: list = []
     provider = tool(ask=adapter(calls=calls))
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    provider.lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
 
     budget, clock = driven()
     clock.advance(20.1)
     refused = provider.lookup(
-        arguments, scope=scope(), budget=budget, now=NOW + timedelta(seconds=30)
+        arguments, scope=scope(), budget=budget, disclosures=disclosures(), now=NOW + timedelta(seconds=30)
     )
 
     assert refused.refusal.reason == tools.BUDGET_EXHAUSTED
@@ -1553,14 +1615,14 @@ def test_a_provider_wait_is_spent_from_the_same_clock_the_model_calls_use():
 
     provider = tool(ask=slow)
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    served = provider.lookup(arguments, scope=scope(), budget=budget, now=NOW)
+    served = provider.lookup(arguments, scope=scope(), budget=budget, disclosures=disclosures(), now=NOW)
 
     assert served.answer is not None
     assert budget.remaining_seconds == pytest.approx(1.0)
 
     clock.advance(2.0)
     refused = provider.lookup(
-        arguments, scope=scope(), budget=budget, now=NOW + timedelta(seconds=1)
+        arguments, scope=scope(), budget=budget, disclosures=disclosures(), now=NOW + timedelta(seconds=1)
     )
     assert refused.refusal.reason == tools.BUDGET_EXHAUSTED
     assert budget.exhausted == ("wall_clock_seconds",)
@@ -1571,10 +1633,10 @@ def test_what_the_ledger_counted_is_what_the_cost_records():
     budget, clock = driven()
     provider = tool()
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    provider.lookup(arguments, scope=scope(), budget=budget, now=NOW)
+    provider.lookup(arguments, scope=scope(), budget=budget, disclosures=disclosures(), now=NOW)
     clock.advance(1.5)
     provider.lookup(
-        arguments, scope=scope(), budget=budget, now=NOW + timedelta(seconds=10)
+        arguments, scope=scope(), budget=budget, disclosures=disclosures(), now=NOW + timedelta(seconds=10)
     )
 
     spent = budget.cost(retries=0)
@@ -1592,15 +1654,349 @@ def test_the_stale_fallback_is_the_one_call_that_is_both_a_query_and_a_hit():
     served record, and a counter that hid either would disagree with it.
     """
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    tool().lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    tool().lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
 
     budget = ledger()
     unreachable = tool(
         ask=adapter(fail=tools.ProviderQueryFailed(enrichment.TRANSPORT_ERROR, "refused"))
     )
-    served = unreachable.lookup(arguments, scope=scope(), budget=budget, now=LATER)
+    served = unreachable.lookup(arguments, scope=scope(), budget=budget, disclosures=disclosures(), now=LATER)
 
     assert served.answer.failure is not None
     assert {record.status for record in served.answer.evidence} == {enrichment.STALE}
     assert (budget.live_queries_spent, budget.cache_hits) == (1, 1)
     assert budget.steps_spent == 1
+
+
+# --- What may be sent, and the record of what was ----------------------------
+#
+# `concept/07`: "Querying an external source discloses the indicator to that
+# source. Two separate obligations follow: what may be sent to which source is
+# governed policy, and what was disclosed is recorded on the assessment."
+
+
+def bodies() -> tuple[list[bytes], Any]:
+    """An adapter that records the request body it would send, and the list.
+
+    The stand-in above claims nothing about the hunting API's envelope and this
+    one claims nothing either — what it demonstrates is narrower and is the whole
+    point: **the only thing an adapter has to build a body from is the `ToolCall`
+    the layer hands it.** So the body here is that object serialized, and a value
+    the layer never put in the call cannot appear in it.
+    """
+    sent: list[bytes] = []
+    inner = adapter()
+
+    def ask(call: tools.ToolCall, credential: Secret) -> tools.ProviderAnswer:
+        sent.append(json.dumps(call.model_dump(mode="json"), sort_keys=True).encode())
+        return inner(call, credential)
+
+    return sent, ask
+
+
+def test_a_policy_forbidden_field_cannot_reach_a_request_body():
+    """The required test, and it holds in two ways rather than one.
+
+    The policy withholds `entity_value`, so the request cannot be assembled: the
+    call is refused, the adapter is never reached and **no body exists at all**.
+    That is "refusing rather than trimming" — the alternative a trimming layer
+    would produce is a query about a domain nobody named, which is a question the
+    deployment did not authorise and an answer to nothing.
+
+    The control below is what stops this passing for the wrong reason: with the
+    field permitted, the same value does reach the body.
+    """
+    sent, ask = bodies()
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+
+    refused = tool(
+        ask=ask, policy=permitting(fields=("entity_type",))
+    ).lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
+
+    assert refused.answer is None
+    assert refused.refusal.reason == tools.SEND_POLICY_FORBIDS
+    assert "entity_value" in refused.refusal.detail
+    assert sent == [], "the adapter was never called, so there is no body"
+    assert not any(LISTED.encode() in body for body in sent)
+
+    permitted = tool(ask=ask).lookup(
+        arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW
+    )
+    assert permitted.answer is not None
+    assert [body for body in sent if LISTED.encode() in body], "the control sent it"
+
+
+def test_the_tenant_and_the_sensor_reach_no_request_body_at_all():
+    """They are not in `SENDABLE_FIELDS`, so no policy could permit them and the
+    adapter is never handed them. The scope is deterministic code's and the
+    provider has no business knowing whose network this is."""
+    sent, ask = bodies()
+    tool(ask=ask).lookup(
+        {"entity_type": "domain", "entity_value": LISTED},
+        scope=scope(),
+        budget=ledger(),
+        disclosures=disclosures(),
+        now=NOW,
+    )
+    assert sent, "the control sent something"
+    for body in sent:
+        assert TENANT.encode() not in body
+        assert SENSOR.encode() not in body
+
+
+def test_a_forbidden_entity_type_is_a_different_refusal_from_one_the_source_cannot_answer():
+    """Two facts, two reasons, and collapsing them would lose the actionable one.
+
+    `entity_type_not_covered` is the source's capability — "a JA3 list has nothing
+    to say about a domain" — and is fixed by asking a different source.
+    `send_policy_forbids` is this deployment's permission, and is changed by
+    editing `config/policy.toml`. An operator seeing one count cannot act on it.
+    """
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    forbidden = tool(policy=permitting(entity_types=("address",))).lookup(
+        arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW
+    )
+    assert forbidden.refusal.reason == tools.SEND_POLICY_FORBIDS
+    assert "may be told about" in forbidden.refusal.detail
+
+    uncovered = tool().lookup(
+        {"entity_type": "fingerprint", "entity_value": "a" * 32},
+        scope=scope(),
+        budget=ledger(),
+        disclosures=disclosures(),
+        now=NOW,
+    )
+    assert uncovered.refusal.reason == tools.ENTITY_TYPE_NOT_COVERED
+    assert tools.SEND_POLICY_FORBIDS != tools.ENTITY_TYPE_NOT_COVERED
+
+
+def test_the_refusal_detail_names_fields_and_never_the_indicator():
+    """A refusal is agent-visible, and the indicator is the thing the check decided
+    must not travel. Putting it in the diagnostic would disclose it to the log and
+    hand it back through the field the layer owns."""
+    stream = io.StringIO()
+    refused = tool(
+        stream=stream, policy=permitting(fields=("entity_type",))
+    ).lookup(
+        {"entity_type": "domain", "entity_value": LISTED},
+        scope=scope(),
+        budget=ledger(),
+        disclosures=disclosures(),
+        now=NOW,
+    )
+    assert LISTED not in refused.refusal.detail
+    assert LISTED not in stream.getvalue()
+
+
+def test_a_tool_cannot_be_built_for_a_source_no_send_policy_permits():
+    """The second gate beside registration, and it is a different question.
+
+    The registry says a source exists and what it answers about; the send policy
+    says whether this deployment may tell it anything. `sslbl-ja3` is registered
+    and is a feed the loader copies locally, so nothing may query it.
+    """
+    with pytest.raises(DisclosureError, match="no send policy permits"):
+        tool(source_id="sslbl-ja3", endpoint="fingerprint")
+
+
+def test_the_send_policy_is_checked_before_the_cache_is_read():
+    """A revoked permission stops the source being consulted at all.
+
+    Nothing here evicts, so the record stays and a re-permitted source finds it
+    again — but a run must not keep answering from a cache filled while the
+    permission was in force, and it must not record a disclosure either.
+    """
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    tool().lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
+
+    budget = ledger()
+    recorded = disclosures()
+    refused = tool(policy=permitting(entity_types=("address",))).lookup(
+        arguments, scope=scope(), budget=budget, disclosures=recorded, now=NOW
+    )
+    assert refused.refusal.reason == tools.SEND_POLICY_FORBIDS
+    assert budget.cache_hits == 0, "the stored record was not even read"
+    assert recorded.rows == ()
+
+    # And the record is still there for a deployment that permits it again.
+    served = tool().lookup(
+        arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW
+    )
+    assert served.answer.steps[0].outcome == CACHE_HIT
+
+
+def test_a_cache_hit_records_no_new_disclosure():
+    """The required test. `concept/07`: "A cache hit discloses nothing. The
+    indicator was already disclosed when the entry was fetched."
+
+    So caching is a privacy control as much as a cost control, and the property is
+    measurable rather than a remark: the second call adds no row, and the count of
+    provider disclosures equals the live queries the budget was charged.
+    """
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    calls: list = []
+    provider = tool(ask=adapter(calls=calls))
+    budget = ledger()
+    recorded = disclosures()
+
+    provider.lookup(arguments, scope=scope(), budget=budget, disclosures=recorded, now=NOW)
+    assert len(recorded.rows) == 1
+
+    hit = provider.lookup(
+        arguments,
+        scope=scope(),
+        budget=budget,
+        disclosures=recorded,
+        now=NOW + timedelta(minutes=1),
+    )
+    assert hit.answer.steps[0].outcome == CACHE_HIT
+    assert len(recorded.rows) == 1, "the hit sent nothing, so it disclosed nothing"
+    assert len(calls) == 1
+    assert len(recorded.to_channel(PROVIDER_LOOKUP)) == budget.live_queries_spent
+    assert budget.cache_hits == 1
+
+
+def test_the_disclosure_records_the_source_the_host_the_indicator_and_when():
+    """`concept/07`'s field list, and the indicator is the spelling that was sent.
+
+    Not the normalized cache key: `sql/migrations/0017` keeps both for this
+    reason — what was matched on and what was disclosed are different questions,
+    and the record has to answer the second one.
+    """
+    recorded = disclosures()
+    tool().lookup(
+        {"entity_type": "domain", "entity_value": LISTED.upper()},
+        scope=scope(),
+        budget=ledger(),
+        disclosures=recorded,
+        now=NOW,
+    )
+    (row,) = recorded.rows
+    assert row.channel == PROVIDER_LOOKUP
+    assert row.source == SOURCE
+    assert row.disclosed_to == POLICY.permit(SOURCE).disclosed_to
+    assert row.query == f"domain {LISTED.upper()}"
+    assert row.disclosed_at == NOW
+    assert row.send_policy_version == POLICY.version
+
+
+def test_a_query_that_did_not_complete_still_recorded_the_disclosure():
+    """The indicator was on the wire either way. Recording on success only would
+    under-record exactly the case an operator most needs to see."""
+    recorded = disclosures()
+    failed = tool(
+        ask=adapter(fail=tools.ProviderQueryFailed(enrichment.TRANSPORT_ERROR, "refused"))
+    ).lookup(
+        {"entity_type": "domain", "entity_value": LISTED},
+        scope=scope(),
+        budget=ledger(),
+        disclosures=recorded,
+        now=NOW,
+    )
+    assert failed.answer.failure is not None
+    assert len(recorded.rows) == 1
+
+
+def test_the_stale_fallback_discloses_even_though_the_answer_came_from_the_cache():
+    """It reached the provider — that is the disclosure — and then served stored
+    rows. One row, and `RetrievalStep.outcome` is what says the answer was not
+    fresh."""
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    tool().lookup(arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW)
+
+    recorded = disclosures()
+    budget = ledger()
+    served = tool(
+        ask=adapter(fail=tools.ProviderQueryFailed(enrichment.TRANSPORT_ERROR, "refused"))
+    ).lookup(arguments, scope=scope(), budget=budget, disclosures=recorded, now=LATER)
+
+    assert {record.status for record in served.answer.evidence} == {enrichment.STALE}
+    assert len(recorded.rows) == 1
+    assert len(recorded.to_channel(PROVIDER_LOOKUP)) == budget.live_queries_spent
+
+
+def test_a_refused_call_discloses_nothing_whatever_refused_it():
+    """Malformed arguments, an uncovered entity type and a spent budget all refuse
+    before anything is sent, so none of them may leave a record saying otherwise."""
+    budget = RunBudget(
+        Budgets(steps=4, tokens=100, wall_clock_seconds=20.0, live_queries=1)
+    )
+    provider = tool()
+    recorded = disclosures()
+    for arguments in (
+        {"entity_type": "nonsense", "entity_value": LISTED},
+        {"entity_type": "fingerprint", "entity_value": "a" * 32},
+    ):
+        provider.lookup(
+            arguments, scope=scope(), budget=budget, disclosures=recorded, now=NOW
+        )
+    assert recorded.rows == ()
+
+    provider.lookup(
+        {"entity_type": "domain", "entity_value": LISTED},
+        scope=scope(),
+        budget=budget,
+        disclosures=recorded,
+        now=NOW,
+    )
+    exhausted = provider.lookup(
+        {"entity_type": "domain", "entity_value": UNLISTED},
+        scope=scope(),
+        budget=budget,
+        disclosures=recorded,
+        now=NOW,
+    )
+    assert exhausted.refusal.reason == BUDGET_EXHAUSTED
+    assert len(recorded.rows) == 1, "one live query, one disclosure"
+
+
+def test_a_tool_and_a_ledger_reading_different_send_policies_is_a_loud_failure():
+    """Two copies of a version, asserted equal where both are in hand.
+
+    A tool enforcing one revision of the send policy while the ledger records
+    under another produces a record that cannot be replayed against the rules that
+    permitted it.
+    """
+    with pytest.raises(tools.ToolError, match="enforcement and recording"):
+        tool(policy=permitting(version="t99")).lookup(
+            {"entity_type": "domain", "entity_value": LISTED},
+            scope=scope(),
+            budget=ledger(),
+            disclosures=disclosures(),
+            now=NOW,
+        )
+
+
+def test_the_ledger_is_not_optional_at_the_boundary():
+    """There is no argument a model could put a disclosure ledger in, and no call
+    that can skip one: `lookup` does not compile without it, the way it does not
+    compile without a scope or a budget."""
+    with pytest.raises(TypeError, match="disclosures"):
+        tool().lookup(
+            {"entity_type": "domain", "entity_value": LISTED},
+            scope=scope(),
+            budget=ledger(),
+            now=NOW,
+        )
+
+
+def test_the_declaration_offers_what_the_source_covers_and_the_policy_permits():
+    """The intersection, not the descriptor's set.
+
+    Offering a type every call would be refused for spends a step and a turn of
+    the loop on a refusal the layer could have declined to invite, and it makes
+    the declaration a promise the dispatch does not keep. The model is not told
+    *why* the set is what it is: a tool description is not where a deployment
+    explains its policy.
+    """
+    narrowed = tool(policy=permitting(entity_types=("address",))).declaration()
+    assert narrowed["input_schema"]["properties"]["entity_type"]["enum"] == ["address"]
+    assert "address" in narrowed["description"]
+    assert "domain" not in narrowed["description"]
+    assert "policy" not in narrowed["description"]
+
+    # And with the project's own policy it is what the source covers, because the
+    # file permits every type ThreatFox answers about.
+    assert tool().declaration()["input_schema"]["properties"]["entity_type"][
+        "enum"
+    ] == sorted(SOURCE_DESCRIPTOR.entity_types)

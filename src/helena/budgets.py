@@ -77,7 +77,7 @@ from pydantic import BaseModel, ConfigDict
 
 from helena import taxonomy
 from helena.contracts import v1 as contract
-from helena.policy import BUDGET_KEYS, POLICY_FILE, THRESHOLD_KEYS
+from helena.policy import BUDGET_KEYS, DISCLOSURE_KEYS, POLICY_FILE, THRESHOLD_KEYS
 
 __all__ = [
     "BUDGET_KEYS",
@@ -636,12 +636,13 @@ def load(path: Path | str = POLICY_FILE) -> BudgetPolicy:
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as malformed:
         raise BudgetError(f"{path} is not readable TOML: {malformed}") from malformed
 
-    unexpected = sorted(set(document) - BUDGET_KEYS - THRESHOLD_KEYS)
+    unexpected = sorted(set(document) - BUDGET_KEYS - THRESHOLD_KEYS - DISCLOSURE_KEYS)
     if unexpected:
         raise BudgetError(
             f"{path} has top-level keys {unexpected}; the budget tables are "
-            f"{sorted(BUDGET_KEYS)} and the threshold half of the file is "
-            f"{sorted(THRESHOLD_KEYS)}. A key nothing reads is a policy somebody "
+            f"{sorted(BUDGET_KEYS)}, the threshold half of the file is "
+            f"{sorted(THRESHOLD_KEYS)} and the send policy is "
+            f"{sorted(DISCLOSURE_KEYS)}. A key nothing reads is a policy somebody "
             f"set and nothing applies."
         )
 

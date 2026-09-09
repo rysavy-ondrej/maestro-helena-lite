@@ -169,7 +169,10 @@ A green suite here must not read as a finished tool layer:
   disclosure row exists. In particular **an indicator the model invents is sent as
   readily as one the context observed**: `ToolCall` types and bounds the argument,
   it does not check it against the host context. That is the send-policy
-  increment's decision and it is the sharpest gap this increment leaves;
+  increment's decision and it is the sharpest gap this increment leaves. *Landed
+  since, in [0027](0027-disclosure-and-the-send-policy.md) — except for the
+  sharpest gap: the send policy governs what kinds of thing and which fields may
+  be sent, and still does not ask where the value came from;*
 - **aggregator origin retention** (`concept/05` rule 7) — no registered source is
   an aggregator, and `EnrichmentEvidence` has no column for an origin either, so
   the first aggregator tool owes both.

@@ -19,6 +19,15 @@ PACKAGE_ROOT = PROJECT_ROOT / "src" / "helena"
 # The components of concept/03-architecture.md. Enrichment views are not a module
 # of their own: they are SQL.
 #
+# `disclosure` is the send-policy-and-disclosure-recording half of the note's
+# "Provider tools (MCP)" row -- "credentials, send policy, budgets, disclosure
+# recording, cache-first lookup" -- split out of `tools` for the reason `budgets`
+# was split out of `orchestration`: `concept/03-architecture.md` makes hosted
+# inference egress, so `helena.agents` records a disclosure too, and a ledger
+# defined in `tools` would make the model client import the provider tool layer to
+# find it. One ledger per run, charged by both, is `docs/decisions/0026`'s shape
+# and `docs/decisions/0027-disclosure-and-the-send-policy.md` records this one.
+#
 # `budgets` is the note's "policy and budget guards" row, and it is a module
 # because it could not be the one this comment used to name. Until task 36 the
 # guards were "the deterministic code in `orchestration`", which is where
@@ -35,6 +44,7 @@ COMPONENT_MODULES = {
     "enrichment",
     "agents",
     "budgets",
+    "disclosure",
     "tools",
     "orchestration",
     "sink",

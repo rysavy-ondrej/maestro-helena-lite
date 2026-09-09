@@ -62,6 +62,11 @@
 
 policy_version = "v1"
 thresholds_version = "2026-09-09"
+# The send policy's own version, up here because TOML puts a bare key in the last
+# table that was opened and every table below this line is somebody's. It is
+# recorded on every disclosure; the section at the foot of this file is what it
+# versions.
+send_policy_version = "2026-09-09"
 
 [thresholds]
 # ThreatFox. Tier B in `concept/05-threat-intelligence.md`'s catalogue: "explicit
@@ -159,3 +164,69 @@ retrieval_seconds = 120.0
 # the same clock as the model calls.
 [rate_limits]
 threatfox = 4
+
+# --- The send policy ----------------------------------------------------------
+#
+# What may be sent to which source. `concept/07-principles.md`, "Privacy and
+# disclosure": *"Querying an external source discloses the indicator to that
+# source. Two separate obligations follow: what may be sent to which source is
+# **governed policy**, and what was disclosed is recorded on the assessment."*
+# `helena.disclosure.send_policy` reads this half of the file and
+# `helena.tools.ProviderTool` enforces it before any request leaves — refusing a
+# call it cannot admit rather than sending a trimmed one.
+#
+# `concept/08-open-questions.md` lists "which sources are approved for
+# analyst-time querying and **what may be sent to each**" as open. This is the
+# shape the answer is written in; the entries below are the first answer.
+#
+# ## The three keys, and why each is required
+#
+# `disclosed_to` is the host a source's requests go to, and it is what the
+# disclosure record names as disclosed-to. A **host and never a URL**:
+# `concept/07` requires a credential travelling in a URL to be redacted before
+# anything is logged or stored, and a policy file that holds no URL cannot leak
+# one. The tool layer holds none either — `tests/test_tools.py` reads that off the
+# module's own AST — so the host lives here and the adapter is what speaks to it.
+#
+# `entity_types` is a **permission**, not a capability. `helena.enrichment.SOURCES`
+# already says what a source answers about ("a JA3 list has nothing to say about
+# a domain") and that produces a different refusal. This says what this deployment
+# is willing to tell that source it has seen. The loader refuses a permission
+# wider than the capability, because a line permitting something the source cannot
+# answer about is one nothing reads.
+#
+# `fields` is which fields of the outbound request may be populated, out of
+# `helena.disclosure.SENDABLE_FIELDS` — which is exactly the field set of
+# `helena.tools.ToolCall`, the object the adapter is handed. A call needing a
+# field this list omits is refused; nothing is stripped and sent anyway.
+#
+# ## Why only threatfox has an entry
+#
+# An entry means a source may be **queried live**, which is the same condition
+# `[rate_limits]` above states. `sslbl-ja3` is a feed the loader copies locally
+# and never a query — a local join discloses nothing (`concept/03`) — so an entry
+# for it would permit a disclosure nothing makes.
+#
+# ## Where `threatfox-api.abuse.ch` came from
+#
+# Measured, not read off a page: `POST https://threatfox-api.abuse.ch/api/v1/`
+# with no `Auth-Key` header answered **401 `{"error": "Unauthorized"}`** on
+# 2026-09-09, which is the same result `src/helena/enrichment.py` records from
+# 2026-09-06, and the bulk export the loader uses is a different host
+# (`threatfox.abuse.ch`) that needs no credential at all. The probe sent no
+# credential and no indicator. **The query surface behind that host is still
+# unconfirmed** — no per-indicator endpoint appears in the public documentation,
+# and confirming it is the first-live-provider increment's job. What is settled
+# here is where an analyst-tier query would go, which is what a disclosure record
+# has to name.
+[send_policy.threatfox]
+disclosed_to = "threatfox-api.abuse.ch"
+# All three types the source covers. ThreatFox's tier-B claims are about
+# addresses, names and URLs, and an analyst that may ask about an address but not
+# the name it resolved from would be reasoning across a gap this file created.
+entity_types = ["address", "domain", "url"]
+# The indicator, and nothing else. The tenant, the sensor, the monitored host and
+# the window are things this layer knows and never sends: `concept/07` says an
+# analyst lookup discloses "the indicators the case suggests", and everything
+# else about the case is the deployment's own.
+fields = ["entity_type", "entity_value"]

@@ -17,14 +17,17 @@ each of those is an escalation under `concept/instruction.md` §3, and none of t
 is what `concept/03-architecture.md` asks for. What it asks for is a list of
 properties, and every one of them is a property of the boundary rather than of a
 wire protocol: typed input, typed output, a typed error, credential ownership,
-tenant scoping, cache-first lookup, budgets enforced at the boundary, disclosure
-recording, and a validated response. Those are what this module implements, and
-adopting the MCP wire protocol later moves the transport behind the same boundary.
+tenant scoping, cache-first lookup, budgets enforced at the boundary, a governed
+send policy, disclosure recording, and a validated response. Those are what this
+module implements, and adopting the MCP wire protocol later moves the transport
+behind the same boundary.
 
 ## The shape of one call
 
-    tool = ProviderTool(source_id=..., credential=..., ask=..., logger=..., redactor=...)
-    lookup = tool.lookup(arguments, scope=RunScope.of(request))
+    tool = ProviderTool(source_id=..., credential=..., ask=..., send_policy=..., ...)
+    lookup = tool.lookup(
+        arguments, scope=RunScope.of(request), budget=..., disclosures=...
+    )
 
 `arguments` is what the **model** said — two fields, validated here and never
 trusted. `scope` is what deterministic code knows: the tenant and sensor of the
@@ -114,8 +117,22 @@ a `budget_exhausted` gap from `RunBudget.gap()` — `helena.budgets.degraded` is
 what puts it there, and it is why a truncated run may return `unknown` and may
 never return `normal`.
 
+## What may be sent, and the record of what was
+
+`concept/07`: *"Querying an external source discloses the indicator to that
+source. Two separate obligations follow: what may be sent to which source is
+governed policy, and what was disclosed is recorded on the assessment."* Both are
+`helena.disclosure`'s objects and this is where they are applied:
+
+| | |
+| --- | --- |
+| the **send policy** | resolved at construction, so a tool for a source no policy permits cannot be built. Checked **before the cache is read**, and a call it cannot admit is a `ToolRefusal` carrying `send_policy_forbids` — never a trimmed request |
+| the **disclosure record** | one row on the run's `Disclosures` ledger per outbound call, written **before** the adapter is called, carrying the source, the query, who was told and when |
+| a **cache hit** | records nothing, because it sent nothing. `RetrievalStep.outcome` is where cache-hit-or-live is recorded, and the two reconcile: one provider disclosure per live query the budget was charged |
+
 Reads: `helena.enrichment.SOURCES` (the descriptor: tier, entity types, declared
-subset) and `helena_reference_evidence_analyst`. Writes:
+subset), `config/policy.toml` through the injected `SendPolicy`, and
+`helena_reference_evidence_analyst`. Writes:
 `helena_reference_analyst_response` (the bytes, before they are evaluated) and
 `helena_reference_analyst_evidence` (the claims read out of them).
 
@@ -124,9 +141,7 @@ provider adapter over the committed ThreatFox export shape, against a real
 migrated engine for the cache, and against the real credential from `.env` for
 the isolation properties. **No live provider has been queried through it**: the
 query surface of the hunting API is confirmed, and the adapter written against
-it, in the first-live-provider increment. The disclosure record is named in the
-docstring above because it is the layer's, and is **not built here** — see the
-"deliberately not here" section below.
+it, in the first-live-provider increment.
 
 ## Deliberately not here, and named so a green suite does not read as a finished layer
 
@@ -134,11 +149,17 @@ docstring above because it is the layer's, and is **not built here** — see the
   the tool layer holds itself to, and the live-query budget is derived from it;
   nothing sleeps between calls. The adapter that speaks to a live provider is
   what has to, and the wall-clock budget is what catches it when it does.
-- **The disclosure record.** A call is logged locally; no disclosure row exists,
-  and the send policy that decides *what may be sent to which source* is not
-  written. In particular an indicator the model invents is sent as readily as one
-  the context observed — `ToolCall` bounds and types the argument, it does not
-  check it against the host context.
+- **Checking an indicator against the context that produced the run.** The send
+  policy governs *what kinds of thing* may be told to a source and *which fields*
+  a request may carry; it does not ask where the value came from, so an indicator
+  the model invents is sent as readily as one the context observed. `ToolCall`
+  bounds and types the argument and nothing joins it to the host context. That is
+  a disclosure channel the model controls, and closing it needs the context beside
+  the tool — which is the analyst runner's shape rather than this layer's.
+- **A stored disclosure record.** The rows are on the run's ledger and the ledger
+  is in memory: `concept/02` and `concept/07` put the record on the *assessment*,
+  and no assessment is stored yet. This is the standing `helena.budgets`' `Cost`
+  has, for the same reason and until the same increment.
 - **Aggregator origin retention** (`concept/05` rule 7). `ProviderClaim` has no
   origin field and `EnrichmentEvidence` has no column for one; no registered
   source is an aggregator, and the first one that is arrives with both.
@@ -166,6 +187,12 @@ from helena import taxonomy
 from helena.budgets import BudgetExhausted, RunBudget
 from helena.config import Secret
 from helena.contracts import v1 as contract
+from helena.disclosure import (
+    SENDABLE_FIELDS,
+    Disclosures,
+    SendPolicy,
+    SourcePermission,
+)
 from helena.enrichment import (
     ANALYST_TIER,
     ENTITY_TYPES,
@@ -198,6 +225,7 @@ __all__ = [
     "MALFORMED_ARGUMENTS",
     "MAX_INDICATOR",
     "REFUSAL_REASONS",
+    "SEND_POLICY_FORBIDS",
     "CacheEntry",
     "CacheKey",
     "EvidenceCache",
@@ -222,8 +250,10 @@ __all__ = [
 #: characters and a URL in this project's own data is far shorter than this; the
 #: bound is here because an unbounded tool argument is a way to push a payload at
 #: a provider through a tool that was asked for an indicator. It is a bound, not
-#: a send policy: whether an indicator the context never observed may be sent at
-#: all is the send-policy increment's decision, and until it lands one can be.
+#: a send policy: `helena.disclosure` decides which entity types and which fields
+#: may be sent to a source, and neither it nor this bound asks whether the context
+#: ever observed the indicator -- see "Deliberately not here" in the module
+#: docstring.
 MAX_INDICATOR = 2048
 
 #: Why the tool layer would not send a call. **Not** a `QueryFailure`: nothing
@@ -242,14 +272,26 @@ MAX_INDICATOR = 2048
 #:                            boundary "so an agent cannot reason its way around
 #:                            them", and this is the boundary saying so in a field
 #:                            the model can read and not argue with
+#:   send_policy_forbids      the deployment does not permit telling this source
+#:                            this. Deliberately not `entity_type_not_covered`:
+#:                            that one is the source's capability and this one is
+#:                            the deployment's permission, and a source that
+#:                            *could* answer and *may not be asked* is a different
+#:                            fact from one that cannot answer
 MALFORMED_ARGUMENTS = "malformed_arguments"
 ENTITY_TYPE_NOT_COVERED = "entity_type_not_covered"
+SEND_POLICY_FORBIDS = "send_policy_forbids"
 #: The gap kind, reused rather than respelled: the refusal the model sees and the
 #: gap the assessment records are the same fact at two layers, and a second
 #: spelling of it is the drift `concept/instruction.md` §2 rejects for version
 #: constants. `tests/test_tools.py` asserts they are one string.
 BUDGET_EXHAUSTED = contract.BUDGET_EXHAUSTED
-REFUSAL_REASONS = (MALFORMED_ARGUMENTS, ENTITY_TYPE_NOT_COVERED, BUDGET_EXHAUSTED)
+REFUSAL_REASONS = (
+    MALFORMED_ARGUMENTS,
+    ENTITY_TYPE_NOT_COVERED,
+    BUDGET_EXHAUSTED,
+    SEND_POLICY_FORBIDS,
+)
 
 
 class ToolError(RuntimeError):
@@ -1131,6 +1173,7 @@ class ProviderTool:
         "_ask",
         "_cache",
         "_retention",
+        "_permit",
         "_logger",
         "_redactor",
     )
@@ -1144,6 +1187,7 @@ class ProviderTool:
         ask: Callable[[ToolCall, Secret], ProviderAnswer],
         cache: EvidenceCache,
         retention_seconds: int,
+        send_policy: SendPolicy,
         logger: StructuredLogger,
         redactor: Redactor,
     ) -> None:
@@ -1151,6 +1195,13 @@ class ProviderTool:
         # built: adding a source is a governed decision (`concept/05`), and a
         # descriptor passed in as an argument would make it a constructor call.
         self._descriptor = source(source_id)
+        # And through the send policy, for the second half of the same argument:
+        # the registry says the source exists and what it answers about, and the
+        # policy says whether this deployment may tell it anything at all. A tool
+        # for a source nobody wrote a send policy for cannot be built, so
+        # "querying discloses the indicator" (`concept/07`) is governed at
+        # construction rather than remembered at the call.
+        self._permit: SourcePermission = send_policy.permit(source_id)
         if not ENDPOINT.match(endpoint):
             raise ToolError(
                 f"{endpoint!r} is not an endpoint name. It has to match "
@@ -1198,6 +1249,15 @@ class ProviderTool:
         return self._descriptor
 
     @property
+    def permit(self) -> SourcePermission:
+        """What this deployment permits being told to this source, and where it goes.
+
+        Read-only and resolved at construction, so the permission that was checked
+        and the permission that is recorded are one object.
+        """
+        return self._permit
+
+    @property
     def name(self) -> str:
         """The tool name a model is offered. Underscores, because tool names are identifiers.
 
@@ -1210,28 +1270,38 @@ class ProviderTool:
     def declaration(self) -> dict[str, Any]:
         """The tool as the model is offered it: a name, a description, an input schema.
 
-        Everything in it is derived from the descriptor, so what a model is told a
-        tool answers about cannot drift from what the tool will accept. There is
-        no URL and no endpoint in it, and there is nothing a credential could be
-        in: the model is offered a capability, not a client.
+        Everything in it is derived from the descriptor and the send policy, so
+        what a model is told a tool answers about cannot drift from what the tool
+        will accept. There is no URL and no endpoint in it, and there is nothing a
+        credential could be in: the model is offered a capability, not a client.
 
         The `entity_type` enum is injected rather than generated, for the reason
         `helena.agents.CLOSED_VOCABULARIES` gives: the vocabulary is enforced in a
         validator, `model_json_schema()` renders the field as a bare string, and
         an unenumerated closed vocabulary is one the model fills with the nearest
         text it can see.
+
+        **It is the intersection of what the source covers and what this
+        deployment permits being disclosed to it**, and not the descriptor's set.
+        Offering a type every call would be refused for would spend a step and a
+        turn of the loop on a refusal the layer could have declined to invite, and
+        it would make this declaration a promise the dispatch does not keep. What
+        the model is not told is *why* the set is what it is: the policy is
+        deterministic code's, and a tool description is not where a deployment
+        explains itself.
         """
+        offered = self._offered()
         schema = ToolCall.model_json_schema()
         properties = dict(schema["properties"])
         properties["entity_type"] = {
             **properties["entity_type"],
-            "enum": sorted(self._descriptor.entity_types),
+            "enum": offered,
         }
         return {
             "name": self.name,
             "description": (
                 f"Ask {self._descriptor.source_id} about one indicator. Answers "
-                f"about {', '.join(sorted(self._descriptor.entity_types))}. "
+                f"about {', '.join(offered)}. "
                 f"Classifies into {', '.join(sorted(self._descriptor.emits))} "
                 f"(taxonomy {self._descriptor.taxonomy_version}, subset "
                 f"{self._descriptor.emit_subset_version}); source tier "
@@ -1245,23 +1315,47 @@ class ProviderTool:
             },
         }
 
+    def _offered(self) -> list[str]:
+        """The entity types a model may ask this tool about, sorted.
+
+        What the source covers **and** what the deployment permits being disclosed
+        to it. Empty is impossible: `helena.disclosure` refuses a permission wider
+        than the capability and refuses an entry that permits nothing, so the
+        intersection is the permission itself.
+        """
+        return sorted(self._descriptor.entity_types & set(self._permit.entity_types))
+
     def lookup(
         self,
         arguments: Mapping[str, Any],
         *,
         scope: RunScope,
         budget: RunBudget,
+        disclosures: Disclosures,
         now: datetime | None = None,
     ) -> Lookup:
         """Ask this provider about one indicator, scoped to one tenant. Cache-first, budgeted.
 
-        `scope` and `budget` are keyword-only and have no default: a call that did
-        not say whose it is, or what bounds it, does not compile. That is the
-        shape `concept/instruction.md` §6 asks for -- fail at the call, never a
-        defaulted tenant, and never an unbounded loop -- and it is why this is
-        where the budget is enforced rather than in a prompt: **there is no
-        argument a model could put a budget in, and no sentence it could write
-        that skips one** (`concept/07`).
+        `scope`, `budget` and `disclosures` are keyword-only and have no default: a
+        call that did not say whose it is, what bounds it, or where the record of
+        it goes does not compile. That is the shape `concept/instruction.md` §6
+        asks for -- fail at the call, never a defaulted tenant, and never an
+        unbounded loop -- and it is why this is where the budget is enforced rather
+        than in a prompt: **there is no argument a model could put a budget in, and
+        no sentence it could write that skips one** (`concept/07`).
+
+        **What may be sent is checked before the cache is read**, out of the send
+        policy the tool resolved at construction, and a call it cannot admit is a
+        `ToolRefusal` carrying `send_policy_forbids` -- never a trimmed request.
+        `helena.disclosure` carries the argument for both halves: refusing rather
+        than trimming, and checking before the cache rather than after, so that a
+        revoked permission stops the source being consulted at all.
+
+        **What was disclosed is recorded on the run's ledger**, one row per
+        outbound call, written *before* the adapter is called: a request that
+        reached the provider and then timed out disclosed the indicator anyway. A
+        cache hit records nothing, which is `concept/07`'s "a cache hit discloses
+        nothing" as a property rather than a remark.
 
         Three of the four dimensions are charged here, in this order, and the
         order is the whole of what makes a cache hit cheap:
@@ -1290,6 +1384,18 @@ class ProviderTool:
         | expired, or nothing stored, and no live query left | refused. See the note in the body: the stale fallback is not reused here |
         """
         retrieved_at = now or datetime.now(timezone.utc)
+        if disclosures.policy.version != self._permit.send_policy_version:
+            # Two copies of a version, asserted equal at the one point both are
+            # in hand (`concept/instruction.md` §2). A tool enforcing one
+            # revision of the send policy while the ledger records under another
+            # would produce a record that cannot be replayed against the rules
+            # that permitted it.
+            raise ToolError(
+                f"this tool enforces send policy "
+                f"{self._permit.send_policy_version!r} and the run's ledger "
+                f"records under {disclosures.policy.version!r}; enforcement and "
+                f"recording read one policy or the record means nothing"
+            )
         try:
             # The step first, so an unbounded loop cannot be bought with
             # malformed calls, and the clock with it: a run whose wall clock is
@@ -1309,6 +1415,9 @@ class ProviderTool:
                 f"{self._descriptor.source_id} answers about "
                 f"{sorted(self._descriptor.entity_types)}",
             )
+        forbidden = self._forbidden(call)
+        if forbidden is not None:
+            return self._refuse(SEND_POLICY_FORBIDS, forbidden)
 
         key = CacheKey.of(self._descriptor, self._endpoint, call, scope)
         stored = self._cache.read(key)
@@ -1328,6 +1437,19 @@ class ProviderTool:
         except BudgetExhausted as spent:
             return self._refuse(BUDGET_EXHAUSTED, spent.detail)
 
+        # Recorded before the send, not after. `concept/07` puts the disclosure
+        # record beside the retrieval trace on the assessment, and the honest
+        # moment to write it is the moment the layer decides to send: a request
+        # that reached the provider and then timed out disclosed the indicator
+        # just as much as one that came back. The cost of the choice is a row for
+        # a call that failed before it left the process, which over-records in the
+        # direction an audit can live with.
+        disclosures.record_lookup(
+            permit=self._permit,
+            entity_type=call.entity_type,
+            entity_value=call.entity_value,
+            at=retrieved_at,
+        )
         try:
             answer = self._ask(call, self._credential)
         except ProviderQueryFailed as failed:
@@ -1392,8 +1514,9 @@ class ProviderTool:
             outcome=contract.LIVE_QUERY,
             # `concept/07`: "a cache hit discloses nothing. The indicator was
             # already disclosed when the entry was fetched." This is the call
-            # where it was, so the log says so -- and the disclosure *record*
-            # that this field is not is the send-policy increment's.
+            # where it was, so the log says so. The *record* of it is the row
+            # already on the run's ledger (`helena.disclosure`); this field is
+            # the local log line, and the two are counted apart on purpose.
             disclosed=True,
             records=len(evidence),
             response_version=native.response_version,
@@ -1564,6 +1687,39 @@ class ProviderTool:
                 )
             )
         return tuple(records)
+
+    def _forbidden(self, call: ToolCall) -> str | None:
+        """Why the send policy will not let this call leave, or `None`.
+
+        Two questions and they are different decisions. *May this source be told
+        we saw a domain at all?* is the permission, which is not the descriptor's
+        capability check above. *May the request carry the fields it needs?* is
+        the second, and it is over `helena.disclosure.SENDABLE_FIELDS` -- the
+        field set of the `ToolCall` the adapter is handed, which is the only thing
+        this layer gives it to build a body from. A field the policy withholds is
+        therefore a request that cannot be assembled, and the call is refused
+        rather than sent without it.
+
+        The detail names fields and never values: a refusal is agent-visible, and
+        the indicator is exactly the thing this check decided must not travel.
+        """
+        if not self._permit.permits(call.entity_type):
+            return (
+                f"{self._descriptor.source_id} may be told about "
+                f"{list(self._permit.entity_types)} in this deployment, and a "
+                f"{call.entity_type} is not among them (config/policy.toml, "
+                f"send policy {self._permit.send_policy_version})"
+            )
+        withheld = self._permit.withholds(SENDABLE_FIELDS)
+        if withheld:
+            return (
+                f"the send policy for {self._descriptor.source_id} does not "
+                f"permit sending {list(withheld)}, and a request to it carries "
+                f"{list(SENDABLE_FIELDS)}; a call is refused rather than sent "
+                f"with a field removed (send policy "
+                f"{self._permit.send_policy_version})"
+            )
+        return None
 
     def _refuse(self, reason: str, detail: str) -> Lookup:
         refusal = ToolRefusal(

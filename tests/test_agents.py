@@ -49,6 +49,7 @@ from helena.agents import (
     retry_policy,
 )
 from helena.budgets import RunBudget
+from helena.disclosure import MODEL_INFERENCE, Disclosures, digest, send_policy
 from helena.config import AGENTS, ModelSettings, Secret, Settings
 from helena.contracts.v1 import (
     BUDGET_EXHAUSTED,
@@ -168,7 +169,29 @@ def assessed(the_request: AgentRequest, **kwargs):
     budgets — which is what `RunBudget.of` is for, and what
     `test_a_ledger_built_from_another_request_is_refused` covers when it is not.
     """
-    return assess(the_request, budget=RunBudget.of(the_request), **kwargs)
+    return assess(
+        the_request,
+        budget=RunBudget.of(the_request),
+        disclosures=kwargs.pop("disclosures", None) or disclosures(the_request),
+        **kwargs,
+    )
+
+
+#: The project's own send policy. A model call is not governed by it per field —
+#: what reaches a prompt is the rendering's decision — but every disclosure
+#: records the policy that was in force, so the ledger holds one.
+POLICY = send_policy()
+
+
+def disclosures(the_request: AgentRequest) -> Disclosures:
+    """The run's disclosure ledger. `assess` has no default for it.
+
+    `concept/03`: inference is hosted, so the prompt leaves the monitored network
+    and the disclosure rule applies to a model call as much as to a provider
+    lookup. The ledger is the caller's because a disclosure row has no field on
+    the agent contract to leave on — see `helena.triage.run`.
+    """
+    return Disclosures.of(the_request, policy=POLICY)
 
 
 def environment(**overrides: str) -> dict[str, str]:
@@ -792,6 +815,7 @@ def test_one_ledger_spans_every_model_call_of_one_run():
                 messages=messages(),
                 policy=THREE_ATTEMPTS,
                 budget=budget,
+                disclosures=disclosures(given),
                 propose=TRIAGE_PROPOSABLE,
             )
     assert [sent["max_tokens"] for sent in endpoint.received] == [8000, 7940]
@@ -812,6 +836,7 @@ def test_a_ledger_built_from_another_requests_budgets_is_refused():
                 messages=messages(),
                 policy=THREE_ATTEMPTS,
                 budget=RunBudget.of(other),
+                disclosures=disclosures(request()),
                 propose=TRIAGE_PROPOSABLE,
             )
     assert "RunBudget.of(request)" in str(refused.value)
@@ -995,3 +1020,128 @@ def test_the_configured_triage_model_answers_this_schema():
     assert outcome.root in taxonomy.version("v1").emitter_roots[TRIAGE]
     assert outcome.versions.model_version
     assert outcome.cost.prompt_tokens > 0 and outcome.cost.completion_tokens > 0
+
+
+# --- Hosted inference is egress, so a model call is a disclosure -------------
+#
+# `concept/03-architecture.md`: "Inference in the prototype is hosted, so prompts
+# leave the monitored network and the disclosure rule applies to model calls as
+# much as to intelligence lookups."
+
+
+def test_a_model_call_records_a_disclosure_naming_the_endpoint_and_the_model():
+    """The record `concept/07` asks for, for the channel that is easiest to forget.
+
+    A provider lookup is obviously a disclosure. A prompt is one too, and it
+    carries more: the whole rendered context rather than one indicator.
+    """
+    asked = request()
+    recorded = disclosures(asked)
+    with _Endpoint([answer(VALID)]) as endpoint:
+        client = endpoint.client()
+        outcome = assess(
+            asked,
+            client=client,
+            messages=messages(),
+            policy=THREE_ATTEMPTS,
+            budget=RunBudget.of(asked),
+            disclosures=recorded,
+            propose=TRIAGE_PROPOSABLE,
+        )
+    assert isinstance(outcome, AgentResult)
+    (row,) = recorded.rows
+    assert row.channel == MODEL_INFERENCE
+    assert row.source == client.model_requested
+    assert row.disclosed_to == client.endpoint_host
+    assert "@" not in row.disclosed_to, "nothing that authenticates as anyone"
+    assert row.query.startswith("prompt of 2 message(s)")
+    assert row.disclosed_at.tzinfo is not None
+
+
+def test_the_rendering_does_not_travel_into_the_disclosure_record():
+    """It is already in the request under a recorded `rendering_version`; a second
+    copy here would put internal addresses somewhere nothing else governs."""
+    asked = request()
+    recorded = disclosures(asked)
+    with _Endpoint([answer(VALID)]) as endpoint:
+        assess(
+            asked,
+            client=endpoint.client(),
+            messages=messages(),
+            policy=THREE_ATTEMPTS,
+            budget=RunBudget.of(asked),
+            disclosures=recorded,
+            propose=TRIAGE_PROPOSABLE,
+        )
+    (row,) = recorded.rows
+    assert RENDERED_BODY not in row.model_dump_json()
+    # The digest is over what left, so an audit can still tie the two together.
+    assert row.query_digest == digest(
+        json.dumps(
+            [message.model_dump(mode="json") for message in messages()],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    )
+
+
+def test_a_retry_discloses_the_prompt_a_second_time_and_records_it():
+    """`concept/07` counts retries against the budget; they also send the context
+    again. One row per attempt, or the record would understate what left."""
+    asked = request()
+    recorded = disclosures(asked)
+    with _Endpoint([answer("{"), answer(VALID)]) as endpoint:
+        assess(
+            asked,
+            client=endpoint.client(),
+            messages=messages(),
+            policy=THREE_ATTEMPTS,
+            budget=RunBudget.of(asked),
+            disclosures=recorded,
+            propose=TRIAGE_PROPOSABLE,
+        )
+    assert len(endpoint.received) == 2
+    assert len(recorded.rows) == 2
+    # The second attempt carries the feedback message, so more left the second
+    # time and the two digests differ.
+    assert recorded.rows[0].query_digest != recorded.rows[1].query_digest
+
+
+def test_an_endpoint_that_never_answers_still_disclosed_the_prompt():
+    """Recorded before the call, not after: a request that reached the endpoint and
+    then timed out put the rendering on the wire just as much as one that
+    answered. Recording on success only would under-record exactly the case an
+    operator most needs to see."""
+    asked = request()
+    recorded = disclosures(asked)
+    with _Endpoint([503]) as endpoint:
+        outcome = assess(
+            asked,
+            client=endpoint.client(),
+            messages=messages(),
+            policy=THREE_ATTEMPTS,
+            budget=RunBudget.of(asked),
+            disclosures=recorded,
+            propose=TRIAGE_PROPOSABLE,
+        )
+    assert isinstance(outcome, AgentFailure)
+    assert len(recorded.rows) == 1
+
+
+def test_a_ledger_built_from_another_runs_context_is_refused():
+    """A disclosure recorded against a context nobody can resolve is a record of
+    nothing. The same check the budget ledger gets, for the same reason."""
+    other = Disclosures.of(request(context_id="ctx-other"), policy=POLICY)
+    asked = request()
+    with _Endpoint([answer(VALID)]) as endpoint:
+        with pytest.raises(AgentError, match="ctx-other"):
+            assess(
+                asked,
+                client=endpoint.client(),
+                messages=messages(),
+                policy=THREE_ATTEMPTS,
+                budget=RunBudget.of(asked),
+                disclosures=other,
+                propose=TRIAGE_PROPOSABLE,
+            )
+    assert endpoint.received == [], "nothing was asked, so nothing was disclosed"

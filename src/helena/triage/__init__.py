@@ -72,7 +72,7 @@ from dataclasses import dataclass
 from types import ModuleType
 from typing import Any
 
-from helena import agents, budgets, taxonomy
+from helena import agents, budgets, disclosure, taxonomy
 from helena.contracts import ContractError
 from helena.contracts import v1 as contract
 
@@ -188,6 +188,7 @@ def run(
     client: agents.ModelClient,
     policy: agents.RetryPolicy,
     prompt: TriagePrompt,
+    disclosures: disclosure.Disclosures,
 ) -> contract.AgentResult | contract.AgentFailure:
     """One triage assessment. A verdict or a typed failure, and never a third thing.
 
@@ -196,6 +197,16 @@ def run(
     to remember to catch. What this adds around `assess` is in the module
     docstring; the order below is the order it has to happen in, because the
     truncation gap has to be on the outcome *before* the exchange is checked.
+
+    **The disclosure ledger is the caller's and the budget ledger is not**, and the
+    asymmetry is the contract's rather than a preference. What the budget ledger
+    becomes leaves on the result: `AgentResult.cost` is a contract field, so a
+    ledger built here still reaches whoever stores the assessment. A disclosure
+    row has no contract field to leave on — adding one is a change to the agent
+    contract (`concept/instruction.md` §3) and `concept/07` puts the record on the
+    *assessment* rather than in the agent's answer — so the ledger has to belong to
+    the code that will store it. Triage discloses on every context it runs on,
+    hosted inference being egress (`concept/03`), so this is not a formality.
 
     Raises `TriageError` for the things that are this code's fault — a request
     that is not a triage request, a prompt version that is not the one the
@@ -225,6 +236,7 @@ def run(
         messages=prompt.messages(request, classifications=offered),
         policy=policy,
         budget=budget,
+        disclosures=disclosures,
         propose=prompt.propose,
         vocabularies={CLASSIFICATION: offered},
     )

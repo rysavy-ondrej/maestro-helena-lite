@@ -100,8 +100,21 @@ supply, has no caller yet** — triage binds no tools at all, and the analyst's 
 loop is a later increment. That increment is where the question has to be
 answered, and it will still be the operator's to answer.
 
+## Inference is hosted, so a model call is a disclosure
+
+`concept/03-architecture.md`: *"Inference in the prototype is hosted, so prompts
+leave the monitored network and the disclosure rule applies to model calls as much
+as to intelligence lookups."* So `assess` takes the run's
+`helena.disclosure.Disclosures` ledger on the same terms it takes the budget —
+keyword-only, no default — and records one row **before each attempt**, because a
+retry sends the prompt a second time. The row names the model, the endpoint host
+and the size and digest of what left; it does not copy the prompt, which is the
+rendered context the request already carries under a recorded
+`rendering_version`.
+
 Reads: `helena.config.ModelSettings` (one agent's endpoint, token and model).
-Writes: nothing durable — one structured log record per call, to stderr.
+Writes: nothing durable — one structured log record per call, to stderr, and one
+disclosure row per attempt on the ledger it was handed.
 
 Maturity: experimental — exercised against a local stub endpoint and against the
 real configured endpoint. No assessment has been stored, and no evaluation has
@@ -115,6 +128,7 @@ import tomllib
 import urllib.error
 import urllib.request
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -124,6 +138,7 @@ from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt, Validat
 from helena import observability, taxonomy
 from helena.budgets import BudgetExhausted, RunBudget
 from helena.config import AGENTS, ModelSettings, Settings
+from helena.disclosure import Disclosures
 from helena.contracts import v1 as contract
 from helena.enrichment import ENTITY_TYPES, QUERY_FAILURE_REASONS
 
@@ -723,6 +738,7 @@ def assess(
     messages: Sequence[Message],
     policy: RetryPolicy,
     budget: RunBudget,
+    disclosures: Disclosures,
     propose: Sequence[str] | None = None,
     vocabularies: Mapping[str, Sequence[str]] | None = None,
 ) -> contract.AgentResult | contract.AgentFailure:
@@ -750,6 +766,15 @@ def assess(
     this module's, and steps and live queries are `helena.tools`' — a model call
     spends neither.
 
+    **`disclosures` is the run's disclosure ledger** and has no default for the
+    third version of the same reason. `concept/03`: inference is hosted, so a
+    prompt leaves the monitored network and *"the disclosure rule applies to model
+    calls as much as to intelligence lookups"*. One row per attempt, recorded
+    before the request is made — a retry discloses the rendering a second time,
+    and a call that timed out disclosed it too. It is checked against the request
+    on the way in, because a ledger built from another request's scope would
+    record this run's disclosures against a context nobody can resolve.
+
     **What this does not do**, and what the runner around it owes:
 
     - It does not call `contract.check_exchange`. That is where the truncation
@@ -763,6 +788,20 @@ def assess(
       module cannot look either up, because looking them up means knowing which
       agent is running.
     """
+    if (disclosures.tenant, disclosures.sensor, disclosures.context_id) != (
+        request.tenant,
+        request.sensor,
+        request.context_id,
+    ):
+        raise AgentError(
+            f"the request is {request.tenant}/{request.sensor} context "
+            f"{request.context_id!r} and the disclosure ledger records "
+            f"{disclosures.tenant}/{disclosures.sensor} context "
+            f"{disclosures.context_id!r}. "
+            f"`helena.disclosure.Disclosures.of(request, policy=...)` is what "
+            f"builds one, because a disclosure recorded against another run's "
+            f"context is a record nobody can resolve."
+        )
     if budget.limits != request.budgets:
         raise AgentError(
             f"the request budgets {request.budgets} and the ledger enforces "
@@ -812,9 +851,21 @@ def assess(
             )
 
         attempts += 1
+        attempted = _attempt_messages(messages, validation_error)
+        # Before the call, not after. The prompt is on the wire either way, and a
+        # request that reached the endpoint and then timed out disclosed the
+        # rendering just as much as one that answered. `concept/03`: inference is
+        # hosted, so this is egress and the disclosure rule applies to it.
+        disclosures.record_model_call(
+            model=client.model_requested,
+            disclosed_to=client.endpoint_host,
+            prompt=_prompt_bytes(attempted),
+            messages=len(attempted),
+            at=datetime.now(timezone.utc),
+        )
         try:
             completion = client.complete(
-                _attempt_messages(messages, validation_error),
+                attempted,
                 schema=schema,
                 max_tokens=remaining_tokens,
                 timeout=remaining_seconds,
@@ -888,6 +939,23 @@ def assess(
         f"{validation_error}",
         gap=budget.gap(),
     )
+
+
+def _prompt_bytes(messages: Sequence[Message]) -> bytes:
+    """Exactly what the rendered context amounts to on the wire, for a digest.
+
+    The messages and nothing else: the schema, the model name and the sampling
+    parameter also travel, and they are this project's own rather than anything
+    the monitored network produced. Serialized the way the request body serializes
+    them, so the digest is over the bytes that left and not over a paraphrase of
+    them. The value is never stored — `helena.disclosure.Disclosure` keeps its
+    digest, and the text stays in the rendering the request already carries.
+    """
+    return json.dumps(
+        [message.model_dump(mode="json") for message in messages],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
 
 
 def _proposed(text: str) -> dict[str, Any]:

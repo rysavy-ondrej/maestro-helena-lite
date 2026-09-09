@@ -46,6 +46,7 @@ src/helena/          one package, one module per architecture component
   triage/              the triage runner, and its prompt, one frozen module per version
   tools.py             approved providers as tools: the credential-owning boundary,
                        and the cache-first lookup whose cache is the evidence store
+  disclosure.py        what may be sent to which source, and the record of what was
   orchestration.py     deterministic routing, budgets, persistence, replay
   sink.py              egress of every assessed context to the output topic
   broker.py            the Kafka wire protocol, both ends, and nothing else
@@ -57,7 +58,7 @@ sql/migrations/      the engine's schema: NNNN_name.sql, applied in order
 config/hosts.toml    the fixed host attributes, and triage's only source of them
 config/rendering.toml the size budget the triage rendering is bounded by
 config/agents.toml   how many times one assessment may ask the model
-config/policy.toml   the per-source confidence thresholds escalation reads
+config/policy.toml   the confidence thresholds, the budget values, and the send policy
 tests/               the one pytest suite, mirroring the package
 scripts/             dev-up / dev-down, the pin-and-endpoint check, migrate, replay,
                      and measure_rendering (what a real capture renders to)
@@ -1066,12 +1067,13 @@ classification comes from the declared subset and never from provider text, and
 survives only as an escaped value, which is a test.
 
 **What is not built is named, because a green suite here must not read as a
-finished layer:** no disclosure row is written, nothing paces calls to the
-configured rate, and no live provider has been queried — the layer runs against a stand-in over the committed
-ThreatFox extract, whose *records* are real and whose *envelope* is not, because
-no per-indicator query surface has been confirmed yet. The sharpest gap is the
-send policy: an indicator the model invents is sent as readily as one the context
-observed.
+finished layer:** nothing paces calls to the configured rate, and no live provider
+has been queried — the layer runs against a stand-in over the committed ThreatFox
+extract, whose *records* are real and whose *envelope* is not, because no
+per-indicator query surface has been confirmed yet. The sharpest gap the send
+policy does **not** close is where an indicator came from: one the model invents is
+sent as readily as one the context observed, because nothing joins a tool argument
+to the host context.
 
 ## The lookup cache is the evidence store
 
@@ -1179,3 +1181,52 @@ driven all four dimensions through one real agent run; nothing stores a `Cost`, 
 property that holds; and there is **no monetary figure**, because deriving one
 needs a price table this repository does not have — `concept/06` makes the cost
 derived rather than capped, and the tokens it would be derived from are measured.
+
+## Disclosure: what may be sent, and the record of what was
+
+[`helena.disclosure`](src/helena/disclosure.py), with the argument in
+[`docs/decisions/0027-disclosure-and-the-send-policy.md`](docs/decisions/0027-disclosure-and-the-send-policy.md).
+`concept/07-principles.md` turns one sentence into two obligations: *"what may be
+sent to which source is governed policy, and what was disclosed is recorded on the
+assessment — source, query, cache hit or live, disclosed-to, and when."*
+
+**The send policy is a third table of `config/policy.toml`**, one entry per source
+that may be queried live, declaring the host its requests go to, which entity types
+this deployment permits being disclosed to it, and which fields of the outbound
+request may be populated. An entry is what makes a source queryable at all: a tool
+for a source with no entry cannot be constructed, the way a tool for an
+unregistered source cannot. `threatfox-api.abuse.ch` is in there because it was
+measured — 401 without the `Auth-Key` header, on 2026-09-09, sending no credential
+and no indicator — and the query surface *behind* that host is still task 38's to
+confirm.
+
+**Enforcement refuses; it never trims.** `send_policy_forbids` is a fourth refusal
+reason and deliberately not a variant of `entity_type_not_covered`: one is the
+source's capability and the other is this deployment's permission, and they are
+fixed in different places. The field half holds structurally rather than by
+discipline — the permitted vocabulary *is* the field set of the `ToolCall` the
+adapter is handed, so a policy-forbidden field is a request that cannot be
+assembled, and the tenant and the sensor are in no vocabulary at all. The check
+runs **before the cache read**, so a revoked permission stops the source being
+consulted rather than being answered from records fetched while it was in force.
+
+**A cache hit records nothing, and that is the point.** Caching is a privacy
+control: the indicator was disclosed once, when the entry was fetched. So the
+ledger holds one row per *outbound call*, written before the send — a request that
+timed out disclosed the indicator too — and "cache hit or live" is
+`RetrievalStep.outcome` on the same assessment. The two reconcile, and the suite
+asserts it: provider disclosures equal `RunBudget.live_queries_spent`, with
+`cache_hits` counting the calls that told nobody anything.
+
+**Model inference discloses on the same footing**, because inference is hosted and
+a prompt is egress. `assess` records one row per attempt — a retry sends the
+rendering again — naming the model, the endpoint host, the size of what left and a
+digest of it. The prompt itself is not copied into the record: it is the rendering
+the request already carries under a recorded version, and a second copy would put
+internal addresses somewhere nothing else governs.
+
+**What is not demonstrated:** nothing stores a disclosure row, because nothing
+stores an assessment — the ledger is in-process, which is the standing `Cost` has
+and until the same increment; the policy does not ask where an indicator *came
+from*, so one the model invented is still sent as readily as one the context
+observed; and no live provider has been queried through the layer at all.
