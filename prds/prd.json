@@ -458,7 +458,7 @@
         "Store the response before it is evaluated, cited by stable identifier, so a lookup-dependent assessment can be replayed",
         "Record that a cache hit discloses nothing, making caching a privacy control as much as a cost control"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D5 Tools] Budget guards enforced at the tool boundary",
