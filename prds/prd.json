@@ -444,7 +444,7 @@
         "Add a test asserting no agent-visible object exposes a credential, a URL or an HTTP client",
         "Decide and document whether MCP servers are self-hosted wrappers per provider, and what their failure behaviour looks like as the agent sees it"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D5 Tools] Cache-first lookup where the cache is the evidence store",
