@@ -1,0 +1,69 @@
+# The per-source confidence thresholds that decide when a match escalates
+# independently of triage — policy, not constants in a branch.
+#
+# `concept/02-concepts-and-taxonomy.md`, the source tier table:
+#
+#   Tier A — "May establish `malicious` by itself if scope and freshness are
+#            adequate. **Escalates independently of triage**"
+#   Tier B — "Usually malicious when high confidence. **High-confidence B
+#            escalates independently**"
+#
+# **High confidence** is the only part of that with a number in it, and the
+# number is per source: a confidence of 0.75 does not mean the same thing coming
+# from two feeds that compute it differently. So there is one entry per Tier B
+# source and no default — `helena.policy.thresholds()` fails at startup naming a
+# registered Tier B source this file is silent about, because a threshold nobody
+# chose is the silent configuration default `concept/instruction.md` §6 lists by
+# name, and it would be invisible in exactly the deployment where it mattered.
+#
+# Tier A takes no entry: `concept/02` conditions it on scope and freshness and
+# not on a number, and a threshold here would be this file inventing one. Tiers C
+# and D take none either — `concept/04-the-two-agents.md` gives independent
+# escalation to A and high-confidence B and to nothing else, so a threshold for a
+# C source would be a key nothing reads.
+#
+# ## The two versions, and why there are two
+#
+# `policy_version` says which frozen rule module these thresholds are the
+# thresholds *for*. `helena.policy.v1.escalate` refuses a threshold set recording
+# another one, the way `constrain` refuses a result recording another one: a
+# number that was applied by rules it was not written for is a decision nobody
+# made.
+#
+# `thresholds_version` is this file's own. It is recorded on every escalation,
+# because `src/helena/policy/v1.py` is frozen and this file is not: an assessment
+# that recorded only `policy_version` could not be replayed against the number
+# that actually decided it. Move it whenever a threshold below moves.
+#
+# ## Where 0.80 came from, and what would change it
+#
+# Measured over the snapshot in `data/threatfox/` on 2026-09-09 — 4 095 entries,
+# `confidence_level` divided by 100 by `sql/migrations/0014_feed_mapping_views.sql`:
+#
+# | | `>= 0.75` | `>= 0.80` | `= 1.00` |
+# | --- | --- | --- | --- |
+# | 3 375 `ip:port` | 3 184 (94.3 %) | 930 (27.6 %) | 918 (27.2 %) |
+# | 433 `domain` | 234 (54.0 %) | 230 (53.1 %) | 180 (41.6 %) |
+# | 287 `url` | 280 (97.6 %) | 217 (75.6 %) | 202 (70.4 %) |
+#
+# The distribution is bimodal and 0.75 carries two thirds of the address side on
+# its own (2 254 of 3 375). A threshold at or below it admits 94 % of every
+# ThreatFox hit, which makes the threshold decorative and puts the whole of the
+# over-alerting risk on the traffic test. 0.80 is the first value above that
+# mode: it admits 80, 90, 99 and 100 and excludes the bulk value.
+#
+# **It is a candidate, not a decision.** `concept/08-open-questions.md` lists
+# "the per-source confidence thresholds that decide when a Tier B match escalates
+# independently" as open and blocking, and what settles it is an escalation rate
+# measured against labelled outcomes — which does not exist, for the reason
+# nothing else in this repository is calibrated either. What is demonstrated is
+# that the number is loaded from here, recorded on the decision it made, and
+# changeable without touching a frozen rule.
+
+policy_version = "v1"
+thresholds_version = "2026-09-09"
+
+[thresholds]
+# ThreatFox. Tier B in `concept/05-threat-intelligence.md`'s catalogue: "explicit
+# provider verdict or high-quality curated listing without full direct evidence".
+threatfox = 0.80

@@ -54,30 +54,62 @@ recorded as a `Gap` on the decision rather than quietly approximated:
   `SHARED_INFRASTRUCTURE_UNDETERMINED`, recorded on every verdict the absence of
   the test let through.
 
+## The second rule: what escalates without asking the model
+
+`escalate` is `concept/04-the-two-agents.md`'s other independent input to the
+analyst, and it is in this module because it applies the same seven sentences:
+
+> The enrichment evidence escalates on its own — **a Tier A, or a
+> high-confidence Tier B, malicious classification whose traffic characteristics
+> support it** — regardless of the triage verdict.
+
+Three conditions, and each is a clause of that sentence:
+
+| Clause | Test |
+| --- | --- |
+| *a Tier A, or a high-confidence Tier B* | `ESCALATING_TIERS`, and `Thresholds.for_source` for the tier the note qualifies |
+| *malicious classification* | the claim's own evidence-level root |
+| *whose traffic characteristics support it* | the composition rule above, per claim, through `_supported_root` |
+
+It takes no `AgentResult` and no `Decision`. `concept/instruction.md` §2: *"a
+`normal` from a model may not suppress a high-confidence match"*, and the
+strongest form of that is an evaluator with nowhere for a verdict to arrive.
+
+**Every malicious claim in the context becomes a `Candidate`**, escalating or
+not, with the rules that held it back named. A record of only what escalated
+would answer "why did this run the analyst" and not "why did this one not", and
+the second question is the one an unexplained quiet stream raises.
+
 Maturity: experimental — exercised by `tests/test_policy.py`. Nothing calls this
 in a running pipeline, no decision has been stored, and no rule's threshold has
 been calibrated against a labelled outcome, because there is no labelled corpus
-(`concept/08-open-questions.md`). What is demonstrated is that each rule refuses
-what the note says it must refuse.
+(`concept/08-open-questions.md`) — which is also why `config/policy.toml`'s 0.80
+is a candidate rather than a settled number. What is demonstrated is that each
+rule refuses what the note says it must refuse.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt
 
 from helena import taxonomy
 from helena.contracts import v1 as contract
-from helena.policy import PolicyError, PolicyVersion, Support
+from helena.enrichment import Claim, source_diversity
+from helena.policy import PolicyError, PolicyVersion, Support, Thresholds
 
 __all__ = [
     "ADDRESS",
     "ADDRESS_PORT_SCOPE",
+    "BELOW_SOURCE_THRESHOLD",
     "CONSTRAINED",
     "CONTACT_IS_NOT_COMPROMISE",
     "DOMAIN_SCOPE_UNTESTABLE",
+    "ESCALATING_TIERS",
+    "ESCALATION_RULES",
     "FLOW_DESTINATION",
+    "FRESHNESS_ADEQUACY_UNTESTED",
     "GAP_DETAIL",
     "GAP_KINDS",
     "HOST_STATE_PATHS",
@@ -86,6 +118,7 @@ __all__ = [
     "NON_ADVERSE",
     "NORMAL",
     "NORMAL_BY_ABSENCE",
+    "NO_CONFIDENCE_REPORTED",
     "OUTCOMES",
     "PERMITTED",
     "POLICY",
@@ -96,13 +129,20 @@ __all__ = [
     "SEVERITY",
     "SHARED_INFRASTRUCTURE",
     "SHARED_INFRASTRUCTURE_UNDETERMINED",
+    "STATUS_OK",
     "SUSPICIOUS",
+    "TIER_A",
+    "TIER_B",
+    "TIER_DOES_NOT_ESCALATE",
     "TRAFFIC_NOT_BIDIRECTIONAL",
     "UNSUPPORTED_SEVERITY",
+    "Candidate",
     "Decision",
+    "Escalation",
     "Finding",
     "Gap",
     "constrain",
+    "escalate",
 ]
 
 #: This module's own version. `constrain` refuses a result whose
@@ -177,7 +217,21 @@ RULES = (
 # that attaching one of these to an `AgentResult` needs a contract decision.
 DOMAIN_SCOPE_UNTESTABLE = "domain_scope_untestable"
 SHARED_INFRASTRUCTURE_UNDETERMINED = "shared_infrastructure_undetermined"
-GAP_KINDS = (DOMAIN_SCOPE_UNTESTABLE, SHARED_INFRASTRUCTURE_UNDETERMINED)
+#: The third, and it belongs to `escalate`. `concept/02` lets a tier A source
+#: establish `malicious` by itself *"if scope and freshness are adequate"*. Scope
+#: is tested -- that is the whole composition rule -- and **adequate** freshness
+#: is not: what this version has is `status`, which says the snapshot is older
+#: than the feed's own refresh interval, and no rule for what that costs. It does
+#: not suppress, because `concept/02` normalization rule 3 is explicit that
+#: *"removal from a feed is not exoneration"* and that delisting *may* reduce
+#: confidence -- reducing it by an amount nobody has measured would be inventing
+#: the threshold this gap exists to say is missing.
+FRESHNESS_ADEQUACY_UNTESTED = "freshness_adequacy_untested"
+GAP_KINDS = (
+    DOMAIN_SCOPE_UNTESTABLE,
+    SHARED_INFRASTRUCTURE_UNDETERMINED,
+    FRESHNESS_ADEQUACY_UNTESTED,
+)
 
 #: What each gap means, in one place, so the sentence a decision records is the
 #: frozen one rather than whichever wording the rule that raised it used.
@@ -196,6 +250,14 @@ GAP_DETAIL = {
         "cloud tenant and a shared subdomain are external facts no source in this "
         "deployment supplies, so the test was not run over the support that let "
         "this verdict stand (concept/02)."
+    ),
+    FRESHNESS_ADEQUACY_UNTESTED: (
+        "a tier A source may establish malicious by itself where scope and "
+        "freshness are adequate, and this version tests scope only. A claim here "
+        "matched a snapshot the feed has already replaced, which is recorded as "
+        "its status and does not suppress it: removal from a feed is not "
+        "exoneration, and how much a delisting should reduce confidence is a "
+        "number nobody has measured (concept/02)."
     ),
 }
 
@@ -243,6 +305,50 @@ HOST_STATE_PATHS = (
     "malicious.hostile",
     "malicious.spam",
     "malicious.exfiltration",
+)
+
+# --- The escalation vocabulary -----------------------------------------------
+#
+# `concept/02`'s tier table, as the two letters this version reads. Copied rather
+# than imported from `helena.enrichment.Tier` for the reason `FLOW_DESTINATION`
+# is copied -- a frozen version may not depend on a constant another package is
+# free to change -- and `tests/test_policy.py` asserts the two sets equal.
+TIER_A = "A"
+TIER_B = "B"
+
+#: The enrichment status that means the snapshot the claim matched was still the
+#: one the feed publishes. A second copy of `helena.enrichment.OK`, copied for the
+#: reason `FLOW_DESTINATION` is and asserted equal by `tests/test_policy.py`.
+#: Anything else is a claim whose freshness this version records and does not
+#: weigh — `FRESHNESS_ADEQUACY_UNTESTED`.
+STATUS_OK = "ok"
+
+#: The tiers `concept/04` lets escalate at all: *"a Tier A, or a high-confidence
+#: Tier B, malicious classification"*. C is "normally `suspicious`" and D is
+#: "context only", and neither reaches the question.
+ESCALATING_TIERS = (TIER_A, TIER_B)
+
+#: The two reasons a claim never reaches the traffic test. Named beside the
+#: composition rules because an escalation record names both kinds in one list,
+#: and a reader asking why a hit did not escalate should not have to know which
+#: half of the policy refused it.
+TIER_DOES_NOT_ESCALATE = "the_tier_does_not_escalate_independently"
+BELOW_SOURCE_THRESHOLD = "below_the_source_s_confidence_threshold"
+NO_CONFIDENCE_REPORTED = "no_confidence_reported_where_the_tier_needs_one"
+
+#: Every rule an escalation can name, in the order they are applied. The first
+#: three are this rule's own and the rest are the composition rule's, applied to
+#: one claim rather than to a verdict -- the same rules, because a hit whose
+#: traffic does not support a `malicious` verdict does not support a `malicious`
+#: escalation either, and two copies under one `policy_version` would drift.
+ESCALATION_RULES = (
+    TIER_DOES_NOT_ESCALATE,
+    NO_CONFIDENCE_REPORTED,
+    BELOW_SOURCE_THRESHOLD,
+    TRAFFIC_NOT_BIDIRECTIONAL,
+    PORT_NOT_REACHED,
+    NAME_CARRIES_NO_TRAFFIC,
+    SHARED_INFRASTRUCTURE,
 )
 
 #: The port that makes an address a resolver for this host. IANA's, and observed
@@ -783,4 +889,381 @@ _RULE_FUNCTIONS = (
 )
 
 
-POLICY = PolicyVersion(version=POLICY_VERSION, constrain=constrain)
+# --- Deterministic escalation ------------------------------------------------
+#
+# `concept/04`'s second independent input, and `concept/03`'s routing `if`:
+#
+#     if evidence escalates independently (tier A, or tier B above threshold):
+#         run_analyst(trigger="deterministic_signal")   # independent of triage
+#
+# The record below is the left-hand side of that line, computed from the store.
+
+
+class Candidate(BaseModel):
+    """One malicious claim in the context, and what the policy made of it.
+
+    Every malicious claim becomes one of these, escalating or not. A record of
+    only the escalating ones would answer *why did this run the analyst* and not
+    *why did this one not*, and the second question is the one an unexplained
+    quiet stream raises — the failure mode `concept/07-principles.md` calls
+    "triage returning `normal` suppresses a Tier A match" looks exactly like a
+    context with no candidates until somebody can see the candidates.
+    """
+
+    model_config = _POLICY_MODEL_CONFIG
+
+    #: What a caller cites this escalation by. `concept/04` requires an evidence
+    #: identifier on every enriched value, and this is the one the claim carries.
+    evidence_id: str
+    entity_type: str
+    entity_value: str
+    source_id: str
+    source_tier: str
+    #: The source's own number, `None` where it reported none. Not a routing
+    #: constant (`concept/04`) — it is compared against configured policy and the
+    #: comparison is recorded.
+    confidence: float | None
+    #: `ok` or `stale`. Carried because the freshness clause is untested here and
+    #: a gap that could not name the claim it was about would be a footnote.
+    status: str
+    #: The strongest context root this claim's traffic and scope support, by the
+    #: composition rule above: `malicious`, `suspicious`, or `None` for evidence
+    #: that transfers nothing. Never a path — the evidence taxonomy is roots-only
+    #: and naming a child would be inventing the reason.
+    supports: str | None
+    escalates: bool
+    #: Every rule that held it back, in `ESCALATION_RULES` order. Empty exactly
+    #: where it escalates.
+    rules: tuple[str, ...]
+    #: How many independent sources make a malicious claim about this entity,
+    #: counted by `helena.enrichment.source_diversity` — so an aggregator's
+    #: republications are one vote and one source's forty rows are one vote.
+    independent_sources: PositiveInt
+    detail: str
+    gap: str = ""
+
+    def model_post_init(self, _context: object) -> None:
+        outside = [name for name in self.rules if name not in ESCALATION_RULES]
+        if outside:
+            raise ValueError(f"{outside} are not among {list(ESCALATION_RULES)}")
+        if list(self.rules) != sorted(self.rules, key=ESCALATION_RULES.index):
+            raise ValueError(
+                f"{list(self.rules)} is not in ESCALATION_RULES order; the order "
+                f"is what a reader sees them in and a decision that recorded them "
+                f"in another one would read as a different sequence of tests"
+            )
+        if self.escalates != (not self.rules):
+            raise ValueError(
+                f"{self.evidence_id} escalates={self.escalates} with rules "
+                f"{list(self.rules)}. A claim escalates exactly where no rule held "
+                f"it back; a candidate that said one and did the other could not "
+                f"be argued with."
+            )
+        if self.supports is not None and self.supports not in SEVERITY:
+            raise ValueError(
+                f"a claim supports at most a root on the severity scale "
+                f"{sorted(SEVERITY)}, and this one supports {self.supports!r}"
+            )
+        if self.escalates and self.supports != MALICIOUS:
+            raise ValueError(
+                f"{self.evidence_id} escalates and its traffic supports "
+                f"{self.supports!r}. `concept/04` escalates a malicious "
+                f"classification *whose traffic characteristics support it*."
+            )
+        if not self.detail.strip():
+            raise ValueError(f"{self.evidence_id}: a candidate with no detail says nothing")
+        if self.gap and self.gap not in GAP_KINDS:
+            raise ValueError(f"gap kind {self.gap!r} is not one of {list(GAP_KINDS)}")
+
+
+class Escalation(BaseModel):
+    """Whether the evidence escalates on its own, and which evidence did it.
+
+    Stored beside an assessment and computed whether or not there is one:
+    `concept/04` makes this input independent of whether triage ran at all, so an
+    escalation for a context whose triage produced a typed failure is the normal
+    case and not an edge one.
+    """
+
+    model_config = _POLICY_MODEL_CONFIG
+
+    #: The rules that decided. `POLICY_VERSION`, always.
+    policy_version: str
+    #: The revision of `config/policy.toml` whose numbers decided. `v1` is frozen
+    #: and the file is not, so an escalation recording only the policy version
+    #: could not be replayed against the threshold that actually applied.
+    thresholds_version: str
+    escalates: bool
+    #: The evidence ids that caused it, in the order the claims were read. Empty
+    #: exactly where nothing escalated.
+    evidence_ids: tuple[str, ...]
+    #: Every claim that was read at all, whether or not it was malicious. So
+    #: "nothing escalated" and "there was nothing to read" are different rows.
+    claims_read: NonNegativeInt
+    candidates: tuple[Candidate, ...] = ()
+    gaps: tuple[Gap, ...] = ()
+
+    def model_post_init(self, _context: object) -> None:
+        if self.policy_version != POLICY_VERSION:
+            raise ValueError(
+                f"this is policy {POLICY_VERSION!r} and the escalation records "
+                f"{self.policy_version!r}"
+            )
+        if not self.thresholds_version.strip():
+            raise ValueError(
+                "an escalation records which threshold revision decided it; "
+                "without one the number that escalated is not recoverable"
+            )
+        caused = tuple(
+            candidate.evidence_id
+            for candidate in self.candidates
+            if candidate.escalates
+        )
+        if self.evidence_ids != caused:
+            raise ValueError(
+                f"the escalation names {list(self.evidence_ids)} and its candidates "
+                f"escalate {list(caused)}. The identifiers are what a caller cites, "
+                f"so a list that is not the escalating candidates cites evidence "
+                f"that did not do it."
+            )
+        if self.escalates != bool(self.evidence_ids):
+            raise ValueError(
+                f"escalates={self.escalates} with {len(self.evidence_ids)} "
+                f"evidence ids. An escalation nobody can attribute is a routing "
+                f"decision that cannot be argued with."
+            )
+        if self.claims_read < len(self.candidates):
+            raise ValueError(
+                f"{len(self.candidates)} candidates out of {self.claims_read} "
+                f"claims read; a candidate is one of the claims"
+            )
+
+
+def escalate(supports: Sequence[Support], thresholds: Thresholds) -> Escalation:
+    """What the evidence escalates on its own, regardless of any triage verdict.
+
+    `concept/04`: *"The enrichment evidence escalates on its own — a Tier A, or a
+    high-confidence Tier B, malicious classification whose traffic characteristics
+    support it — regardless of the triage verdict. An LLM returning `normal` may
+    not bury a high-confidence match."*
+
+    `supports` is every claim the context holds, from
+    `helena.policy.supports_in`. **There is no parameter a verdict could arrive
+    through, and that is the invariant rather than an omission** — an evaluator
+    that took the triage result "to skip work when triage already said `normal`"
+    would be the suppression `concept/instruction.md` §2 forbids, written as an
+    optimisation.
+
+    Raises `PolicyError` for the one thing that is the caller's fault: a threshold
+    set written for another policy version. Applying it here would escalate on a
+    number chosen for rules it was not written for.
+    """
+    if thresholds.policy_version != POLICY_VERSION:
+        raise PolicyError(
+            f"this is policy {POLICY_VERSION!r} and the thresholds record "
+            f"policy_version {thresholds.policy_version!r}. A threshold is the "
+            f"number one version's rules read, so applying it here would escalate "
+            f"on a value chosen for rules that are not these."
+        )
+    adverse = tuple(
+        support for support in supports if _root(support.classification) == MALICIOUS
+    )
+    diversity = _independent_sources(adverse)
+    candidates = tuple(
+        _candidate(support, adverse, thresholds, diversity) for support in adverse
+    )
+    caused = tuple(
+        candidate.evidence_id for candidate in candidates if candidate.escalates
+    )
+    return Escalation(
+        policy_version=POLICY_VERSION,
+        thresholds_version=thresholds.thresholds_version,
+        escalates=bool(caused),
+        evidence_ids=caused,
+        claims_read=len(supports),
+        candidates=candidates,
+        gaps=_escalation_gaps(bool(caused), candidates),
+    )
+
+
+def _root(classification: str) -> str:
+    return classification.split(".")[0]
+
+
+def _independent_sources(adverse: Sequence[Support]) -> dict[tuple[str, str], int]:
+    """How many independent sources call each entity malicious.
+
+    `concept/02` normalization rule 2, and it is counted by
+    `helena.enrichment.source_diversity` rather than re-implemented here: *"Do not
+    double-count correlated sources. Evidence copied through an aggregator is not
+    an independent vote; retain the origin and count source diversity. **An
+    aggregator is never counted as many votes.**"*
+
+    So the count is over who the evidence is *from*, and one source's forty rows
+    about one address are one. **Nothing in this version raises a threshold on
+    it**: `concept/04` conditions independent escalation on the tier and the
+    source's own confidence and on nothing else, and a corroboration rule that
+    lifted a below-threshold claim would be inventing a requirement
+    (`concept/instruction.md` §4). The number is recorded because a count that is
+    right is what stops a later increment reading rows as votes.
+    """
+    grouped: dict[tuple[str, str], list[Claim]] = {}
+    for support in adverse:
+        key = (support.entity_type, support.entity_value)
+        grouped.setdefault(key, []).append(
+            Claim(
+                source_id=support.source_id,
+                entity_type=support.entity_type,
+                entity_value=support.entity_value,
+                path=support.classification,
+            )
+        )
+    return {key: source_diversity(claims) for key, claims in grouped.items()}
+
+
+def _supported_root(
+    support: Support, adverse: Sequence[Support]
+) -> tuple[str | None, tuple[str, ...], str, str]:
+    """The composition rule, applied to one claim: root, rules, detail, gap.
+
+    The same four predicates `constrain` applies to a verdict, in the same order
+    and reading the same helpers — *"a hit whose traffic does not support it does
+    not escalate as `malicious`"* is the same sentence as *"the same hit with one
+    failed connection and no bytes returned does not"*, asked of one claim rather
+    than of a citation set.
+
+    Corroboration for the shared-infrastructure case is read across the whole
+    context, which is this rule's analogue of `constrain` reading it across the
+    citation set: a malicious claim about something that is *not* shared
+    infrastructure is what stops a resolver hit transferring nothing.
+    """
+    if support.entity_type != ADDRESS:
+        return (
+            SUSPICIOUS,
+            (NAME_CARRIES_NO_TRAFFIC,),
+            f"a {support.entity_type} carries the traffic of the flows that "
+            f"mentioned it and not of the connection it names; what is observed "
+            f"of it is {list(support.observed_layers)}, which is weaker than "
+            f"bytes and not nothing",
+            DOMAIN_SCOPE_UNTESTABLE,
+        )
+    corroborated = any(
+        other.evidence_id != support.evidence_id
+        and not _is_shared_infrastructure(other)
+        for other in adverse
+    )
+    if _is_shared_infrastructure(support) and not corroborated:
+        return (
+            None,
+            (SHARED_INFRASTRUCTURE,),
+            f"this host used {support.entity_value} as a resolver (port "
+            f"{RESOLVER_PORT}) and nothing else corroborates the claim; a "
+            f"malicious indicator on shared infrastructure transfers nothing to "
+            f"the host without corroboration",
+            "",
+        )
+    if not _contacted_with_traffic_both_ways(support):
+        return (
+            SUSPICIOUS,
+            (TRAFFIC_NOT_BIDIRECTIONAL,),
+            f"the host did not exchange bytes in both directions with "
+            f"{support.entity_value} — sent {support.observed_bytes_sent}, "
+            f"received {support.observed_bytes_received}, observed by "
+            f"{list(support.observed_layers)}. That is suspicious at most, and "
+            f"possibly a host that resolved a name and gave up",
+            "",
+        )
+    if support.port_matched is False:
+        return (
+            SUSPICIOUS,
+            (PORT_NOT_REACHED,),
+            f"the claim is scoped to {support.scope_value}, a port this host did "
+            f"not reach. The traffic is real and it is not the traffic the claim "
+            f"is about",
+            "",
+        )
+    return (
+        MALICIOUS,
+        (),
+        f"the host exchanged bytes in both directions with {support.entity_value} "
+        f"and the claim's scope {support.scope_value!r} is the traffic that "
+        f"happened",
+        "",
+    )
+
+
+def _candidate(
+    support: Support,
+    adverse: Sequence[Support],
+    thresholds: Thresholds,
+    diversity: dict[tuple[str, str], int],
+) -> Candidate:
+    """One malicious claim, weighed against the tier, the threshold and the traffic."""
+    supported, rules, detail, gap = _supported_root(support, adverse)
+    tier_rules: tuple[str, ...] = ()
+    if support.source_tier not in ESCALATING_TIERS:
+        tier_rules = (TIER_DOES_NOT_ESCALATE,)
+        detail = (
+            f"tier {support.source_tier} does not escalate independently; "
+            f"{list(ESCALATING_TIERS)} do. " + detail
+        )
+    elif support.source_tier == TIER_B:
+        # `concept/02`: tier B is "usually malicious **when high confidence**".
+        # What counts as high is per source and comes from `config/policy.toml`,
+        # never from a constant here -- and a source that reported no confidence
+        # at all has not reached the threshold rather than having cleared it.
+        threshold = thresholds.for_source(support.source_id)
+        if support.confidence is None:
+            tier_rules = (NO_CONFIDENCE_REPORTED,)
+            detail = (
+                f"{support.source_id} is tier {TIER_B} and reported no confidence, "
+                f"and tier {TIER_B} escalates only when confidence is high "
+                f"(>= {threshold}). " + detail
+            )
+        elif support.confidence < threshold:
+            tier_rules = (BELOW_SOURCE_THRESHOLD,)
+            detail = (
+                f"{support.source_id} reported {support.confidence} and its "
+                f"configured threshold is {threshold}. " + detail
+            )
+    combined = tuple(
+        name for name in ESCALATION_RULES if name in set(tier_rules) | set(rules)
+    )
+    return Candidate(
+        evidence_id=support.evidence_id,
+        entity_type=support.entity_type,
+        entity_value=support.entity_value,
+        source_id=support.source_id,
+        source_tier=support.source_tier,
+        confidence=support.confidence,
+        status=support.status,
+        supports=supported,
+        escalates=not combined,
+        rules=combined,
+        independent_sources=diversity[(support.entity_type, support.entity_value)],
+        detail=_bounded(detail),
+        gap=gap or (FRESHNESS_ADEQUACY_UNTESTED if support.status != STATUS_OK else ""),
+    )
+
+
+def _escalation_gaps(
+    escalates: bool, candidates: tuple[Candidate, ...]
+) -> tuple[Gap, ...]:
+    """The tests that did not run, recorded once each and in `GAP_KINDS` order.
+
+    The shared-infrastructure one is recorded on an escalation that *happened*,
+    for the reason `_gaps` records it on a verdict that stood: three of the note's
+    four cases were never tested, and an escalation that hid that would read as a
+    tested CDN rule.
+    """
+    kinds = {candidate.gap for candidate in candidates if candidate.gap}
+    if escalates:
+        kinds.add(SHARED_INFRASTRUCTURE_UNDETERMINED)
+    return tuple(
+        Gap(kind=kind, detail=GAP_DETAIL[kind]) for kind in GAP_KINDS if kind in kinds
+    )
+
+
+POLICY = PolicyVersion(
+    version=POLICY_VERSION, constrain=constrain, escalate=escalate
+)

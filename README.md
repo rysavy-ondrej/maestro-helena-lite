@@ -56,6 +56,7 @@ sql/migrations/      the engine's schema: NNNN_name.sql, applied in order
 config/hosts.toml    the fixed host attributes, and triage's only source of them
 config/rendering.toml the size budget the triage rendering is bounded by
 config/agents.toml   how many times one assessment may ask the model
+config/policy.toml   the per-source confidence thresholds escalation reads
 tests/               the one pytest suite, mirroring the package
 scripts/             dev-up / dev-down, the pin-and-endpoint check, migrate, replay,
                      and measure_rendering (what a real capture renders to)
@@ -895,9 +896,9 @@ typed failure rather than a verdict with an unresolvable citation.
 reaches the analyst and returns `False` for every typed failure, by type rather
 than by reading a field. `concept/04` says failing closed is safe *because*
 deterministic escalation is independent of whether triage ran at all — and that
-evaluator does not exist yet, so until it does a context whose model call failed
-is dropped and nothing else looks at it. That is the one thing this stage leaves
-genuinely unsafe, and it is written down rather than left to a green suite.
+evaluator is now `helena.policy.v1.escalate`, below, so a context whose model
+call failed is still weighed by the evidence. Until task 32 and this one landed,
+it was not, and that was the one thing this stage shipped genuinely unsafe.
 
 ## The composition rule: scope before severity
 
@@ -952,3 +953,58 @@ observable from the ports the host actually reached. They are the policy's own
 gap kinds and not the contract's seven: none of those names a test that does not
 apply, and spelling `missing` here would collapse "the lookup did not happen"
 into "the rule could not be run".
+
+## Deterministic escalation: what runs the analyst without asking the model
+
+`helena.policy.v1.escalate` is `concept/04`'s **second** independent input, and
+the one that matters: *"the enrichment evidence escalates on its own — a Tier A,
+or a high-confidence Tier B, malicious classification whose traffic
+characteristics support it — regardless of the triage verdict. An LLM returning
+`normal` may not bury a high-confidence match."*
+[`docs/decisions/0023-deterministic-escalation.md`](docs/decisions/0023-deterministic-escalation.md)
+carries the argument.
+
+**It takes no result, and the test is over the signature and the AST.** There is
+no parameter a verdict could arrive through, and nothing the rule reaches may
+name `AgentResult`, `AgentFailure`, `Decision` or `constrain`. The way this
+invariant gets broken is not a rule that reads a verdict on purpose — it is a
+later increment passing the triage result in so the evaluator can skip work when
+triage already said `normal`, which looks like an optimisation and is the
+suppression. Its input comes from `supports_in`, a second read beside
+`supports_for`: one asks what the store holds, the other what a model chose to
+cite.
+
+**The three clauses are three tests.** The tier (`ESCALATING_TIERS`); the claim's
+own `malicious` root; and the traffic, which is **the same composition rule**
+above applied to one claim rather than to a citation set — a hit whose traffic
+does not support it does not escalate as `malicious`, decided by the same
+predicates so that one `policy_version` cannot hold two opinions about one claim.
+Every malicious claim becomes a `Candidate` whether or not it escalated, with
+every rule that held it back named, because *why did this one not escalate* is
+the question a quiet stream raises.
+
+**The thresholds are `config/policy.toml`, and the file carries two versions.**
+`policy_version` says which frozen rules the numbers are for — `escalate` refuses
+a set written for another — and `thresholds_version` is the file's own, recorded
+on every escalation, because `v1.py` is frozen and the file is not. The loader
+fails at startup naming a registered Tier B source the file is silent about, and
+refuses a threshold for a source no tier reads one for. `concept/08` lists these
+thresholds as open and blocking; 0.80 is a measured position in ThreatFox's own
+bimodal distribution (0.75 alone carries two thirds of the address side, so a
+threshold at or below it admits 94 % of hits) and is **a candidate, not a
+decision**.
+
+**An aggregator is never many votes.** `independent_sources` is counted by
+`helena.enrichment.source_diversity`, so one source's forty rows about one
+address are one. No `v1` rule raises anything on that count — `concept/04`
+conditions escalation on tier and confidence and on nothing else — so its job is
+prohibitive: it is what stops a below-threshold claim being lifted by the number
+of rows behind it.
+
+**Two limits are recorded rather than fixed.** A claim from a superseded snapshot
+still escalates and records `freshness_adequacy_untested`, because *removal from
+a feed is not exoneration* and how much a delisting should cost is unmeasured.
+And **domain hits do not escalate at all**: the scope test works on addresses and
+not on names, which `concept/02` calls the place that bites precisely where it
+matters most. Both are passing tests over a real capture and a real feed load,
+not paragraphs.

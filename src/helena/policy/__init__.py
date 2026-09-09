@@ -34,12 +34,30 @@ The `Decision` a version's `constrain` returns is a **second** typed record
 beside it, saying what that answer is permitted to be read as. Nothing here
 mutates a result, and nothing here produces a verdict of its own.
 
-**It is not the escalation evaluator.** `concept/04`'s second, independent input
-to the analyst — a Tier A or high-confidence Tier B classification escalating
-*regardless of the triage verdict* — reads the store rather than a model's
-answer, and is deliberately not this. It is task 33's, it will read the same
-`Support` records, and it applies this rule so that a hit whose traffic does not
-support it does not escalate as `malicious`.
+## The other rule in here, and why it takes no result at all
+
+`concept/04`'s second, independent input to the analyst — a Tier A or
+high-confidence Tier B classification escalating *regardless of the triage
+verdict* — is `vN.escalate`, and it is in this package because it is the same
+frozen policy version deciding: the rule that says a hit whose traffic does not
+support it does not escalate as `malicious` **is** the composition rule, and two
+copies of it under one `policy_version` is the drift the version rules exist to
+prevent.
+
+Everything else about it is the opposite of `constrain`:
+
+| | `constrain` | `escalate` |
+| --- | --- | --- |
+| Input | one `AgentResult` and the evidence it cited | every claim the context holds |
+| Built by | `supports_for` — resolves citations | `supports_in` — reads the projection |
+| Reads a model's answer | yes, it is *about* one | **no, and that is the invariant** |
+
+`concept/instruction.md` §2: *"Deterministic escalation is independent of triage.
+A `normal` from a model may not suppress a high-confidence match."* So `escalate`
+has no parameter a verdict could arrive through, and `tests/test_policy.py`
+asserts that over its signature rather than trusting the code to keep it — the
+failure this rule prevents is a later increment "helpfully" passing the triage
+result in so the evaluator can skip work when triage already said `normal`.
 
 ## What is machinery here and what is frozen in a version
 
@@ -48,15 +66,21 @@ one of the nine dimensions `helena.versions.VersionSet` records, so *the rule
 that constrained an assessment* has to be reconstructible from the identifier a
 stored row holds — and a revision is `v2` beside `v1`, never an edit.
 
-- **Here**: `Support` — one cited claim with the per-entity traffic beside it —
-  and `supports_for`, which is the read that fuses a result's citations with a
-  `helena.rendering.ContextProjection`. That is *how the input is assembled*, and
-  it moves when the store's shape moves.
+- **Here**: `Support` — one claim with the per-entity traffic beside it — and the
+  two reads that assemble them, `supports_for` (a result's citations) and
+  `supports_in` (every claim in a projection). Plus `Thresholds` and the loader
+  that reads `config/policy.toml`, because *which sources need a number* moves
+  with the registry and the file is not frozen. That is all *how the input is
+  assembled*, and it moves when the store's shape moves.
 - **In `vN.py`**: the rules themselves, their names, the severity ordering, the
   paths that assert something about the host rather than about a contacted
-  indicator, and the `Decision` a run records. Those are *what the rule is*, and
-  a stored assessment recording `policy_version = "v1"` is entitled to have them
-  stay exactly as they were.
+  indicator, what a threshold *does*, and the `Decision` and `Escalation` a run
+  records. Those are *what the rule is*, and a stored assessment recording
+  `policy_version = "v1"` is entitled to have them stay exactly as they were.
+
+The threshold **values** are in neither: they are configuration, they are
+recorded on the escalation that applied them (`thresholds_version`), and
+`config/policy.toml` carries the argument for the number that is in it.
 
 `tests/test_package_layout.py` enforces that nothing else lives in the package.
 
@@ -70,39 +94,69 @@ together — a policy given only the classification could not distinguish a C2 h
 the host exchanged data with from one it failed to connect to, which is the whole
 of the rule.
 
-Reads: nothing from the store — it is given a projection that was already read.
-Writes: nothing.
+Reads: nothing from the store — it is given a projection that was already read —
+and `config/policy.toml` for the thresholds. Writes: nothing.
 
 Maturity: experimental — exercised by `tests/test_policy.py`, table-driven, one
-case per rule, plus a case built from a real capture and a real ThreatFox load in
-a real engine. **No assessment has been constrained in a running pipeline**:
-nothing calls this yet, no decision is stored, and whether the rules produce the
-right answer on real traffic is unmeasured for the reason everything else here is
-— there is no labelled corpus (`concept/08-open-questions.md`). What is
-demonstrated is that each sentence of `concept/02`'s composition rule refuses
-what it says it refuses.
+case per rule, plus cases built from a real capture and a real ThreatFox load in
+a real engine. **Nothing has been constrained or escalated in a running
+pipeline**: nothing calls this yet, no decision is stored, and whether the rules
+produce the right answer on real traffic is unmeasured for the reason everything
+else here is — there is no labelled corpus
+(`concept/08-open-questions.md`), and the same note lists the confidence
+threshold itself as an open question. What is demonstrated is that each sentence
+of `concept/02`'s composition rule refuses what it says it refuses, and that
+escalation is computed from the store with no route for a triage answer to reach
+it.
 """
 
 from __future__ import annotations
 
+import tomllib
 from dataclasses import dataclass
+from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, NonNegativeInt
 
 from helena.contracts import v1 as contract
-from helena.enrichment import ENRICHMENT_STATUSES, ENTITY_TYPES
+from helena.enrichment import ENRICHMENT_STATUSES, ENTITY_TYPES, SOURCES, Tier
 from helena.rendering import ContextProjection
 
 __all__ = [
+    "POLICY_FILE",
     "PolicyError",
     "PolicyVersion",
     "Support",
+    "THRESHOLD_TIER",
+    "Thresholds",
     "UnknownVersion",
     "supports_for",
+    "supports_in",
+    "thresholds",
     "version",
 ]
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+#: The fixed configuration the escalation thresholds are read from. A path and
+#: not an environment variable, for the reason `helena.rendering.BUDGET_FILE` and
+#: `helena.hosts.ATTRIBUTES_FILE` give: it is a location, and a deployment that
+#: keeps its policy elsewhere passes the path. A missing file is a loud failure
+#: naming it, never a default threshold.
+POLICY_FILE = PROJECT_ROOT / "config" / "policy.toml"
+
+#: The one tier whose independent escalation is conditional on a number.
+#: `concept/02`: Tier A "may establish `malicious` by itself if scope and
+#: freshness are adequate" — no number — and Tier B is "usually malicious **when
+#: high confidence**". Tiers C and D do not escalate independently at all, so a
+#: threshold for one would be a key nothing reads.
+#:
+#: It is here rather than in a version module because it is what decides which
+#: *entries the file must carry*, and that moves with `helena.enrichment.SOURCES`
+#: — machinery, not rule. What a threshold **does** is `vN.escalate`'s.
+THRESHOLD_TIER = Tier.B
 
 
 class PolicyError(Exception):
@@ -277,13 +331,197 @@ def _support(citation: contract.Citation, entity: Any, record: Any) -> Support:
     )
 
 
+def supports_in(projection: ContextProjection) -> tuple[Support, ...]:
+    """Every claim the context holds, with the traffic of the entity it is about.
+
+    The escalation evaluator's input, and it is deliberately **not**
+    `supports_for`: that one asks what the evidence a model chose to cite can
+    support, and this one asks what the evidence escalates on its own. A read
+    built from citations would make deterministic escalation a function of the
+    triage answer, which is the one thing `concept/instruction.md` §2 says it may
+    not be — *"a `normal` from a model may not suppress a high-confidence match"*.
+    So this takes no result, and the ordering is the projection's own.
+
+    Every support is `supporting`. A `Support`'s stance records how a **citation**
+    framed a claim, and a claim read straight out of the store has no framing but
+    its own: it is evidence for what it says. Nothing here can produce a
+    `contradicting` support, because nothing here is arguing.
+
+    An entity with no claims contributes nothing — a `no_match`, a `missing` or a
+    failed lookup carries no evidence identifier, and there is nothing for a rule
+    to escalate on. Those four remain four different things one layer down, in
+    `helena.rendering.EntityEnrichment.status`, and the escalation record says how
+    many claims it read so that "nothing escalated" and "there was nothing to
+    read" are not the same sentence.
+    """
+    return tuple(
+        _support(
+            contract.Citation(
+                evidence_id=record.evidence_id, stance=contract.SUPPORTING
+            ),
+            entity,
+            record,
+        )
+        for entity in projection.entities
+        for record in entity.enrichment
+        if record.evidence_id is not None
+    )
+
+
+class Thresholds(BaseModel):
+    """The per-source confidence thresholds, as loaded, with both versions.
+
+    Frozen, and it carries `policy_version` so that a version module can refuse a
+    threshold set written for another one — the same check `constrain` makes on a
+    result. `thresholds_version` is what an escalation records: `vN.py` is frozen
+    and `config/policy.toml` is not, so a decision that recorded only the policy
+    version could not be replayed against the number that actually decided it.
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    policy_version: str
+    thresholds_version: str
+    #: `source_id` -> the confidence a claim from that source must reach. One
+    #: entry per registered `THRESHOLD_TIER` source, and no others.
+    by_source: dict[str, float]
+
+    def for_source(self, source_id: str) -> float:
+        """The threshold for `source_id`, or a `PolicyError` naming what is loaded.
+
+        Never a default. A source that reached the confidence test without a
+        threshold is a source `thresholds()` should have refused to load without,
+        and answering with a number nobody configured is how a feed escalates on
+        a value that was never anyone's decision.
+        """
+        try:
+            return self.by_source[source_id]
+        except KeyError:
+            raise PolicyError(
+                f"no confidence threshold is configured for {source_id!r}; "
+                f"{sorted(self.by_source)} are. `concept/02` conditions tier "
+                f"{THRESHOLD_TIER.value} escalation on high confidence, and what "
+                f"counts as high is per source and never a default."
+            ) from None
+
+
+def thresholds(path: Path | str = POLICY_FILE) -> Thresholds:
+    """Read the escalation thresholds, or fail naming what is wrong with the file.
+
+    TOML, so the file is `tomllib` and no dependency — the same reader
+    `helena.hosts.load` and `helena.rendering.budget` use:
+
+        policy_version = "v1"
+        thresholds_version = "2026-09-09"
+
+        [thresholds]
+        threatfox = 0.80
+
+    Every failure is loud and names the path, and there is no fallback value:
+    `concept/07-principles.md` makes thresholds **policy** rather than constants
+    in a branch, and a threshold that defaulted would be the silent configuration
+    default `concept/instruction.md` §6 lists by name.
+
+    The coverage check is the point of the loader. Every registered
+    `THRESHOLD_TIER` source must have an entry — a feed whose threshold nobody
+    set would otherwise escalate on whatever the code guessed — and a source that
+    is not one must not, because a threshold that nothing reads is a decision
+    somebody recorded and nothing applies.
+    """
+    path = Path(path)
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError as absent:
+        raise PolicyError(
+            f"no escalation policy at {path}. The per-source confidence "
+            f"thresholds are policy and not constants in this package, so an "
+            f"absent file is a startup failure and never a default threshold."
+        ) from absent
+    try:
+        document = tomllib.loads(raw.decode())
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as malformed:
+        raise PolicyError(f"{path} is not readable TOML: {malformed}") from malformed
+
+    expected = {"policy_version", "thresholds_version", "thresholds"}
+    unexpected = sorted(set(document) - expected)
+    if unexpected:
+        raise PolicyError(
+            f"{path} has top-level keys {unexpected}; the file is two versions "
+            f"and a [thresholds] table. A key nothing reads is a policy somebody "
+            f"set and nothing applies."
+        )
+    declared = {
+        key: document.get(key) for key in ("policy_version", "thresholds_version")
+    }
+    for key, value in declared.items():
+        if not isinstance(value, str) or not value.strip():
+            raise PolicyError(
+                f"{path} declares no {key}. A threshold set that did not say "
+                f"which rules it was written for, or which revision of itself "
+                f"decided, could not be replayed against either."
+            )
+
+    table = document.get("thresholds", {})
+    if not isinstance(table, dict):
+        raise PolicyError(
+            f"{path}: [thresholds] is {type(table).__name__}, and it is a table "
+            f"of source id -> confidence"
+        )
+    for source_id, value in table.items():
+        if source_id not in SOURCES:
+            raise PolicyError(
+                f"{path} sets a threshold for {source_id!r}, which is not a "
+                f"registered source ({sorted(SOURCES)}). Adding a source is a "
+                f"governed decision (concept/05-threat-intelligence.md), not a "
+                f"line in this file."
+            )
+        if SOURCES[source_id].tier is not THRESHOLD_TIER:
+            raise PolicyError(
+                f"{path} sets a threshold for {source_id!r}, which is tier "
+                f"{SOURCES[source_id].tier.value}. Only tier "
+                f"{THRESHOLD_TIER.value} escalates on a confidence number "
+                f"(concept/02-concepts-and-taxonomy.md), so this one would be "
+                f"read by nothing."
+            )
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise PolicyError(
+                f"{path}: thresholds.{source_id} is {type(value).__name__}, and a "
+                f"confidence threshold is a number"
+            )
+        if not 0.0 <= float(value) <= 1.0:
+            raise PolicyError(
+                f"{path}: thresholds.{source_id} is {value}, and a confidence is "
+                f"between 0 and 1 — `sql/migrations/0014_feed_mapping_views.sql` "
+                f"divides the feed's own scale by 100 before it reaches a claim"
+            )
+    absent = sorted(
+        source_id
+        for source_id, descriptor in SOURCES.items()
+        if descriptor.tier is THRESHOLD_TIER and source_id not in table
+    )
+    if absent:
+        raise PolicyError(
+            f"{path} sets no threshold for {absent}, which are tier "
+            f"{THRESHOLD_TIER.value} sources. `concept/02` lets a tier "
+            f"{THRESHOLD_TIER.value} match escalate independently *when high "
+            f"confidence*, and what counts as high is per source — so a "
+            f"registered one this file is silent about is a feed that would "
+            f"escalate on a number nobody chose."
+        )
+    return Thresholds(
+        policy_version=declared["policy_version"],
+        thresholds_version=declared["thresholds_version"],
+        by_source={source_id: float(value) for source_id, value in table.items()},
+    )
+
+
 @dataclass(frozen=True)
 class PolicyVersion:
-    """One version's composition rule: the shape every version module supplies.
+    """One version's rules: the shape every version module supplies.
 
-    A callable and a value rather than a class with one method, for the reason
+    Callables and a value rather than a class with methods, for the reason
     `helena.rendering.RenderingVersion` and `helena.triage.TriagePrompt` give: the
-    rule is a function of a result and its supports and holds no state.
+    rules are functions of their inputs and hold no state.
     """
 
     version: str
@@ -291,10 +529,14 @@ class PolicyVersion:
     #: own — a `v2` whose rules produced a different record of what it decided
     #: must not have to change what a `v1` decision meant.
     constrain: Any
+    #: `(supports, thresholds) -> Escalation`. Deliberately not `(result, ...)`:
+    #: `concept/04` makes this input independent of whether triage ran at all, so
+    #: there is nowhere for a verdict to enter.
+    escalate: Any
 
 
 def _load(identifier: str) -> PolicyVersion:
-    """The composition rule of one policy version.
+    """The rules of one policy version.
 
     Imported by name rather than held in a registry dict, so adding `v2` is
     adding a module and nothing else. The same loader `helena.taxonomy`,

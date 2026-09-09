@@ -27,6 +27,7 @@ fixture asserts it.
 
 from __future__ import annotations
 
+import ast
 import json
 import time
 from datetime import datetime, timezone
@@ -36,23 +37,34 @@ import psycopg
 import pytest
 from pydantic import ValidationError
 
-from helena import policy, rendering
+from helena import policy, rendering, triage
 from helena.config import Settings
 from helena.contracts.v1 import (
     CONTRACT_VERSION,
     CONTRADICTING,
     MISSING,
+    SCHEMA_INVALID,
     SUPPORTING,
+    AgentFailure,
     AgentResult,
     Citation,
     Cost,
     EvidencePackage,
     Gap,
+    RequestVersions,
 )
-from helena.enrichment import load_threatfox
+from helena.enrichment import (
+    ENRICHMENT_STATUSES,
+    OK,
+    SOURCES,
+    Claim,
+    Tier,
+    load_threatfox,
+    source_diversity,
+)
 from helena.normalizer import EventStore, Normalizer, describe_capture
 from helena.observability import Redactor
-from helena.policy import Support, supports_for
+from helena.policy import Support, supports_for, supports_in
 from helena.policy import v1 as rule
 from helena.taxonomy import ANALYST, TRIAGE
 from helena.versions import VersionSet
@@ -171,6 +183,7 @@ def support(
     source_id: str = "threatfox",
     source_tier: str = "B",
     status: str = "ok",
+    confidence: float | None = 1.0,
 ) -> Support:
     return Support(
         evidence_id=evidence_id,
@@ -178,7 +191,7 @@ def support(
         entity_type=entity_type,
         entity_value=entity_value,
         classification=classification,
-        confidence=1.0,
+        confidence=confidence,
         scope_type=scope_type or entity_type,
         scope_value=scope_value or entity_value,
         port_matched=port_matched,
@@ -413,8 +426,16 @@ def test_every_rule_has_a_case_in_the_table():
     assert exercised == set(rule.RULES)
 
 
-def test_every_gap_kind_has_a_case_in_the_table():
+def test_every_gap_kind_has_a_case_in_a_table():
+    """Both tables together, because the two rules record different gaps.
+
+    `FRESHNESS_ADEQUACY_UNTESTED` is the escalation evaluator's — a verdict is
+    constrained by what the evidence can support and never by how old the
+    snapshot was — so a check against the composition table alone would either
+    fail or force a gap into a rule that has nothing to say about it.
+    """
     exercised = {kind for case in CASES for kind in case[6]}
+    exercised |= {kind for case in ESCALATION_CASES for kind in case[4]}
     assert exercised == set(rule.GAP_KINDS)
 
 
@@ -589,6 +610,529 @@ def test_a_gap_kind_outside_the_policy_s_own_vocabulary_is_refused():
 def test_a_support_observed_by_no_layer_is_refused():
     with pytest.raises(ValidationError, match="observed by no"):
         support(layers=())
+
+
+# --- Deterministic escalation ------------------------------------------------
+#
+# `concept/04-the-two-agents.md`, "What escalates":
+#
+#   The enrichment evidence escalates on its own -- a Tier A, or a
+#   high-confidence Tier B, malicious classification whose traffic
+#   characteristics support it -- regardless of the triage verdict. An LLM
+#   returning `normal` may not bury a high-confidence match.
+#
+# One row per rule that can hold a claim back, plus the cases each rule is the
+# negation of, and every row states the whole answer: whether the context
+# escalated, what each candidate's traffic supports, which rules named it, and
+# which gaps were recorded.
+
+
+def thresholds() -> policy.Thresholds:
+    """The project's own `config/policy.toml`, not a fixture of one.
+
+    The file is what a deployment edits, so a suite that read a temporary copy
+    would pass with the committed file saying anything at all.
+    """
+    return policy.thresholds()
+
+
+#: No registered source is tier A -- `helena.enrichment.SOURCES` holds a B and a
+#: C -- so the tier is supplied on the support directly. The rule is about the
+#: tier, the tier belongs to the source descriptor, and adding a source is a
+#: governed decision (`concept/05-threat-intelligence.md`) rather than a fixture.
+A_TIER_A_HIT = support(source_tier=rule.TIER_A, confidence=None)
+A_TIER_B_AT_THE_THRESHOLD = support(confidence=0.80)
+A_TIER_B_BELOW_IT = support(confidence=0.50)
+A_TIER_B_WITH_NO_CONFIDENCE = support(confidence=None)
+A_TIER_C_HIT = support(source_tier="C", source_id="sslbl-ja3")
+A_STALE_TIER_A_HIT = support(source_tier=rule.TIER_A, confidence=None, status="stale")
+A_RESOLVER_TIER_A = support(
+    source_tier=rule.TIER_A, confidence=None, entity_value="203.0.113.53", ports=(53,)
+)
+A_SECOND_ADDRESS_TIER_A = support(
+    SECOND,
+    source_tier=rule.TIER_A,
+    confidence=None,
+    entity_value="198.51.100.7",
+    sent=800,
+    received=9000,
+)
+
+ESCALATION_CASES = [
+    # (name, supports, escalates, ((evidence id, rules, supports), ...), gaps)
+    (
+        "a tier A malicious hit the host exchanged bytes with escalates",
+        (A_TIER_A_HIT,),
+        True,
+        ((FIRST, (), rule.MALICIOUS),),
+        (rule.SHARED_INFRASTRUCTURE_UNDETERMINED,),
+    ),
+    (
+        "a tier B hit at its source's configured threshold escalates",
+        (A_TIER_B_AT_THE_THRESHOLD,),
+        True,
+        ((FIRST, (), rule.MALICIOUS),),
+        (rule.SHARED_INFRASTRUCTURE_UNDETERMINED,),
+    ),
+    (
+        "a tier B hit below its source's threshold does not",
+        (A_TIER_B_BELOW_IT,),
+        False,
+        ((FIRST, (rule.BELOW_SOURCE_THRESHOLD,), rule.MALICIOUS),),
+        (),
+    ),
+    (
+        "a tier B hit reporting no confidence has not cleared the threshold",
+        (A_TIER_B_WITH_NO_CONFIDENCE,),
+        False,
+        ((FIRST, (rule.NO_CONFIDENCE_REPORTED,), rule.MALICIOUS),),
+        (),
+    ),
+    (
+        "a tier C hit does not escalate however malicious it says the entity is",
+        (A_TIER_C_HIT,),
+        False,
+        ((FIRST, (rule.TIER_DOES_NOT_ESCALATE,), rule.MALICIOUS),),
+        (),
+    ),
+    (
+        "a hit with one failed connection and no bytes returned does not escalate",
+        (support(source_tier=rule.TIER_A, confidence=None, sent=120, received=0),),
+        False,
+        ((FIRST, (rule.TRAFFIC_NOT_BIDIRECTIONAL,), rule.SUSPICIOUS),),
+        (),
+    ),
+    (
+        "a hit scoped to a port the host never reached does not escalate",
+        (
+            support(
+                source_tier=rule.TIER_A,
+                confidence=None,
+                scope_type=rule.ADDRESS_PORT_SCOPE,
+                scope_value="203.0.113.10:8000",
+                port_matched=False,
+            ),
+        ),
+        False,
+        ((FIRST, (rule.PORT_NOT_REACHED,), rule.SUSPICIOUS),),
+        (),
+    ),
+    (
+        "a name carries no traffic of its own, and the limitation is recorded",
+        (
+            support(
+                source_tier=rule.TIER_A,
+                confidence=None,
+                entity_type="domain",
+                entity_value="c2.example.invalid",
+                layers=("dns_query", "tls"),
+                ports=(),
+            ),
+        ),
+        False,
+        ((FIRST, (rule.NAME_CARRIES_NO_TRAFFIC,), rule.SUSPICIOUS),),
+        (rule.DOMAIN_SCOPE_UNTESTABLE,),
+    ),
+    (
+        "a hit on infrastructure this host used as a resolver transfers nothing",
+        (A_RESOLVER_TIER_A,),
+        False,
+        ((FIRST, (rule.SHARED_INFRASTRUCTURE,), None),),
+        (),
+    ),
+    (
+        "one hit off the shared infrastructure is the corroboration",
+        (A_RESOLVER_TIER_A, A_SECOND_ADDRESS_TIER_A),
+        True,
+        ((FIRST, (), rule.MALICIOUS), (SECOND, (), rule.MALICIOUS)),
+        (rule.SHARED_INFRASTRUCTURE_UNDETERMINED,),
+    ),
+    (
+        "a claim from a superseded snapshot still escalates, and says it is one",
+        (A_STALE_TIER_A_HIT,),
+        True,
+        ((FIRST, (), rule.MALICIOUS),),
+        (
+            rule.SHARED_INFRASTRUCTURE_UNDETERMINED,
+            rule.FRESHNESS_ADEQUACY_UNTESTED,
+        ),
+    ),
+    (
+        "a claim held back by the tier and by the traffic names both rules",
+        (
+            support(
+                source_tier="C", source_id="sslbl-ja3", sent=120, received=0
+            ),
+        ),
+        False,
+        (
+            (
+                FIRST,
+                (rule.TIER_DOES_NOT_ESCALATE, rule.TRAFFIC_NOT_BIDIRECTIONAL),
+                rule.SUSPICIOUS,
+            ),
+        ),
+        (),
+    ),
+    (
+        "an evidence-level normal claim is not a candidate at all",
+        (support(source_tier=rule.TIER_A, confidence=None, classification="normal"),),
+        False,
+        (),
+        (),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("supports", "escalates", "candidates", "gaps"),
+    [case[1:] for case in ESCALATION_CASES],
+    ids=[case[0] for case in ESCALATION_CASES],
+)
+def test_deterministic_escalation(
+    supports: tuple[Support, ...],
+    escalates: bool,
+    candidates: tuple[tuple[str, tuple[str, ...], str | None], ...],
+    gaps: tuple[str, ...],
+):
+    escalation = rule.escalate(supports, thresholds())
+    assert escalation.escalates is escalates
+    assert (
+        tuple(
+            (candidate.evidence_id, candidate.rules, candidate.supports)
+            for candidate in escalation.candidates
+        )
+        == candidates
+    )
+    assert tuple(gap.kind for gap in escalation.gaps) == gaps
+    assert escalation.claims_read == len(supports)
+    assert escalation.evidence_ids == tuple(
+        evidence_id for evidence_id, rules, _ in candidates if not rules
+    )
+
+
+def test_every_escalation_rule_has_a_case_in_the_table():
+    """A rule nobody exercises is a rule nobody knows the behaviour of."""
+    exercised = {name for case in ESCALATION_CASES for _, rules, _ in case[3] for name in rules}
+    assert exercised == set(rule.ESCALATION_RULES)
+
+
+def test_the_escalation_rules_are_recorded_in_the_declared_order():
+    """`ESCALATION_RULES` is the order a reader sees the tests in."""
+    for case in ESCALATION_CASES:
+        for candidate in rule.escalate(case[1], thresholds()).candidates:
+            recorded = list(candidate.rules)
+            assert recorded == sorted(recorded, key=rule.ESCALATION_RULES.index)
+
+
+# --- Independent of triage, which is the whole point of it -------------------
+
+
+def test_a_triage_verdict_of_normal_cannot_suppress_a_tier_a_match():
+    """`concept/07-principles.md`'s named failure mode, as a test.
+
+    *"Triage returning `normal` suppresses a Tier A match | Deterministic
+    escalation is independent."* The two inputs are computed here over the same
+    context and they disagree: `helena.triage.escalates` says no and the evidence
+    says yes, and the analyst runs because `concept/03`'s routing `if` reaches the
+    evidence first.
+    """
+    verdict = result("normal", emitter=TRIAGE)
+    assert triage.escalates(verdict) is False
+
+    escalation = rule.escalate((A_TIER_A_HIT,), thresholds())
+    assert escalation.escalates is True
+    assert escalation.evidence_ids == (FIRST,)
+    assert escalation.candidates[0].source_tier == rule.TIER_A
+
+
+def test_escalation_is_computed_when_triage_produced_a_typed_failure():
+    """*"A triage failure does not escalate"* — and the evidence still does.
+
+    `concept/04`: *"Failing closed is safe precisely because deterministic
+    escalation is independent of whether triage ran at all."* This is the half
+    that makes it safe, and until now it did not exist —
+    `docs/decisions/0021-the-triage-runner.md` §6 recorded that as the one thing
+    the triage runner left genuinely unsafe.
+    """
+    asked = versions().model_dump()
+    asked.pop("model_version")
+    failure = AgentFailure(
+        emitter=TRIAGE,
+        reason=SCHEMA_INVALID,
+        detail="the model returned a classification outside the closed set",
+        cost=cost(),
+        versions=RequestVersions(model_requested="model-under-test", **asked),
+        model_version="model-under-test",
+    )
+    assert triage.escalates(failure) is False
+
+    escalation = rule.escalate((A_TIER_A_HIT,), thresholds())
+    assert escalation.escalates is True
+    assert escalation.evidence_ids == (FIRST,)
+
+
+def test_the_evaluator_has_no_parameter_a_verdict_could_arrive_through():
+    """The invariant, asserted over the signature rather than trusted.
+
+    `concept/instruction.md` §2: *"Deterministic escalation is independent of
+    triage. A `normal` from a model may not suppress a high-confidence match."*
+    The way that gets broken is not a rule that reads a verdict — it is a later
+    increment passing the triage result in so the evaluator can skip work when
+    triage already said `normal`, which looks like an optimisation and is the
+    suppression.
+    """
+    from inspect import signature
+
+    parameters = signature(rule.escalate).parameters
+    assert list(parameters) == ["supports", "thresholds"]
+    annotations = {name: str(p.annotation) for name, p in parameters.items()}
+    for annotation in annotations.values():
+        assert "AgentResult" not in annotation
+        assert "AgentFailure" not in annotation
+        assert "Decision" not in annotation
+    module = ast.parse(Path(rule.__file__).read_text())
+    reachable = {
+        node.name: node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in ("escalate", "_candidate", "_supported_root")
+    }
+    assert set(reachable) == {"escalate", "_candidate", "_supported_root"}
+    named = {
+        node.id if isinstance(node, ast.Name) else node.attr
+        for function in reachable.values()
+        for node in ast.walk(function)
+        if isinstance(node, (ast.Name, ast.Attribute))
+    }
+    assert not named & {"AgentResult", "AgentFailure", "Decision", "constrain"}
+
+
+# --- The aggregator rule -----------------------------------------------------
+
+
+def test_one_source_s_many_rows_about_one_entity_are_one_independent_source():
+    """*"An aggregator is never counted as many votes"* (`concept/02`, rule 2).
+
+    Counted through `helena.enrichment.source_diversity`, so the three
+    consequences that function documents hold here without being restated: one
+    source making forty claims is one, an aggregator republishing forty entries
+    is one, and the same origin reaching us twice is one. What that stops is a
+    below-threshold claim being lifted by the number of rows behind it, which is
+    the one way a confidence could be raised without anyone deciding to.
+    """
+    rows = tuple(
+        support(evidence_id=str(index) * 64, confidence=0.50)
+        for index in range(1, 4)
+    )
+    escalation = rule.escalate(rows, thresholds())
+    assert escalation.escalates is False
+    assert {candidate.independent_sources for candidate in escalation.candidates} == {1}
+    assert source_diversity(
+        [
+            Claim(
+                source_id=item.source_id,
+                entity_type=item.entity_type,
+                entity_value=item.entity_value,
+                path=item.classification,
+            )
+            for item in rows
+        ]
+    ) == 1
+
+
+def test_the_count_is_of_sources_and_the_escalation_is_still_per_claim():
+    """Two sources on one entity is two, and the one above threshold escalates.
+
+    The count does not decide anything in this version — `concept/04` conditions
+    independent escalation on the tier and the source's own confidence and on
+    nothing else — so this is what it looks like when it is right: recorded
+    beside a decision it did not make.
+    """
+    below = support(confidence=0.50)
+    above = support(SECOND, source_tier=rule.TIER_A, confidence=None, source_id="sslbl-ja3")
+    escalation = rule.escalate((below, above), thresholds())
+    assert escalation.evidence_ids == (SECOND,)
+    assert {candidate.independent_sources for candidate in escalation.candidates} == {2}
+
+
+# --- The thresholds file -----------------------------------------------------
+
+
+def write(tmp_path: Path, text: str) -> Path:
+    path = tmp_path / "policy.toml"
+    path.write_text(text)
+    return path
+
+
+def test_the_committed_policy_file_covers_every_tier_b_source():
+    """The file a deployment actually edits, read as the loader reads it."""
+    loaded = policy.thresholds()
+    assert loaded.policy_version == rule.POLICY_VERSION
+    assert loaded.thresholds_version.strip()
+    assert set(loaded.by_source) == {
+        source_id
+        for source_id, descriptor in SOURCES.items()
+        if descriptor.tier is policy.THRESHOLD_TIER
+    }
+
+
+def test_the_threshold_tier_is_the_tier_the_registry_qualifies_on_confidence():
+    """Tier A escalates on scope and freshness; tier B escalates on a number.
+
+    Two copies of `concept/02`'s tier table — the enum's own
+    `escalates_independently` and this version's `ESCALATING_TIERS` — asserted
+    equal, because a frozen version may not import a constant another package is
+    free to change and two copies that can drift are worse than none.
+    """
+    assert policy.THRESHOLD_TIER is Tier.B
+    assert set(rule.ESCALATING_TIERS) == {
+        tier.value for tier in Tier if tier.escalates_independently
+    }
+    assert (rule.TIER_A, rule.TIER_B) == (Tier.A.value, Tier.B.value)
+
+
+def test_the_ok_status_is_spelled_the_way_the_store_spells_it():
+    """The other copied constant. `concept/instruction.md` §2, same rule."""
+    assert rule.STATUS_OK == OK
+    assert rule.STATUS_OK in ENRICHMENT_STATUSES
+
+
+def test_an_absent_policy_file_is_a_startup_failure_and_never_a_default(tmp_path: Path):
+    with pytest.raises(policy.PolicyError, match="never a default threshold"):
+        policy.thresholds(tmp_path / "absent.toml")
+
+
+def test_a_policy_file_that_is_not_toml_names_the_path(tmp_path: Path):
+    with pytest.raises(policy.PolicyError, match="not readable TOML"):
+        policy.thresholds(write(tmp_path, "policy_version = \n"))
+
+
+def test_a_key_nothing_reads_is_refused(tmp_path: Path):
+    document = (
+        'policy_version = "v1"\nthresholds_version = "t1"\n'
+        'escalate_everything = true\n\n[thresholds]\nthreatfox = 0.8\n'
+    )
+    with pytest.raises(policy.PolicyError, match="nothing reads"):
+        policy.thresholds(write(tmp_path, document))
+
+
+@pytest.mark.parametrize("key", ["policy_version", "thresholds_version"])
+def test_a_policy_file_that_declares_no_version_is_refused(tmp_path: Path, key: str):
+    lines = {"policy_version": '"v1"', "thresholds_version": '"t1"'}
+    document = "".join(
+        f"{name} = {value}\n" for name, value in lines.items() if name != key
+    )
+    with pytest.raises(policy.PolicyError, match=f"declares no {key}"):
+        policy.thresholds(write(tmp_path, document + "\n[thresholds]\nthreatfox = 0.8\n"))
+
+
+def test_a_threshold_for_a_source_nobody_registered_is_refused(tmp_path: Path):
+    document = (
+        'policy_version = "v1"\nthresholds_version = "t1"\n\n[thresholds]\n'
+        'threatfox = 0.8\nnot-a-feed = 0.9\n'
+    )
+    with pytest.raises(policy.PolicyError, match="not a\n?\\s*registered source"):
+        policy.thresholds(write(tmp_path, document))
+
+
+def test_a_threshold_for_a_tier_that_does_not_read_one_is_refused(tmp_path: Path):
+    """A key nothing reads is a policy somebody set and nothing applies."""
+    document = (
+        'policy_version = "v1"\nthresholds_version = "t1"\n\n[thresholds]\n'
+        'threatfox = 0.8\n"sslbl-ja3" = 0.9\n'
+    )
+    with pytest.raises(policy.PolicyError, match="which is tier C"):
+        policy.thresholds(write(tmp_path, document))
+
+
+def test_a_registered_tier_b_source_the_file_is_silent_about_is_refused(tmp_path: Path):
+    document = 'policy_version = "v1"\nthresholds_version = "t1"\n\n[thresholds]\n'
+    with pytest.raises(policy.PolicyError, match="escalate on a number nobody chose"):
+        policy.thresholds(write(tmp_path, document))
+
+
+@pytest.mark.parametrize("value", ["1.5", "-0.1", "80"])
+def test_a_confidence_outside_the_scale_a_claim_carries_is_refused(
+    tmp_path: Path, value: str
+):
+    """`sql/migrations/0014` divides the feed's 0-100 by 100 before it is a claim.
+
+    `80` is the trap this catches: the feed's own scale copied into the file
+    unchanged, which would make every claim below the threshold and escalate
+    nothing, silently.
+    """
+    document = (
+        f'policy_version = "v1"\nthresholds_version = "t1"\n\n[thresholds]\n'
+        f"threatfox = {value}\n"
+    )
+    with pytest.raises(policy.PolicyError, match="between 0 and 1"):
+        policy.thresholds(write(tmp_path, document))
+
+
+def test_a_threshold_that_is_not_a_number_is_refused(tmp_path: Path):
+    document = (
+        'policy_version = "v1"\nthresholds_version = "t1"\n\n[thresholds]\n'
+        'threatfox = "high"\n'
+    )
+    with pytest.raises(policy.PolicyError, match="a confidence threshold is a number"):
+        policy.thresholds(write(tmp_path, document))
+
+
+def test_a_threshold_set_written_for_another_policy_version_is_refused():
+    """The same check `constrain` makes on a result, for the same reason."""
+    other = policy.Thresholds(
+        policy_version="v9", thresholds_version="t1", by_source={"threatfox": 0.8}
+    )
+    with pytest.raises(policy.PolicyError, match="policy_version 'v9'"):
+        rule.escalate((A_TIER_A_HIT,), other)
+
+
+def test_a_source_with_no_configured_threshold_is_a_loud_failure_not_a_guess():
+    """`for_source` never answers with a number nobody configured."""
+    empty = policy.Thresholds(
+        policy_version=rule.POLICY_VERSION, thresholds_version="t1", by_source={}
+    )
+    with pytest.raises(policy.PolicyError, match="no confidence threshold"):
+        rule.escalate((A_TIER_B_AT_THE_THRESHOLD,), empty)
+
+
+def test_every_escalation_records_the_policy_version_and_the_thresholds_version():
+    """`v1.py` is frozen and `config/policy.toml` is not, so both are recorded."""
+    loaded = thresholds()
+    for case in ESCALATION_CASES:
+        escalation = rule.escalate(case[1], loaded)
+        assert escalation.policy_version == rule.POLICY_VERSION
+        assert escalation.thresholds_version == loaded.thresholds_version
+
+
+def test_an_escalation_naming_evidence_no_candidate_escalated_is_refused():
+    with pytest.raises(ValidationError, match="cites evidence"):
+        rule.Escalation(
+            policy_version=rule.POLICY_VERSION,
+            thresholds_version="t1",
+            escalates=True,
+            evidence_ids=(FIRST,),
+            claims_read=0,
+        )
+
+
+def test_a_candidate_that_escalates_on_traffic_that_did_not_support_it_is_refused():
+    with pytest.raises(ValidationError, match="traffic characteristics support it"):
+        rule.Candidate(
+            evidence_id=FIRST,
+            entity_type=rule.ADDRESS,
+            entity_value="203.0.113.10",
+            source_id="threatfox",
+            source_tier=rule.TIER_A,
+            confidence=None,
+            status=rule.STATUS_OK,
+            supports=rule.SUSPICIOUS,
+            escalates=True,
+            rules=(),
+            independent_sources=1,
+            detail="a candidate escalating on suspicious support",
+        )
 
 
 # --- The version loader ------------------------------------------------------
@@ -826,3 +1370,176 @@ def test_a_citation_the_projection_cannot_resolve_is_a_loud_failure(
 def an_address(connection: psycopg.Connection) -> str:
     address, port = a_contacted_port(connection)
     return f"{address}:{port}"
+
+
+# --- Escalation over a real context in a real engine -------------------------
+
+
+def at_confidence(raw: bytes, entity_value: str, ioc_type: str, level: int) -> bytes:
+    """`targeted`, with the entry's own confidence set to a chosen level.
+
+    The committed extract's first entry reports 100. The threshold cases need a
+    real row on the other side of `config/policy.toml`'s number, and rewriting
+    the feed's `confidence_level` is the only honest way to get one — the value
+    then travels the whole path, through
+    `sql/migrations/0014_feed_mapping_views.sql`'s division by 100, rather than
+    being asserted about.
+    """
+    document = json.loads(targeted(raw, entity_value, ioc_type))
+    document[sorted(document)[0]][0]["confidence_level"] = level
+    return json.dumps(document).encode()
+
+
+@pytest.mark.integration
+def test_a_real_high_confidence_hit_the_host_reached_escalates_on_its_own(
+    live: psycopg.Connection,
+):
+    """The whole path, with no model anywhere in it.
+
+    A capture, a feed load, the view's own `port_matched` and `confidence`, the
+    thresholds the committed file carries, and a routing decision that no agent
+    contributed to.
+    """
+    address, port = a_contacted_port(live)
+    load(live, targeted(RAW, f"{address}:{port}", "ip:port"))
+    projection = project(live)
+    _, claim = the_claim(projection, address)
+    assert claim.confidence == 1.0 and claim.port_matched is True
+
+    escalation = rule.escalate(supports_in(projection), thresholds())
+    assert escalation.escalates is True
+    assert escalation.evidence_ids == (claim.evidence_id,)
+    assert escalation.claims_read >= 1
+    caused = escalation.candidates[0]
+    assert caused.source_id == "threatfox" and caused.source_tier == rule.TIER_B
+    assert caused.supports == rule.MALICIOUS
+    assert [gap.kind for gap in escalation.gaps] == [
+        rule.SHARED_INFRASTRUCTURE_UNDETERMINED
+    ]
+
+
+@pytest.mark.integration
+def test_a_real_hit_below_the_configured_threshold_does_not_escalate(
+    live: psycopg.Connection,
+):
+    """The threshold, decided over a confidence the view computed.
+
+    50 is the feed's own second mode and it is what the extract's other domain
+    entry carries; through the mapping view it is 0.5, and
+    `config/policy.toml` asks for 0.80.
+    """
+    address, port = a_contacted_port(live)
+    load(live, at_confidence(RAW, f"{address}:{port}", "ip:port", 50))
+    projection = project(live)
+    _, claim = the_claim(projection, address)
+    assert claim.confidence == 0.5
+
+    escalation = rule.escalate(supports_in(projection), thresholds())
+    assert escalation.escalates is False
+    assert escalation.evidence_ids == ()
+    assert [candidate.rules for candidate in escalation.candidates] == [
+        (rule.BELOW_SOURCE_THRESHOLD,)
+    ]
+
+
+@pytest.mark.integration
+def test_a_real_hit_on_a_port_the_host_never_reached_does_not_escalate(
+    live: psycopg.Connection,
+):
+    """Step 3 of the task, over the row the view actually produced.
+
+    Same address, same bytes, same confidence — a port the capture did not reach.
+    `concept/04` escalates a malicious classification *whose traffic
+    characteristics support it*, and this one's do not.
+    """
+    address, port = a_contacted_port(live)
+    elsewhere = 1 if port != 1 else 2
+    load(live, targeted(RAW, f"{address}:{elsewhere}", "ip:port"))
+    projection = project(live)
+    _, claim = the_claim(projection, address)
+    assert claim.port_matched is False and claim.confidence == 1.0
+
+    escalation = rule.escalate(supports_in(projection), thresholds())
+    assert escalation.escalates is False
+    assert [candidate.rules for candidate in escalation.candidates] == [
+        (rule.PORT_NOT_REACHED,)
+    ]
+    assert escalation.candidates[0].supports == rule.SUSPICIOUS
+
+
+@pytest.mark.integration
+def test_a_real_domain_hit_does_not_escalate_and_records_the_limitation(
+    live: psycopg.Connection,
+):
+    """Where this will under-fire, said out loud and over real data.
+
+    `concept/02` calls the domain scope gap the place *"that bites precisely
+    where it matters most, since the feeds most likely to hit list domains"* —
+    433 of the ThreatFox snapshot's entries are domains. A name carries the
+    traffic of the flows that mentioned it, so the traffic clause cannot be
+    satisfied for one, and the gap is what stops the quiet result reading as a
+    clean one.
+    """
+    name = live.execute(
+        "SELECT entity_value FROM helena_signal_context_entities "
+        "WHERE entity_type = 'domain' ORDER BY entity_value LIMIT 1"
+    ).fetchone()[0]
+    load(live, targeted(RAW, name, "domain"))
+    projection = project(live)
+    _, claim = the_claim(projection, name)
+
+    escalation = rule.escalate(supports_in(projection), thresholds())
+    assert escalation.escalates is False
+    assert [candidate.rules for candidate in escalation.candidates] == [
+        (rule.NAME_CARRIES_NO_TRAFFIC,)
+    ]
+    assert [gap.kind for gap in escalation.gaps] == [rule.DOMAIN_SCOPE_UNTESTABLE]
+
+
+@pytest.mark.integration
+def test_a_context_whose_lookups_all_missed_escalates_nothing_and_says_so(
+    live: psycopg.Connection,
+):
+    """*"Nothing escalated"* and *"there was nothing to read"* are different rows.
+
+    `concept/instruction.md` §2 keeps `no_match` distinct from the other three at
+    every layer, and a `no_match` carries no evidence identifier to cite — so it
+    contributes no support and `claims_read` is what keeps the distinction
+    visible. This is the case `docs/decisions/0022-the-composition-rule.md` §4
+    said the composition rule could not see.
+    """
+    load(live, RAW)
+    projection = project(live)
+    assert not [
+        record
+        for entity in projection.entities
+        for record in entity.enrichment
+        if record.has_claim
+    ]
+    escalation = rule.escalate(supports_in(projection), thresholds())
+    assert escalation.escalates is False
+    assert escalation.claims_read == 0
+    assert escalation.candidates == ()
+
+
+@pytest.mark.integration
+def test_supports_in_reads_every_claim_and_supports_for_reads_the_cited_ones(
+    live: psycopg.Connection,
+):
+    """The two reads answer different questions, over one projection.
+
+    `supports_for` is a function of what a model chose to cite; `supports_in` is
+    a function of the store. That difference is what makes deterministic
+    escalation independent, so it is asserted over a real context rather than
+    argued in a docstring.
+    """
+    address, port = a_contacted_port(live)
+    load(live, targeted(RAW, f"{address}:{port}", "ip:port"))
+    projection = project(live)
+    _, claim = the_claim(projection, address)
+
+    uncited = result("normal", emitter=TRIAGE)
+    assert supports_for(uncited, projection) == ()
+    read = supports_in(projection)
+    assert [item.evidence_id for item in read] == [claim.evidence_id]
+    assert {item.stance for item in read} == {SUPPORTING}
