@@ -413,6 +413,16 @@ def test_the_reference_objects_are_what_they_declare(
         # which snapshot was current, and what the most recent attempt was.
         "helena_reference_feed_snapshot_validity": "VIEW",
         "helena_reference_feed_attempt_validity": "VIEW",
+        # sql/migrations/0017: the analyst-tier lookup cache, which is the
+        # evidence store rather than a second one beside it — the provider's
+        # bytes, the claims read out of them, and the view that tags those claims
+        # `analyst`. They are reference-layer objects for the reason ThreatFox's
+        # are: written by a loader-shaped thing, joined by nothing below them.
+        # They are deliberately NOT in ENRICHMENT_EVIDENCE_VIEW; the head of 0017
+        # says why.
+        "helena_reference_analyst_response": "BASE TABLE",
+        "helena_reference_analyst_evidence": "BASE TABLE",
+        "helena_reference_evidence_analyst": "VIEW",
     }
 
 

@@ -63,26 +63,49 @@ The last one is deliberate: `ProviderTool` resolves its descriptor through
 stays the governed decision `concept/05` says it is rather than becoming a
 constructor argument.
 
+## Cache-first, where the cache is the evidence store
+
+`concept/07`: *"On each call it looks for a valid, unexpired record for its
+source, endpoint and indicator, and returns it without touching the network; it
+queries only on a miss or an expiry."* `EvidenceCache` is that lookup and it is
+**not a second store** — it reads and writes
+`sql/migrations/0017_analyst_lookup_cache.sql`'s two tables in the one streaming
+engine, in the evidence shape 0011 defined. A separate opaque cache was rejected
+because an assessment could then cite something the cache had already evicted,
+and nothing here evicts: `expires_at` bounds *validity*, never lifetime.
+
+Five things follow, and `docs/decisions/0025-the-lookup-cache.md` argues each:
+
+| | |
+| --- | --- |
+| a hit costs nothing and **discloses nothing** | the indicator was disclosed when the entry was fetched, so caching is a privacy control as much as a cost control |
+| `no_match` **is cached** | most lookups miss; caching only hits would leave the cache almost never useful and re-disclose the same indicator every run |
+| a failure is **not** cached | an outage is not a record of what a source said, and caching one would let a five-minute outage suppress every query for the retention window |
+| an expired entry is served **explicitly stale** when the live query fails | the record was not evicted, so it is still there and still citable; `concept/02` defines `stale` as exactly this — the claim stands and its age is part of what it is worth |
+| retention is per source **and** per endpoint | a registration date never changes while a risk score moves, so one number for a provider is one number too few |
+
+`retrieved_at` on the retrieval step is the **underlying record's** time on a
+cache hit, not the step's, which is what makes two runs differing only in cache
+state distinguishable afterwards.
+
 Reads: `helena.enrichment.SOURCES` (the descriptor: tier, entity types, declared
-subset). Writes: nothing durable yet — the store for a retrieved record is the
-cache-as-evidence-store increment, which is what turns `retrieved_at` into a row
-with an expiry.
+subset) and `helena_reference_evidence_analyst`. Writes:
+`helena_reference_analyst_response` (the bytes, before they are evaluated) and
+`helena_reference_analyst_evidence` (the claims read out of them).
 
 Maturity: experimental — the layer is exercised end to end against a stand-in
-provider adapter over the committed ThreatFox export shape, and against the real
-credential from `.env` for the isolation properties. **No live provider has been
-queried through it**: the query surface of the hunting API is confirmed, and the
-adapter written against it, in the first-live-provider increment. Cache-first
-lookup, budget enforcement and the disclosure record are named in the docstring
-above because they are the layer's, and are **not built here** — see the
-"deliberately not here" section below.
+provider adapter over the committed ThreatFox export shape, against a real
+migrated engine for the cache, and against the real credential from `.env` for
+the isolation properties. **No live provider has been queried through it**: the
+query surface of the hunting API is confirmed, and the adapter written against
+it, in the first-live-provider increment. Budget enforcement and the disclosure
+record are named in the docstring above because they are the layer's, and are
+**not built here** — see the "deliberately not here" section below.
 
 ## Deliberately not here, and named so a green suite does not read as a finished layer
 
-- **Cache-first lookup.** Every `Lookup` in this module is a `live_query`.
-  Nothing consults a stored record and nothing writes one, so a second identical
-  call queries the provider twice.
 - **Budget enforcement.** Nothing counts steps, live queries, tokens or seconds.
+  A cache hit already costs no live query, and nothing is counting.
 - **The disclosure record.** A call is logged locally; no disclosure row exists,
   and the send policy that decides *what may be sent to which source* is not
   written. In particular an indicator the model invents is sent as readily as one
@@ -91,17 +114,24 @@ above because they are the layer's, and are **not built here** — see the
 - **Aggregator origin retention** (`concept/05` rule 7). `ProviderClaim` has no
   origin field and `EnrichmentEvidence` has no column for one; no registered
   source is an aggregator, and the first one that is arrives with both.
+- **Pruning the cache.** Nothing is ever deleted, deliberately (see above), and
+  nothing bounds the growth either. What a prune may keep is a function of how
+  far back replay has to reach, which `concept/08` still lists as open.
 """
 
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
-from collections.abc import Callable, Mapping
+import re
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import psycopg
+from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from helena import taxonomy
@@ -115,10 +145,12 @@ from helena.enrichment import (
     NO_MATCH,
     OK,
     QUERY_FAILURE_REASONS,
+    STALE,
     Claim,
     EnrichmentEvidence,
     QueryFailure,
     SourceDescriptor,
+    Tier,
     UndeclaredClaim,
     check_claim,
     evidence_id,
@@ -127,10 +159,18 @@ from helena.enrichment import (
 from helena.observability import Redactor, StructuredLogger
 
 __all__ = [
+    "ANALYST_EVIDENCE_TABLE",
+    "ANALYST_EVIDENCE_VIEW",
+    "ANALYST_RESPONSE_TABLE",
+    "DEFAULT_PORTS",
+    "ENDPOINT",
     "ENTITY_TYPE_NOT_COVERED",
     "MALFORMED_ARGUMENTS",
     "MAX_INDICATOR",
     "REFUSAL_REASONS",
+    "CacheEntry",
+    "CacheKey",
+    "EvidenceCache",
     "Lookup",
     "NativeResponse",
     "ProviderAnswer",
@@ -144,6 +184,7 @@ __all__ = [
     "ToolRefusal",
     "Unscoped",
     "content",
+    "normalize_indicator",
     "response_version",
 ]
 
@@ -439,6 +480,15 @@ class ToolAnswer(BaseModel):
 
     A query that did not complete is **one step carrying a `QueryFailure` and no
     evidence at all**. `concept/05` rule 4: a typed error, and no taxonomy object.
+
+    **One case puts a failure beside evidence, and only one:** the live query
+    failed and the cache still held an expired record, which is served
+    explicitly `stale`. Rule 4 is not bent by it, because the rule is about a
+    *query's own* result and there are two retrievals in that answer -- the live
+    query, which produced a typed error and no taxonomy object, and the cache
+    read, which produced rows from a query that completed days ago. Both are
+    steps, both are visible, and the served rows say `stale` on every one. A
+    failure beside an `ok` row is still refused here.
     """
 
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
@@ -458,21 +508,30 @@ class ToolAnswer(BaseModel):
         if not self.steps:
             raise ValueError("a completed call produced no retrieval step")
         failures = [step for step in self.steps if step.failure is not None]
-        if failures and (len(self.steps) > 1 or self.evidence):
-            raise ValueError(
-                "a query that did not complete emits a typed error and no "
-                "taxonomy object (`concept/05` rule 4), and this answer carries "
-                f"{len(self.evidence)} claims beside it"
-            )
-        if not failures:
-            cited = {step.evidence_id for step in self.steps}
-            produced = {record.evidence_id for record in self.evidence}
-            if cited != produced:
+        if failures:
+            fresh = [record for record in self.evidence if record.status != STALE]
+            if len(failures) > 1 or fresh:
                 raise ValueError(
-                    "every retrieval step cites a record of this answer and every "
-                    "record has a step; a step citing an identifier that is not "
-                    "here is a citation nothing resolves"
+                    "a query that did not complete emits a typed error and no "
+                    "taxonomy object (`concept/05` rule 4). The one answer that "
+                    "carries both is a failed live query beside an expired record "
+                    f"served explicitly stale, and this one has {len(failures)} "
+                    f"failures and {len(fresh)} claims that are not stale"
                 )
+            if len(self.steps) != len(self.evidence) + 1:
+                raise ValueError(
+                    f"{len(self.steps)} steps for {len(self.evidence)} stale "
+                    "records and one failure; the trace has to account for every "
+                    "record it served and for the query that did not complete"
+                )
+        cited = {step.evidence_id for step in self.steps if step.failure is None}
+        produced = {record.evidence_id for record in self.evidence}
+        if cited != produced:
+            raise ValueError(
+                "every retrieval step cites a record of this answer and every "
+                "record has a step; a step citing an identifier that is not "
+                "here is a citation nothing resolves"
+            )
 
     @property
     def failure(self) -> QueryFailure | None:
@@ -537,6 +596,460 @@ def content(lookup: Lookup) -> str:
     )
 
 
+# --- The cache, which is the evidence store -----------------------------------
+#
+# `concept/07`: "The cache **is** the evidence store, not a second store beside
+# it. A separate opaque cache was rejected because an assessment could then cite
+# something the cache had already evicted." So what is below is a reader and a
+# writer for two tables in the one streaming engine, and there is no eviction in
+# it at all: `expires_at` bounds validity, never lifetime.
+# `sql/migrations/0017_analyst_lookup_cache.sql` is the schema and carries the
+# rest of the argument.
+
+#: The two tables and the view, named once. The read goes through the view
+#: rather than the table so that every hit is checked against the `'analyst'`
+#: literal the view carries -- `concept/instruction.md` §2's "two copies of a
+#: constant must be asserted equal", enforced on the path rather than only in a
+#: test.
+ANALYST_RESPONSE_TABLE = "helena_reference_analyst_response"
+ANALYST_EVIDENCE_TABLE = "helena_reference_analyst_evidence"
+ANALYST_EVIDENCE_VIEW = "helena_reference_evidence_analyst"
+
+#: What an endpoint name may look like. A **logical name for one operation of a
+#: provider**, not a path and never a URL: it reaches `ProviderTool.name`, which
+#: reaches the tool declaration the model is shown, and `concept/03` is explicit
+#: that the agent is offered a capability rather than a client. The pattern is
+#: what a tool name may contain for the same reason `name` replaces hyphens --
+#: tool names are identifiers.
+ENDPOINT = re.compile(r"^[a-z0-9][a-z0-9_]*$")
+
+#: The port a scheme implies, so that dropping it from a URL cache key does not
+#: change which resource the key is about. Two schemes, because two are what this
+#: project's own data contains; a scheme absent from here keeps its port, which
+#: costs a missed hit and never a wrong one.
+DEFAULT_PORTS = {"http": "80", "https": "443"}
+
+
+def normalize_indicator(entity_type: str, entity_value: str) -> str:
+    """The indicator as a cache key: one spelling per thing asked about.
+
+    `concept/08` lists this as an open question with a measurement attached to
+    it -- *"cache-key normalization, because inconsistent keys quietly halve the
+    hit rate"* -- and the rule that resolves it has to be stated before the
+    folding is, because the folding is only safe under it:
+
+        **Fold only what the identifier's own specification makes equivalent,
+        and when in doubt leave the value exactly as it is.**
+
+    The asymmetry is the whole argument. A fold that is too timid costs one
+    live query and one re-disclosure of an indicator that was already
+    disclosed. A fold that is too eager serves *one indicator's evidence for a
+    different indicator*, which is a wrong answer with a citation on it. So
+    every rule below is a documented equivalence and nothing here is a guess:
+
+    | Type | Folded | Left alone |
+    | --- | --- | --- |
+    | `address` | the textual form, through `ipaddress` -- `2001:0DB8::0001` and `2001:db8::1` are one address (RFC 5952) | anything that does not parse as an address |
+    | `domain` | ASCII case and trailing dots, matching what `sql/migrations/0008` does to an observed name | IDN forms: `xn--55qx5d.cn` and its U-label stay two keys |
+    | `url` | the scheme's case, the host's case, a default port, and an empty path (RFC 3986 §6.2.2-6.2.3) | the path's case, the query, the fragment, and anything that is not a hierarchical URI |
+    | `fingerprint` | case -- a JA3 is a hex digest | everything else |
+
+    Two of those "left alone" rows are deliberate gaps rather than oversights.
+    **IDN is not folded** because the fold needs an IDNA implementation this
+    project does not have a dependency for, and `sql/migrations/0008` already
+    records that the engine has no IDNA function either and that the loader
+    punycodes instead. **The fragment is not dropped** even though a server
+    never sees one, because a threat-intelligence provider matches the literal
+    URL string it was given, so two URLs differing only in a fragment are two
+    questions until a provider says otherwise.
+
+    Normalization never changes **what is sent**: the adapter is handed the
+    `ToolCall` with the caller's own spelling, and this value is the key the
+    store is searched by and the subject the claim is recorded against.
+
+    Raises `ToolError` for an entity type with no rule, rather than returning the
+    value unfolded -- a fifth entity type added to `ENTITY_TYPES` would otherwise
+    get no normalization and nobody would find out.
+    """
+    text = entity_value.strip()
+    try:
+        rule = _NORMALIZERS[entity_type]
+    except KeyError:
+        raise ToolError(
+            f"no cache-key normalization is defined for entity type "
+            f"{entity_type!r}; an unnormalized key is a hit rate nobody measures"
+        ) from None
+    return rule(text)
+
+
+def _normalized_address(text: str) -> str:
+    """The address's own textual form, or the text untouched if it is not one."""
+    try:
+        return ipaddress.ip_address(text).compressed
+    except ValueError:
+        return text
+
+
+def _normalized_domain(text: str) -> str:
+    """Lowercased and stripped of trailing dots -- 0008's rule, in Python.
+
+    Not byte-identical to the engine's: RisingWave 3.0.3's `lower()` is
+    ASCII-only (measured, `sql/migrations/0008`) and Python's is not, so a
+    non-ASCII U-label in uppercase folds here and does not there. Nothing joins
+    this key against `normalized_name` today; the increment that joins an
+    analyst-tier claim to a context owes the reconciliation, and this is where it
+    is written down.
+    """
+    return text.lower().rstrip(".")
+
+
+def _normalized_url(text: str) -> str:
+    """RFC 3986 syntax-based normalization, hand-rolled and no further.
+
+    Hand-rolled because `helena.tools` imports no URL machinery at all -- the
+    boundary test in `tests/test_tools.py` reads that off the module's own AST,
+    and it is the property that makes "the layer holds no endpoint and no HTTP
+    client" a fact rather than a promise. The parse below is therefore the
+    smallest one that can lowercase a scheme and an authority.
+
+    A value that is not a hierarchical URI is returned unchanged, which is the
+    conservative direction: it can only cost a hit.
+    """
+    scheme, marker, rest = text.partition(":")
+    if not marker or not rest.startswith("//") or not scheme.isascii() or not scheme:
+        return text
+    scheme = scheme.lower()
+    rest = rest[2:]
+    cut = min(
+        (position for position in (rest.find(c) for c in "/?#") if position >= 0),
+        default=len(rest),
+    )
+    authority, remainder = rest[:cut], rest[cut:]
+    userinfo, at, host = authority.rpartition("@")
+    host, colon, port = host.rpartition(":")
+    if not colon:
+        host, port = port, ""
+    host = host.lower()
+    if port in ("", DEFAULT_PORTS.get(scheme)):
+        colon, port = "", ""
+    if not remainder and scheme in DEFAULT_PORTS:
+        # RFC 3986 §6.2.3: for a scheme that defines a hierarchical path, an
+        # empty path and "/" identify the same resource.
+        remainder = "/"
+    return f"{scheme}:" + "//" + userinfo + at + host + colon + port + remainder
+
+
+def _normalized_fingerprint(text: str) -> str:
+    return text.lower()
+
+
+_NORMALIZERS: Mapping[str, Callable[[str], str]] = {
+    "address": _normalized_address,
+    "domain": _normalized_domain,
+    "url": _normalized_url,
+    "fingerprint": _normalized_fingerprint,
+}
+
+
+@dataclass(frozen=True)
+class CacheKey:
+    """What a cached record is looked up by: source, endpoint and indicator.
+
+    `concept/07` names those three; the tenant and the sensor are here for the
+    reason they are in `evidence_id` and in the event id -- two deployments
+    asking the same provider about the same address must not read each other's
+    records, and a cache is the easiest place for that to happen quietly.
+    """
+
+    tenant: str
+    sensor: str
+    source_id: str
+    endpoint: str
+    entity_type: str
+    #: The indicator as the caller asked about it. `indicator` is what is
+    #: matched on; this is what was disclosed.
+    entity_value: str
+
+    @property
+    def indicator(self) -> str:
+        return normalize_indicator(self.entity_type, self.entity_value)
+
+    @classmethod
+    def of(cls, descriptor: SourceDescriptor, endpoint: str, call: ToolCall, scope: RunScope):
+        return cls(
+            tenant=scope.tenant,
+            sensor=scope.sensor,
+            source_id=descriptor.source_id,
+            endpoint=endpoint,
+            entity_type=call.entity_type,
+            entity_value=call.entity_value,
+        )
+
+    @property
+    def columns(self) -> tuple[str, str, str, str, str, str]:
+        """The values of the WHERE clause below, in its order."""
+        return (
+            self.tenant,
+            self.sensor,
+            self.source_id,
+            self.endpoint,
+            self.entity_type,
+            self.indicator,
+        )
+
+
+_WHERE_KEY = (
+    "WHERE tenant = %s AND sensor = %s AND source_id = %s AND endpoint = %s "
+    "AND entity_type = %s AND entity_value_key = %s"
+)
+
+#: The evidence columns a stored claim is rebuilt from, in one order used by the
+#: SELECT and by the row that reads it.
+_EVIDENCE_COLUMNS = (
+    "evidence_id",
+    "source_id",
+    "source_tier",
+    "snapshot_version",
+    "entity_type",
+    "entity_value",
+    "classification",
+    "taxonomy_version",
+    "confidence",
+    "scope_type",
+    "scope_value",
+    "first_seen",
+    "last_seen",
+    "valid_until",
+    "native_evidence",
+)
+
+
+@dataclass(frozen=True)
+class CacheEntry:
+    """One stored answer: the response, the claims read out of it, and its dates.
+
+    `status` is **not** a field, and that is the same decision
+    `helena.enrichment.feed_status` made: `ok` and `stale` are properties of
+    *now*, and a stored one would be wrong the moment time passed. `evidence`
+    derives it against the clock the run was given, so two records served in one
+    answer cannot disagree about what time it is.
+    """
+
+    key: CacheKey
+    response_version: str
+    retrieved_at: datetime
+    expires_at: datetime
+    body: bytes
+    claims: tuple[Mapping[str, Any], ...]
+
+    def expired(self, now: datetime) -> bool:
+        return now >= self.expires_at
+
+    def evidence(self, now: datetime) -> tuple[EnrichmentEvidence, ...]:
+        """The stored claims as evidence rows, dated against `now`.
+
+        The classification is re-validated on the way out -- but against the
+        `taxonomy_version` **the row recorded**, which is what `EnrichmentEvidence`
+        does with it, and never against today's declared subset.
+        `concept/instruction.md` §2: replay validates against the version the
+        assessment recorded, and migrating an old row forward is forbidden.
+        """
+        status = STALE if self.expired(now) else OK
+        return tuple(
+            EnrichmentEvidence(status=status, **claim) for claim in self.claims
+        )
+
+    @property
+    def native(self) -> NativeResponse:
+        """The provider's response as it arrived, rebuilt from the store.
+
+        This is what makes replay a replay: the object a cache hit returns
+        carries the same bytes the live query returned, so an assessment that
+        depended on a lookup can be re-read against what the provider actually
+        said rather than against what it would say today.
+        """
+        return NativeResponse(
+            source_id=self.key.source_id,
+            entity_type=self.key.entity_type,
+            entity_value=self.key.entity_value,
+            retrieved_at=self.retrieved_at,
+            body=self.body,
+        )
+
+
+class EvidenceCache:
+    """The cache-first read and the write behind it, over the one store.
+
+    Not a store of its own: every statement below addresses
+    `sql/migrations/0017_analyst_lookup_cache.sql`'s tables in the same engine
+    the rest of the system uses, in the evidence shape `sql/migrations/0011`
+    defined.
+
+    It holds a `psycopg.Connection` and nothing else -- no state, no in-process
+    dictionary in front of it. A memoization layer here would be the second store
+    `concept/instruction.md` §2 forbids, and it would make two runs in one process
+    differ from two runs in two.
+    """
+
+    __slots__ = ("_connection",)
+
+    def __init__(self, connection: psycopg.Connection) -> None:
+        self._connection = connection
+
+    def read(self, key: CacheKey) -> CacheEntry | None:
+        """The most recent stored answer for this key, expired or not. `None` on a miss.
+
+        Expiry is **not** filtered here on purpose. The caller needs to tell a
+        miss from an expiry: a miss means query, and an expiry means query and
+        fall back to this record if the query does not complete. Filtering here
+        would collapse the two into one absence, and the record that could have
+        been served explicitly stale would be one nobody knew was there.
+        """
+        self._connection.execute("FLUSH")
+        newest = self._connection.execute(
+            f"SELECT snapshot_version, retrieved_at, expires_at "
+            f"FROM {ANALYST_EVIDENCE_VIEW} {_WHERE_KEY} "
+            f"ORDER BY retrieved_at DESC, snapshot_version DESC LIMIT 1",
+            key.columns,
+        ).fetchall()
+        if not newest:
+            return None
+        response_version, retrieved_at, expires_at = newest[0]
+        rows = self._connection.execute(
+            f"SELECT evidence_tier, {', '.join(_EVIDENCE_COLUMNS)} "
+            f"FROM {ANALYST_EVIDENCE_VIEW} {_WHERE_KEY} AND snapshot_version = %s",
+            (*key.columns, response_version),
+        ).fetchall()
+        claims = []
+        for tier, *values in rows:
+            if tier != ANALYST_TIER:
+                # The view's literal against Python's constant, on the read path
+                # rather than only in a test. A drift here would tag a live
+                # lookup as enrichment-tier evidence, which is what would put it
+                # into the precomputed triage context of every later host.
+                raise ToolError(
+                    f"{ANALYST_EVIDENCE_VIEW} produced evidence tier {tier!r} and "
+                    f"this layer writes {ANALYST_TIER!r}"
+                )
+            claim = dict(zip(_EVIDENCE_COLUMNS, values, strict=True))
+            claim["source_tier"] = Tier(claim["source_tier"])
+            claim["native_evidence"] = claim["native_evidence"] or {}
+            claims.append(claim)
+        return CacheEntry(
+            key=key,
+            response_version=response_version,
+            retrieved_at=retrieved_at,
+            expires_at=expires_at,
+            body=self._body(key, response_version),
+            claims=tuple(claims),
+        )
+
+    def _body(self, key: CacheKey, response_version: str) -> bytes:
+        """The stored response the claims were read out of. Its absence is a bug.
+
+        Loud rather than silent: the response is written before the claims are,
+        so claims without one mean something removed a row this layer never
+        deletes, and serving a hit whose native payload cannot be produced would
+        be a replay that quietly stopped being one.
+        """
+        rows = self._connection.execute(
+            f"SELECT body FROM {ANALYST_RESPONSE_TABLE} {_WHERE_KEY} "
+            f"AND response_version = %s",
+            (*key.columns, response_version),
+        ).fetchall()
+        if not rows:
+            raise ToolError(
+                f"{ANALYST_EVIDENCE_TABLE} holds claims from response "
+                f"{response_version} and {ANALYST_RESPONSE_TABLE} holds no such "
+                f"response; a claim whose response is gone cannot be replayed"
+            )
+        return bytes(rows[0][0])
+
+    def store_response(self, key: CacheKey, native: NativeResponse) -> str:
+        """Write the provider's bytes **before** anything is read out of them.
+
+        `concept/05` rule 5: *"store the response before it is evaluated, cited
+        by stable identifier, or an assessment that depended on a live lookup
+        cannot be replayed."* The order is the point -- a response that will not
+        map is on disk with its digest, and the claims that were not written
+        beside it are why a later lookup treats the key as a miss.
+
+        Returns the identifier it is cited by.
+        """
+        self._connection.execute(
+            f"INSERT INTO {ANALYST_RESPONSE_TABLE} (tenant, sensor, source_id, "
+            f"endpoint, entity_type, entity_value, entity_value_key, "
+            f"response_version, retrieved_at, body) "
+            f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                key.tenant,
+                key.sensor,
+                key.source_id,
+                key.endpoint,
+                key.entity_type,
+                key.entity_value,
+                key.indicator,
+                native.response_version,
+                native.retrieved_at,
+                native.body,
+            ),
+        )
+        self._connection.execute("FLUSH")
+        return native.response_version
+
+    def store_evidence(
+        self,
+        key: CacheKey,
+        evidence: Sequence[EnrichmentEvidence],
+        *,
+        retrieved_at: datetime,
+        expires_at: datetime,
+    ) -> None:
+        """Write the claims, with the retrieval time and the expiry beside them.
+
+        `status` is not written -- see `CacheEntry`. Re-fetching an identical
+        answer writes the same `evidence_id` and therefore the same row, with a
+        later `retrieved_at` and `expires_at`: an upsert that is a refresh rather
+        than a duplicate, which is the idempotence RisingWave's silent
+        insert-onto-an-existing-key requires a key to provide.
+        """
+        for record in evidence:
+            self._connection.execute(
+                f"INSERT INTO {ANALYST_EVIDENCE_TABLE} (tenant, sensor, "
+                f"evidence_id, source_id, endpoint, source_tier, "
+                f"snapshot_version, entity_type, entity_value, entity_value_key, "
+                f"classification, taxonomy_version, confidence, scope_type, "
+                f"scope_value, first_seen, last_seen, valid_until, "
+                f"native_evidence, retrieved_at, expires_at) "
+                f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                f"%s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    key.tenant,
+                    key.sensor,
+                    record.evidence_id,
+                    record.source_id,
+                    key.endpoint,
+                    record.source_tier.value,
+                    record.snapshot_version,
+                    record.entity_type,
+                    record.entity_value,
+                    key.indicator,
+                    record.classification,
+                    record.taxonomy_version,
+                    record.confidence,
+                    record.scope_type,
+                    record.scope_value,
+                    record.first_seen,
+                    record.last_seen,
+                    record.valid_until,
+                    Jsonb(record.native_evidence),
+                    retrieved_at,
+                    expires_at,
+                ),
+            )
+        self._connection.execute("FLUSH")
+
+
 # --- The tool -----------------------------------------------------------------
 
 
@@ -559,16 +1072,38 @@ class ProviderTool:
 
     The adapter is handed the `Secret` rather than the revealed string, so
     `reveal()` stays greppable and stays at the point of use.
+
+    **One tool is one source and one endpoint**, and both are in the cache key
+    and in the tool's name. `concept/07` puts the endpoint in the key -- "a valid,
+    unexpired record for its source, endpoint and indicator" -- because two
+    operations of one provider answer different questions about one indicator,
+    and it puts the endpoint in the *retention* for the reason it gives: "a
+    registration date never changes, multi-engine reputation moves as engines
+    rescan, and risk scores sit between." So `retention_seconds` is a per-tool
+    value with no default: a source-wide number would be one number too few, and
+    a default would be the silent configuration `concept/instruction.md` §6 names.
     """
 
-    __slots__ = ("_descriptor", "_credential", "_ask", "_logger", "_redactor")
+    __slots__ = (
+        "_descriptor",
+        "_endpoint",
+        "_credential",
+        "_ask",
+        "_cache",
+        "_retention",
+        "_logger",
+        "_redactor",
+    )
 
     def __init__(
         self,
         *,
         source_id: str,
+        endpoint: str,
         credential: Secret,
         ask: Callable[[ToolCall, Secret], ProviderAnswer],
+        cache: EvidenceCache,
+        retention_seconds: int,
         logger: StructuredLogger,
         redactor: Redactor,
     ) -> None:
@@ -576,19 +1111,46 @@ class ProviderTool:
         # built: adding a source is a governed decision (`concept/05`), and a
         # descriptor passed in as an argument would make it a constructor call.
         self._descriptor = source(source_id)
+        if not ENDPOINT.match(endpoint):
+            raise ToolError(
+                f"{endpoint!r} is not an endpoint name. It has to match "
+                f"{ENDPOINT.pattern} -- a logical name for one operation, "
+                f"because it reaches the tool declaration the model is shown and "
+                f"the agent is offered a capability, not a client"
+            )
         if not isinstance(credential, Secret):
             raise ToolError(
                 "a provider credential is a helena.config.Secret, not a "
                 f"{type(credential).__name__}; a bare string is one that renders "
                 "itself into a log line"
             )
+        if not isinstance(retention_seconds, int) or retention_seconds <= 0:
+            raise ToolError(
+                f"retention for {source_id}/{endpoint} is "
+                f"{retention_seconds!r}; it is configured per source and per "
+                f"endpoint (`concept/07`) and a zero or absent one is a cache "
+                f"that never hits pretending to be one that does"
+            )
+        self._endpoint = endpoint
         self._credential = credential
         self._ask = ask
+        self._cache = cache
+        self._retention = timedelta(seconds=retention_seconds)
         self._logger = logger
         self._redactor = redactor
 
     def __repr__(self) -> str:
-        return f"ProviderTool({self._descriptor.source_id!r})"
+        return f"ProviderTool({self._descriptor.source_id!r}, {self._endpoint!r})"
+
+    @property
+    def endpoint(self) -> str:
+        """Which operation of the source this tool is. Part of the cache key."""
+        return self._endpoint
+
+    @property
+    def retention(self) -> timedelta:
+        """How long a record from this source and endpoint stays valid."""
+        return self._retention
 
     @property
     def descriptor(self) -> SourceDescriptor:
@@ -597,8 +1159,13 @@ class ProviderTool:
 
     @property
     def name(self) -> str:
-        """The tool name a model is offered. Underscores, because tool names are identifiers."""
-        return f"lookup_{self._descriptor.source_id.replace('-', '_')}"
+        """The tool name a model is offered. Underscores, because tool names are identifiers.
+
+        The endpoint is in it because one source may have several: two tools
+        sharing a name is a tool the model cannot address, and the name is the
+        only thing it addresses them by.
+        """
+        return f"lookup_{self._descriptor.source_id.replace('-', '_')}_{self._endpoint}"
 
     def declaration(self) -> dict[str, Any]:
         """The tool as the model is offered it: a name, a description, an input schema.
@@ -645,11 +1212,21 @@ class ProviderTool:
         scope: RunScope,
         now: datetime | None = None,
     ) -> Lookup:
-        """Ask this provider about one indicator, scoped to one tenant.
+        """Ask this provider about one indicator, scoped to one tenant. Cache-first.
 
         `scope` is keyword-only and has no default: a call that did not say whose
         it is does not compile, which is the shape `concept/instruction.md` §6
         asks for -- fail at the call, never a defaulted tenant.
+
+        The order is `concept/07`'s, and each branch is a different fact:
+
+        | | |
+        | --- | --- |
+        | a valid, unexpired record | served, **nothing is sent**, one `cache_hit` step per record |
+        | nothing stored | queried, stored, served, `live_query` |
+        | stored and expired | queried; the fresh answer replaces it |
+        | stored, expired, and the query did not complete | the expired record served explicitly `stale`, **beside** the typed failure |
+        | nothing stored and the query did not complete | the typed failure alone |
         """
         retrieved_at = now or datetime.now(timezone.utc)
         try:
@@ -663,9 +1240,23 @@ class ProviderTool:
                 f"{sorted(self._descriptor.entity_types)}",
             )
 
+        key = CacheKey.of(self._descriptor, self._endpoint, call, scope)
+        stored = self._cache.read(key)
+        if stored is not None and not stored.expired(retrieved_at):
+            return self._served(key, stored, retrieved_at)
+
         try:
             answer = self._ask(call, self._credential)
         except ProviderQueryFailed as failed:
+            if stored is not None:
+                # Expired, and the provider is unreachable. The record was never
+                # evicted -- that is what "the cache is the evidence store" buys
+                # -- so it is still here and still citable, and `concept/02`
+                # defines `stale` as exactly this: the claim stands and its age
+                # is now part of what it is worth. The failure travels with it.
+                return self._served(
+                    key, stored, retrieved_at, failure=self._failure(call, failed)
+                )
             return self._failed(call, failed, retrieved_at)
 
         native = NativeResponse(
@@ -675,8 +1266,12 @@ class ProviderTool:
             retrieved_at=retrieved_at,
             body=answer.body,
         )
+        # Before it is evaluated (`concept/05` rule 5). A response that will not
+        # map is then on disk with its digest, which is the only way a
+        # `malformed_response` can be investigated against what actually arrived.
+        self._cache.store_response(key, native)
         try:
-            evidence = self._evidence(call, answer, native, scope)
+            evidence = self._evidence(call, answer, native, key)
         except (UndeclaredClaim, taxonomy.TaxonomyError, ValidationError) as undeclared:
             # `concept/05` rule 1 and rule 4 meeting: a response that does not
             # validate produces a typed error and **no taxonomy object at all**.
@@ -696,11 +1291,23 @@ class ProviderTool:
                 native=native,
             )
 
+        self._cache.store_evidence(
+            key,
+            evidence,
+            retrieved_at=retrieved_at,
+            expires_at=retrieved_at + self._retention,
+        )
         self._logger.info(
             "tools.lookup.completed",
             source_id=self._descriptor.source_id,
+            endpoint=self._endpoint,
             entity_type=call.entity_type,
             outcome=contract.LIVE_QUERY,
+            # `concept/07`: "a cache hit discloses nothing. The indicator was
+            # already disclosed when the entry was fetched." This is the call
+            # where it was, so the log says so -- and the disclosure *record*
+            # that this field is not is the send-policy increment's.
+            disclosed=True,
             records=len(evidence),
             response_version=native.response_version,
         )
@@ -725,12 +1332,83 @@ class ProviderTool:
             native=native,
         )
 
+    def _served(
+        self,
+        key: CacheKey,
+        stored: CacheEntry,
+        now: datetime,
+        *,
+        failure: QueryFailure | None = None,
+    ) -> Lookup:
+        """A stored answer, served without touching the network.
+
+        `retrieved_at` on every step is the **stored record's** time and not
+        `now`: `concept/07` asks the trace to carry "the retrieval time of the
+        underlying record", because the age of what was served is the number that
+        says whether the answer was current, and because two runs differing only
+        in cache state have to be distinguishable afterwards.
+
+        `failure` is present only in the stale fallback -- the record had expired
+        and the live query did not complete. It is a step of its own, so the
+        outage stays countable and the served rows stay `stale` rather than
+        either fact being quietly dropped.
+        """
+        evidence = stored.evidence(now)
+        steps = [
+            contract.RetrievalStep(
+                source_id=key.source_id,
+                entity_type=key.entity_type,
+                entity_value=key.entity_value,
+                outcome=contract.CACHE_HIT,
+                retrieved_at=stored.retrieved_at,
+                evidence_id=record.evidence_id,
+            )
+            for record in evidence
+        ]
+        if failure is not None:
+            steps.append(
+                contract.RetrievalStep(
+                    source_id=key.source_id,
+                    entity_type=key.entity_type,
+                    entity_value=key.entity_value,
+                    outcome=contract.LIVE_QUERY,
+                    retrieved_at=now,
+                    failure=failure,
+                )
+            )
+        self._logger.info(
+            "tools.lookup.completed",
+            source_id=key.source_id,
+            endpoint=self._endpoint,
+            entity_type=key.entity_type,
+            outcome=contract.CACHE_HIT,
+            # The property that makes caching a privacy control: a hit sends
+            # nothing, so the indicator was disclosed once, when the entry was
+            # fetched, however many runs read it afterwards. The stale fallback
+            # is the exception and says so -- it reached the provider and the
+            # provider did not answer, which is a disclosure either way.
+            disclosed=failure is not None,
+            status=STALE if failure is not None else OK,
+            records=len(evidence),
+            response_version=stored.response_version,
+        )
+        return Lookup(
+            answer=ToolAnswer(
+                source_id=key.source_id,
+                evidence_tier=ANALYST_TIER,
+                evidence=evidence,
+                steps=tuple(steps),
+            ),
+            refusal=None,
+            native=stored.native,
+        )
+
     def _evidence(
         self,
         call: ToolCall,
         answer: ProviderAnswer,
         native: NativeResponse,
-        scope: RunScope,
+        key: CacheKey,
     ) -> tuple[EnrichmentEvidence, ...]:
         """Validate every claim against the declared subset, then normalize it.
 
@@ -738,6 +1416,13 @@ class ProviderTool:
         reimplemented: it refuses a path outside the published subset, a path the
         taxonomy version does not have, and a claim about an entity type the
         source does not cover.
+
+        **The claim is recorded against the normalized indicator**, not against
+        the spelling the caller used. A claim is about an address rather than
+        about how somebody typed it, and it is what makes a cache hit and the
+        live query that filled it produce byte-identical rows -- which is the
+        property "two runs differing only in cache state" is measured against.
+        What was disclosed is kept on the stored response, which has both.
         """
         records = []
         for claim in answer.claims:
@@ -752,14 +1437,14 @@ class ProviderTool:
             records.append(
                 EnrichmentEvidence(
                     evidence_id=evidence_id(
-                        tenant=scope.tenant,
-                        sensor=scope.sensor,
+                        tenant=key.tenant,
+                        sensor=key.sensor,
                         source_id=self._descriptor.source_id,
                         # A live answer has no feed snapshot; what dates it is
                         # the response it came out of. See `NativeResponse`.
                         snapshot_version=native.response_version,
                         entity_type=call.entity_type,
-                        entity_value=call.entity_value,
+                        entity_value=key.indicator,
                         classification=claim.path,
                         scope_type=claim.scope_type,
                         scope_value=claim.scope_value,
@@ -769,7 +1454,7 @@ class ProviderTool:
                     source_tier=self._descriptor.tier,
                     snapshot_version=native.response_version,
                     entity_type=call.entity_type,
-                    entity_value=call.entity_value,
+                    entity_value=key.indicator,
                     status=OK,
                     classification=claim.path,
                     taxonomy_version=self._descriptor.taxonomy_version,
@@ -806,13 +1491,7 @@ class ProviderTool:
         native: NativeResponse | None = None,
     ) -> Lookup:
         """A query that did not complete: a typed error, and no taxonomy object."""
-        failure = QueryFailure(
-            source_id=self._descriptor.source_id,
-            entity_type=call.entity_type,
-            entity_value=call.entity_value,
-            reason=failed.reason,
-            detail=self._diagnostic(failed.detail),
-        )
+        failure = self._failure(call, failed)
         self._logger.warning(
             "tools.lookup.failed",
             source_id=self._descriptor.source_id,
@@ -837,6 +1516,21 @@ class ProviderTool:
             ),
             refusal=None,
             native=native,
+        )
+
+    def _failure(self, call: ToolCall, failed: ProviderQueryFailed) -> QueryFailure:
+        """The adapter's typed refusal as the store's typed error, redacted.
+
+        One builder, because a failure reaches two shapes -- a `Lookup` with no
+        evidence, and a step beside a stale record -- and two constructions of
+        one object are two places a detail could go unredacted.
+        """
+        return QueryFailure(
+            source_id=self._descriptor.source_id,
+            entity_type=call.entity_type,
+            entity_value=call.entity_value,
+            reason=failed.reason,
+            detail=self._diagnostic(failed.detail),
         )
 
     def _diagnostic(self, detail: str) -> str:

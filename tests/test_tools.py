@@ -11,8 +11,14 @@ hunting API wraps them; the increment that confirms the surface writes the real
 adapter behind the same callable.
 
 What is under test is the layer, not the provider: scoping, credential ownership,
-validation against the declared subset, the compact/native split, and the four
-distinct ways a call produces no claim.
+validation against the declared subset, the compact/native split, the four
+distinct ways a call produces no claim, and the cache-first lookup.
+
+**Every test in this module needs the engine**, because the cache is the evidence
+store: there is no in-memory stand-in for it, and one built here would be a
+second implementation of the thing under test. `_store` below is autouse and
+takes `migrated_engine`, so the store a tool writes to is the schema the
+migrations produce, emptied between tests.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ from pydantic import ValidationError
 from helena import enrichment, observability, tools
 from helena.config import REDACTED, Secret, Settings
 from helena.contracts.v1 import (
+    CACHE_HIT,
     CONTRACT_VERSION,
     LIVE_QUERY,
     TRIAGE_SUSPICIOUS,
@@ -47,10 +54,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PACKAGE_MODULE = PROJECT_ROOT / "src" / "helena" / "tools.py"
 EXPORT = PROJECT_ROOT / "tests" / "fixtures" / "threatfox" / "export.json"
 
+pytestmark = pytest.mark.integration
+
 SOURCE = enrichment.THREATFOX_SOURCE
 TENANT, SENSOR = "acme", "sensor-1"
 KEY = "abusech-key-under-test"
 NOW = datetime(2026, 9, 9, 12, 0, tzinfo=timezone.utc)
+#: The endpoint every test's tool is. A logical name for one operation, not a
+#: path: the live provider's query surface is unconfirmed and inventing one here
+#: is the mistake `concept/05` records.
+ENDPOINT = "indicator"
+#: Retention for that endpoint, in seconds. One hour, which is
+#: `THREATFOX_MIN_FETCH_INTERVAL_SECONDS` -- the publisher's own floor -- and is
+#: a test value rather than a measured policy: no live endpoint exists yet.
+RETENTION = enrichment.THREATFOX_MIN_FETCH_INTERVAL_SECONDS
+LATER = NOW + timedelta(seconds=RETENTION + 1)
 
 ENVIRONMENT = {
     "LLM_URL": "http://model.invalid/v1",
@@ -172,6 +190,29 @@ def _moment(value: str | None) -> datetime | None:
 # --- Builders -----------------------------------------------------------------
 
 
+#: The connection the autouse fixture below put here, innermost last.
+#:
+#: A module-level handle rather than a fixture argument on every test: the cache
+#: is not optional -- "every provider tool is cache-first" -- so `tool()` has to
+#: be able to build one, and threading `migrated_engine` through all forty tests
+#: would say nothing that this docstring does not.
+_ENGINE: list[object] = []
+
+
+@pytest.fixture(autouse=True)
+def _store(migrated_engine):
+    """The migrated schema every tool in this module writes its cache to."""
+    _ENGINE.append(migrated_engine)
+    try:
+        yield migrated_engine
+    finally:
+        _ENGINE.pop()
+
+
+def cache() -> tools.EvidenceCache:
+    return tools.EvidenceCache(_ENGINE[-1])
+
+
 def settings(**overrides: str) -> Settings:
     return Settings.load(environ={**ENVIRONMENT, **overrides}, env_file=None)
 
@@ -179,16 +220,21 @@ def settings(**overrides: str) -> Settings:
 def tool(
     *,
     source_id: str = SOURCE,
+    endpoint: str = ENDPOINT,
     ask=None,
     credential: Secret | None = None,
     stream: io.StringIO | None = None,
     configured: Settings | None = None,
+    retention_seconds: int = RETENTION,
 ) -> tools.ProviderTool:
     configured = configured or settings()
     return tools.ProviderTool(
         source_id=source_id,
+        endpoint=endpoint,
         credential=credential or configured.providers.abusech_auth_key,
         ask=ask or adapter(),
+        cache=cache(),
+        retention_seconds=retention_seconds,
         logger=observability.logger("tools", configured, stream=stream or io.StringIO()),
         redactor=observability.Redactor.from_settings(configured),
     )
@@ -236,11 +282,17 @@ def request(**overrides: object) -> AgentRequest:
     )
 
 
-def lookup(entity_value: str = LISTED, entity_type: str = "domain", **kwargs):
+def lookup(
+    entity_value: str = LISTED,
+    entity_type: str = "domain",
+    *,
+    at: datetime = NOW,
+    **kwargs,
+):
     return tool(**kwargs).lookup(
         {"entity_type": entity_type, "entity_value": entity_value},
         scope=scope(),
-        now=NOW,
+        now=at,
     )
 
 
@@ -400,12 +452,20 @@ def test_every_record_carries_the_analyst_tier_and_never_the_enrichment_one():
 
 
 def test_the_response_is_what_dates_a_live_claim():
-    """A live answer has no feed snapshot; the response digest is what it has."""
+    """A live answer has no feed snapshot; the response digest is what it has.
+
+    The second call is past the retention window, so it is a live query and not
+    the cache hit an identical `now` would have produced -- what is under test is
+    that a *changed answer* is a different claim, and a cached one would never
+    reach the adapter to change.
+    """
     same = [lookup().answer.evidence[0].evidence_id for _ in range(2)]
     assert same[0] == same[1]
-    moved = lookup(ask=adapter(body=b'[{"changed": true}]')).answer.evidence[0]
-    assert moved.evidence_id != same[0]
-    assert moved.snapshot_version == tools.response_version(b'[{"changed": true}]')
+    moved = lookup(ask=adapter(body=b'[{"changed": true}]'), at=LATER)
+    assert moved.answer.evidence[0].evidence_id != same[0]
+    assert moved.answer.evidence[0].snapshot_version == tools.response_version(
+        b'[{"changed": true}]'
+    )
 
 
 # --- The five things that are not each other ----------------------------------
@@ -494,9 +554,11 @@ def test_an_adapter_bug_propagates_rather_than_becoming_an_outage():
         lookup(ask=broken)
 
 
-def test_an_answer_cannot_carry_evidence_beside_a_failure():
+def test_an_answer_cannot_carry_an_ok_record_beside_a_failure():
+    """The one answer that carries both is the stale fallback, and these are `ok`."""
     result = lookup()
-    failed = lookup(ask=adapter(fail=tools.ProviderQueryFailed(enrichment.TIMEOUT)))
+    failed = lookup(UNLISTED, ask=adapter(fail=tools.ProviderQueryFailed(enrichment.TIMEOUT)))
+    assert all(record.status == enrichment.OK for record in result.answer.evidence)
     with pytest.raises(ValidationError):
         tools.ToolAnswer(
             source_id=SOURCE,
@@ -587,7 +649,7 @@ def test_a_bare_string_cannot_be_a_provider_credential():
 
 def test_the_tool_itself_renders_no_credential():
     provider = tool()
-    assert repr(provider) == f"ProviderTool({SOURCE!r})"
+    assert repr(provider) == f"ProviderTool({SOURCE!r}, {ENDPOINT!r})"
     assert KEY not in repr(provider)
     assert not hasattr(provider, "credential")
 
@@ -740,8 +802,7 @@ def test_the_agent_visible_object_is_one_line_of_json():
 # --- The trace ----------------------------------------------------------------
 
 
-def test_every_completed_call_is_a_live_query_and_says_so():
-    """Cache-first is the next increment; until it lands nothing is a cache hit."""
+def test_the_first_call_for_an_indicator_is_a_live_query_and_says_so():
     for step in lookup().answer.steps:
         assert step.outcome == LIVE_QUERY
         assert step.retrieved_at == NOW
@@ -754,4 +815,530 @@ def test_a_completed_call_is_logged_without_the_payload():
     assert record["event"] == "tools.lookup.completed"
     assert record["fields"]["response_version"] == result.native.response_version
     assert record["fields"]["records"] == 1
+    assert record["fields"]["outcome"] == LIVE_QUERY
+    assert record["fields"]["disclosed"] is True
+    assert record["fields"]["endpoint"] == ENDPOINT
     assert LISTED not in stream.getvalue()
+
+
+# --- Cache-first, where the cache is the evidence store -----------------------
+
+
+def test_a_second_identical_call_is_served_from_the_store_and_sends_nothing():
+    """`concept/07`: a valid, unexpired record is returned without touching the network.
+
+    `calls` is the disclosure measurement, not a call counter: the adapter is the
+    only thing in this layer that can reach a provider, so an empty second entry
+    is "the indicator was not sent again".
+    """
+    calls: list = []
+    provider = tool(ask=adapter(calls=calls))
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+
+    first = provider.lookup(arguments, scope=scope(), now=NOW)
+    second = provider.lookup(arguments, scope=scope(), now=NOW + timedelta(seconds=30))
+
+    assert len(calls) == 1
+    assert [step.outcome for step in first.answer.steps] == [LIVE_QUERY]
+    assert [step.outcome for step in second.answer.steps] == [CACHE_HIT]
+
+
+def test_a_cache_hit_carries_the_retrieval_time_of_the_underlying_record():
+    """`concept/07`: the trace records the retrieval time of the record it served.
+
+    Not the time of the call. The age of what was served is the number that says
+    whether the answer was current, and a step stamped `now` would say every
+    answer was fresh.
+    """
+    provider = tool()
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    provider.lookup(arguments, scope=scope(), now=NOW)
+    later = NOW + timedelta(minutes=17)
+    (step,) = provider.lookup(arguments, scope=scope(), now=later).answer.steps
+
+    assert step.outcome == CACHE_HIT
+    assert step.retrieved_at == NOW
+    assert step.retrieved_at != later
+
+
+def test_two_runs_differing_only_in_cache_state_are_distinguishable_afterwards():
+    """The whole of `concept/07`'s requirement, and both halves of it.
+
+    The outcome differs, so the runs can be told apart; the evidence does not, so
+    telling them apart is not a difference in what was concluded.
+    """
+    provider = tool()
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    live = provider.lookup(arguments, scope=scope(), now=NOW)
+    hit = provider.lookup(arguments, scope=scope(), now=NOW + timedelta(minutes=1))
+
+    assert {step.outcome for step in live.answer.steps} == {LIVE_QUERY}
+    assert {step.outcome for step in hit.answer.steps} == {CACHE_HIT}
+    assert live.answer.evidence == hit.answer.evidence
+    assert live.native.body == hit.native.body
+    assert live.native.response_version == hit.native.response_version
+
+
+def test_a_negative_result_is_cached_too_and_the_decision_is_recorded():
+    """Decided: yes. `docs/decisions/0025-the-lookup-cache.md` §3.
+
+    `concept/08` frames it as the question that decides whether caching helps at
+    all -- most lookups miss -- and `no_match` is an answer with a claim in it,
+    stored in the same shape a hit is. Not caching it would leave the cache
+    almost never useful and would re-disclose the same indicator every run.
+    """
+    calls: list = []
+    provider = tool(ask=adapter(calls=calls))
+    arguments = {"entity_type": "domain", "entity_value": UNLISTED}
+
+    first = provider.lookup(arguments, scope=scope(), now=NOW)
+    second = provider.lookup(arguments, scope=scope(), now=NOW + timedelta(minutes=1))
+
+    assert len(calls) == 1
+    assert first.answer.evidence[0].classification == NO_MATCH
+    assert second.answer.evidence == first.answer.evidence
+    assert second.answer.steps[0].outcome == CACHE_HIT
+
+
+def test_a_failed_query_is_not_cached_and_the_decision_is_recorded():
+    """Decided: no. An outage is not a record of what a source said.
+
+    Caching one would let a five-minute outage suppress every query for the
+    retention window, which is `failed` collapsing into an answer.
+    """
+    calls: list = []
+    failing = tool(
+        ask=adapter(calls=calls, fail=tools.ProviderQueryFailed(enrichment.TIMEOUT))
+    )
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    failing.lookup(arguments, scope=scope(), now=NOW)
+    failing.lookup(arguments, scope=scope(), now=NOW + timedelta(seconds=1))
+    assert len(calls) == 2
+
+    # And the next working call is a live query, not a cached failure.
+    recovered = tool(ask=adapter()).lookup(
+        arguments, scope=scope(), now=NOW + timedelta(seconds=2)
+    )
+    assert recovered.answer.steps[0].outcome == LIVE_QUERY
+    assert recovered.answer.evidence[0].classification == "malicious"
+
+
+def test_an_entry_past_its_retention_is_queried_again():
+    calls: list = []
+    provider = tool(ask=adapter(calls=calls))
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    provider.lookup(arguments, scope=scope(), now=NOW)
+    fresh = provider.lookup(arguments, scope=scope(), now=LATER)
+
+    assert len(calls) == 2
+    assert fresh.answer.steps[0].outcome == LIVE_QUERY
+    assert fresh.answer.evidence[0].status == enrichment.OK
+
+
+def test_an_expired_entry_is_served_explicitly_stale_when_the_provider_is_unreachable():
+    """Decided: yes. `docs/decisions/0025-the-lookup-cache.md` §4.
+
+    The record was never evicted -- that is what "the cache is the evidence
+    store" buys -- so it is still there and still citable, and `concept/02`
+    defines `stale` as exactly this: the claim stands and its age is now part of
+    what it is worth. The failure travels beside it rather than being dropped, so
+    the outage is still countable and the agent is not told the answer is fresh.
+    """
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    tool().lookup(arguments, scope=scope(), now=NOW)
+
+    unreachable = tool(
+        ask=adapter(fail=tools.ProviderQueryFailed(enrichment.TRANSPORT_ERROR, "down"))
+    )
+    served = unreachable.lookup(arguments, scope=scope(), now=LATER)
+
+    (record,) = served.answer.evidence
+    assert record.status == enrichment.STALE
+    assert record.classification == "malicious"
+    assert record.evidence_id  # the same claim: the status is not in the digest
+
+    cached, failed = served.answer.steps
+    assert cached.outcome == CACHE_HIT
+    assert cached.retrieved_at == NOW
+    assert cached.evidence_id == record.evidence_id
+    assert failed.outcome == LIVE_QUERY
+    assert failed.retrieved_at == LATER
+    assert failed.failure.reason == enrichment.TRANSPORT_ERROR
+    assert served.answer.failure is not None
+
+    # `stale` and `failed` reach the agent as themselves, in one object.
+    shown = json.loads(tools.content(served))
+    assert shown["evidence"][0]["status"] == "stale"
+    assert shown["steps"][1]["failure"]["reason"] == enrichment.TRANSPORT_ERROR
+
+
+def test_a_stale_fallback_is_the_same_claim_the_fresh_one_was():
+    """The status is deliberately not in `evidence_id`: a claim that ages is one claim."""
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    fresh = tool().lookup(arguments, scope=scope(), now=NOW)
+    stale = tool(
+        ask=adapter(fail=tools.ProviderQueryFailed(enrichment.TIMEOUT))
+    ).lookup(arguments, scope=scope(), now=LATER)
+
+    assert [record.evidence_id for record in stale.answer.evidence] == [
+        record.evidence_id for record in fresh.answer.evidence
+    ]
+    assert fresh.answer.evidence[0].status == enrichment.OK
+    assert stale.answer.evidence[0].status == enrichment.STALE
+
+
+def test_a_failed_query_with_nothing_stored_is_the_typed_failure_alone():
+    """No expired record means nothing to fall back to, and no taxonomy object."""
+    failed = lookup(ask=adapter(fail=tools.ProviderQueryFailed(enrichment.TIMEOUT)))
+    (step,) = failed.answer.steps
+    assert failed.answer.evidence == ()
+    assert step.failure.reason == enrichment.TIMEOUT
+    assert failed.native is None
+
+
+def test_nothing_is_evicted_so_an_expired_record_is_still_citable():
+    """The reason a separate opaque cache was rejected, as a query.
+
+    An assessment that cited this row can still resolve the citation after the
+    entry stopped being valid, because `expires_at` bounds validity and not
+    lifetime.
+    """
+    result = lookup()
+    (record,) = result.answer.evidence
+    stored = _ENGINE[-1].execute(
+        f"SELECT expires_at FROM {tools.ANALYST_EVIDENCE_VIEW} "
+        f"WHERE evidence_id = %s",
+        (record.evidence_id,),
+    ).fetchall()
+    assert stored[0][0] == NOW + timedelta(seconds=RETENTION)
+    assert stored[0][0] < LATER  # expired, and still here
+
+
+def test_the_response_is_stored_before_it_is_evaluated():
+    """`concept/05` rule 5, in the case that proves the order matters.
+
+    The mapping fails, so no claim is written -- and the bytes that would not map
+    are on disk under their digest, which is the only way a `malformed_response`
+    can be investigated against what actually arrived.
+    """
+    result = lookup(ask=adapter(path="suspicious"))
+    assert result.answer.failure.reason == enrichment.MALFORMED_RESPONSE
+
+    connection = _ENGINE[-1]
+    connection.execute("FLUSH")
+    (stored,) = connection.execute(
+        f"SELECT response_version, body FROM {tools.ANALYST_RESPONSE_TABLE}"
+    ).fetchall()
+    assert stored[0] == result.native.response_version
+    assert bytes(stored[1]) == result.native.body
+    assert connection.execute(
+        f"SELECT count(*) FROM {tools.ANALYST_EVIDENCE_VIEW}"
+    ).fetchall() == [(0,)]
+
+
+def test_a_response_that_produced_no_claim_is_not_a_cache_entry():
+    """It is retained for the operator and it is not an answer, so it is a miss."""
+    calls: list = []
+    provider = tool(ask=adapter(calls=calls, path="suspicious"))
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    provider.lookup(arguments, scope=scope(), now=NOW)
+    provider.lookup(arguments, scope=scope(), now=NOW + timedelta(seconds=1))
+    assert len(calls) == 2
+
+
+def test_a_cache_hit_returns_the_provider_bytes_exactly_as_they_arrived():
+    """Replay reads stored responses; a replay that re-queries is not a replay."""
+    body = json.dumps([{"weird": "é", "n": None}]).encode()
+    provider = tool(ask=adapter(body=body))
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    provider.lookup(arguments, scope=scope(), now=NOW)
+    hit = provider.lookup(arguments, scope=scope(), now=NOW + timedelta(seconds=5))
+
+    assert hit.native.body == body
+    assert hit.native.response_version == tools.response_version(body)
+    assert hit.native.retrieved_at == NOW
+
+
+def test_the_cache_is_scoped_to_the_tenant():
+    """A second deployment does not read the first's disclosures or its evidence."""
+    calls: list = []
+    provider = tool(ask=adapter(calls=calls))
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    provider.lookup(arguments, scope=scope(), now=NOW)
+    theirs = provider.lookup(arguments, scope=scope(tenant="other"), now=NOW)
+
+    assert len(calls) == 2
+    assert theirs.answer.steps[0].outcome == LIVE_QUERY
+
+
+def test_the_endpoint_is_part_of_the_cache_key():
+    """`concept/07` puts it there: two operations answer different questions."""
+    calls: list = []
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    tool(ask=adapter(calls=calls), endpoint="indicator").lookup(
+        arguments, scope=scope(), now=NOW
+    )
+    other = tool(ask=adapter(calls=calls), endpoint="tag").lookup(
+        arguments, scope=scope(), now=NOW
+    )
+
+    assert len(calls) == 2
+    assert other.answer.steps[0].outcome == LIVE_QUERY
+
+
+def test_retention_is_configured_per_source_and_per_endpoint():
+    """A registration date never changes while a risk score moves.
+
+    Same source, same indicator, two endpoints with different retention: at one
+    moment one entry is valid and the other is not, which is what a single
+    per-source number could not express.
+    """
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    calls: list = []
+    long_lived = tool(ask=adapter(calls=calls), endpoint="registration", retention_seconds=86400)
+    short_lived = tool(ask=adapter(calls=calls), endpoint="score", retention_seconds=60)
+    long_lived.lookup(arguments, scope=scope(), now=NOW)
+    short_lived.lookup(arguments, scope=scope(), now=NOW)
+    assert len(calls) == 2
+
+    moment = NOW + timedelta(seconds=600)
+    assert long_lived.lookup(arguments, scope=scope(), now=moment).answer.steps[
+        0
+    ].outcome == CACHE_HIT
+    assert short_lived.lookup(arguments, scope=scope(), now=moment).answer.steps[
+        0
+    ].outcome == LIVE_QUERY
+
+
+def test_retention_is_required_and_cannot_be_zero():
+    for absent in (0, -1, None, 3.5):
+        with pytest.raises(tools.ToolError):
+            tool(retention_seconds=absent)
+
+
+def test_the_tool_name_and_the_repr_carry_the_endpoint():
+    """Two endpoints of one source are two tools, and a model addresses them by name."""
+    assert tool(endpoint="indicator").name == f"lookup_{SOURCE}_indicator"
+    assert tool(endpoint="tag").name == f"lookup_{SOURCE}_tag"
+
+
+@pytest.mark.parametrize("bad", ["", "Indicator", "search ioc", "/api/v1", "-x"])
+def test_an_endpoint_that_is_not_a_logical_name_is_refused(bad: str):
+    """It reaches the declaration the model is shown, so it is not a path or a URL."""
+    with pytest.raises(tools.ToolError):
+        tool(endpoint=bad)
+
+
+# --- Cache-key normalization --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("entity_type", "spellings"),
+    [
+        ("domain", ("example.com", "Example.COM", "example.com.", "  example.com  ")),
+        ("address", ("2001:db8::1", "2001:0DB8:0000::0001", " 2001:DB8::1 ")),
+        ("address", ("1.2.3.4", " 1.2.3.4 ")),
+        (
+            "url",
+            (
+                "http://example.com/a",
+                "HTTP://Example.COM/a",
+                "http://example.com:80/a",
+            ),
+        ),
+        ("url", ("https://example.com/", "https://example.com")),
+        ("fingerprint", ("a" * 32, "A" * 32)),
+    ],
+)
+def test_spellings_of_one_indicator_are_one_cache_key(entity_type, spellings):
+    """`concept/08`: inconsistent keys quietly halve the hit rate."""
+    keys = {tools.normalize_indicator(entity_type, one) for one in spellings}
+    assert len(keys) == 1, keys
+
+
+@pytest.mark.parametrize(
+    ("entity_type", "left", "right"),
+    [
+        # Different things, and each pair is one a sloppier fold would merge.
+        ("domain", "example.com", "example.org"),
+        ("domain", "xn--55qx5d.cn", "公司.cn"),
+        ("url", "http://example.com/A", "http://example.com/a"),
+        ("url", "http://example.com/a", "https://example.com/a"),
+        ("url", "http://example.com/a#one", "http://example.com/a#two"),
+        ("url", "http://example.com:8080/a", "http://example.com/a"),
+        ("address", "1.2.3.4", "1.2.3.5"),
+    ],
+)
+def test_two_indicators_are_never_folded_into_one_key(entity_type, left, right):
+    """The asymmetry the rule turns on: a missed hit costs a query, a wrong one lies."""
+    assert tools.normalize_indicator(entity_type, left) != tools.normalize_indicator(
+        entity_type, right
+    )
+
+
+def test_a_value_that_will_not_parse_is_left_exactly_as_it_is():
+    for entity_type, value in (
+        ("address", "not-an-address"),
+        ("url", "not a url"),
+        ("url", "mailto:someone@example.com"),
+    ):
+        assert tools.normalize_indicator(entity_type, value) == value
+
+
+def test_an_entity_type_with_no_normalization_rule_is_refused():
+    """A fifth entity type would otherwise get no normalization and no complaint."""
+    with pytest.raises(tools.ToolError):
+        tools.normalize_indicator("hostname", "example.com")
+
+
+def test_a_differently_spelled_indicator_hits_the_same_stored_record():
+    """The normalization, end to end: one disclosure serves both spellings."""
+    calls: list = []
+    provider = tool(ask=adapter(calls=calls))
+    first = provider.lookup(
+        {"entity_type": "domain", "entity_value": LISTED}, scope=scope(), now=NOW
+    )
+    second = provider.lookup(
+        {"entity_type": "domain", "entity_value": f"{LISTED.upper()}."},
+        scope=scope(),
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert len(calls) == 1
+    assert second.answer.steps[0].outcome == CACHE_HIT
+    assert second.answer.evidence == first.answer.evidence
+    # The claim is recorded against the indicator, not against the spelling.
+    assert second.answer.evidence[0].entity_value == LISTED
+    # And the step still says what was asked, because that is what was asked.
+    assert second.answer.steps[0].entity_value == f"{LISTED.upper()}."
+
+
+def test_what_was_disclosed_is_kept_beside_the_normalized_key():
+    """The spelling is not lost: the stored response has both columns."""
+    provider = tool()
+    provider.lookup(
+        {"entity_type": "domain", "entity_value": f"{LISTED.upper()}."},
+        scope=scope(),
+        now=NOW,
+    )
+    connection = _ENGINE[-1]
+    connection.execute("FLUSH")
+    (row,) = connection.execute(
+        f"SELECT entity_value, entity_value_key FROM {tools.ANALYST_RESPONSE_TABLE}"
+    ).fetchall()
+    assert row == (f"{LISTED.upper()}.", LISTED)
+
+
+# --- The store the cache is ---------------------------------------------------
+
+
+def test_the_engine_and_python_agree_on_the_analyst_evidence_tier():
+    """Two copies of a constant, asserted equal by asking the engine.
+
+    `tests/test_rendering.py` owes and pays this for `'enrichment'`; the tier
+    that keeps a live lookup out of the precomputed triage path now has a SQL
+    home too, and this is the assertion that keeps them from drifting.
+    """
+    lookup()
+    connection = _ENGINE[-1]
+    connection.execute("FLUSH")
+    tiers = connection.execute(
+        f"SELECT DISTINCT evidence_tier FROM {tools.ANALYST_EVIDENCE_VIEW}"
+    ).fetchall()
+    assert tiers == [(ANALYST_TIER,)]
+
+
+def test_a_stored_claim_is_the_claim_that_was_stored():
+    """Every field of the evidence row survives the round trip through the engine."""
+    live = lookup()
+    stored = cache().read(
+        tools.CacheKey(
+            tenant=TENANT,
+            sensor=SENSOR,
+            source_id=SOURCE,
+            endpoint=ENDPOINT,
+            entity_type="domain",
+            entity_value=LISTED,
+        )
+    )
+    assert stored.evidence(NOW) == live.answer.evidence
+    assert stored.retrieved_at == NOW
+    assert stored.expires_at == NOW + timedelta(seconds=RETENTION)
+    assert stored.response_version == live.native.response_version
+
+
+def test_the_cache_read_tells_a_miss_from_an_expiry():
+    """Collapsing them would hide the record that could have been served stale."""
+    key = tools.CacheKey(
+        tenant=TENANT,
+        sensor=SENSOR,
+        source_id=SOURCE,
+        endpoint=ENDPOINT,
+        entity_type="domain",
+        entity_value=LISTED,
+    )
+    assert cache().read(key) is None
+    lookup()
+    stored = cache().read(key)
+    assert stored is not None
+    assert not stored.expired(NOW)
+    assert stored.expired(LATER)
+
+
+def test_the_cache_holds_no_status_column_because_status_is_a_property_of_now():
+    """The same decision `helena.enrichment.feed_status` made, in the schema."""
+    connection = _ENGINE[-1]
+    columns = {
+        name
+        for (name,) in connection.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = %s",
+            (tools.ANALYST_EVIDENCE_TABLE,),
+        ).fetchall()
+    }
+    assert "status" not in columns
+    assert {"retrieved_at", "expires_at", "endpoint", "entity_value_key"} <= columns
+
+
+def test_the_analyst_tier_stays_out_of_the_enrichment_evidence_view():
+    """`helena_reference_evidence` is what the triage rendering is built from.
+
+    A live lookup in it would enter the enriched context of every later host that
+    talked to the same address, which is the outcome the tier tag exists to
+    prevent rather than one it makes safe.
+    """
+    lookup()
+    connection = _ENGINE[-1]
+    connection.execute("FLUSH")
+    assert connection.execute(
+        f"SELECT count(*) FROM {enrichment.ENRICHMENT_EVIDENCE_VIEW}"
+    ).fetchall() == [(0,)]
+    assert connection.execute(
+        f"SELECT count(*) FROM {tools.ANALYST_EVIDENCE_VIEW}"
+    ).fetchall() == [(1,)]
+
+
+def test_two_endpoints_that_read_the_same_claim_keep_two_rows():
+    """Measured while writing this increment, not anticipated.
+
+    The evidence identifier does not carry the endpoint -- it is a contract
+    shared with the enrichment tier, where there are no endpoints -- so two
+    endpoints of one source that return the same bytes about one indicator mint
+    the same identifier. With the endpoint out of the primary key the second
+    lookup upserted the first and handed it the other endpoint's retention.
+    """
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    tool(endpoint="registration", retention_seconds=86400).lookup(
+        arguments, scope=scope(), now=NOW
+    )
+    tool(endpoint="score", retention_seconds=60).lookup(arguments, scope=scope(), now=NOW)
+
+    connection = _ENGINE[-1]
+    connection.execute("FLUSH")
+    rows = connection.execute(
+        f"SELECT endpoint, evidence_id, expires_at FROM {tools.ANALYST_EVIDENCE_VIEW} "
+        f"ORDER BY endpoint"
+    ).fetchall()
+    assert [row[0] for row in rows] == ["registration", "score"]
+    assert rows[0][1] == rows[1][1]  # the same claim
+    assert rows[0][2] != rows[1][2]  # and its own retention on each

@@ -44,7 +44,8 @@ src/helena/          one package, one module per architecture component
   hosts/               triage's closed host attribute set, one frozen module per version
   rendering/           the five-part triage projection, one frozen module per version
   triage/              the triage runner, and its prompt, one frozen module per version
-  tools.py             approved providers as tools: the credential-owning boundary
+  tools.py             approved providers as tools: the credential-owning boundary,
+                       and the cache-first lookup whose cache is the evidence store
   orchestration.py     deterministic routing, budgets, persistence, replay
   sink.py              egress of every assessed context to the output topic
   broker.py            the Kafka wire protocol, both ends, and nothing else
@@ -1065,9 +1066,58 @@ classification comes from the declared subset and never from provider text, and
 survives only as an escaped value, which is a test.
 
 **What is not built is named, because a green suite here must not read as a
-finished layer:** nothing is cached, nothing is stored, no budget is counted, no
-disclosure row is written, and no live provider has been queried — the layer runs
-against a stand-in over the committed ThreatFox extract, whose *records* are real
-and whose *envelope* is not, because no per-indicator query surface has been
-confirmed yet. The sharpest gap is the send policy: an indicator the model
-invents is sent as readily as one the context observed.
+finished layer:** no budget is counted, no disclosure row is written, and no live
+provider has been queried — the layer runs against a stand-in over the committed
+ThreatFox extract, whose *records* are real and whose *envelope* is not, because
+no per-indicator query surface has been confirmed yet. The sharpest gap is the
+send policy: an indicator the model invents is sent as readily as one the context
+observed.
+
+## The lookup cache is the evidence store
+
+[`sql/migrations/0017_analyst_lookup_cache.sql`](sql/migrations/0017_analyst_lookup_cache.sql)
+and the cache-first half of `helena.tools`; the argument is in
+[`docs/decisions/0025-the-lookup-cache.md`](docs/decisions/0025-the-lookup-cache.md).
+`concept/07-principles.md` rejects a separate opaque cache in one sentence —
+*"an assessment could then cite something the cache had already evicted"* — so
+there is **no cache** in the sense `concept/instruction.md` §3 forbids: two
+tables in the one engine, in the evidence shape 0011 defined, and a reader that
+holds a connection and no state. **Nothing is evicted**; `expires_at` bounds
+validity and not lifetime, which is exactly what lets §4 of that decision answer
+the way it does.
+
+**A hit sends nothing, and that makes caching a privacy control as much as a cost
+one.** The measurement is not a call counter: the adapter is the only thing in
+the layer that can reach a provider, so an adapter that was not called is an
+indicator that was not disclosed. The trace says which it was — `cache_hit` or
+`live_query` — and a hit's `retrieved_at` is the **underlying record's** time, so
+two runs differing only in cache state are distinguishable afterwards and the age
+of what was served is visible.
+
+**Two open questions from `concept/08` are now answered, and both are answers
+rather than defaults.** *Negative results are cached*, because a `no_match` is an
+answer rather than an absence, because most lookups miss and a hits-only cache
+would almost never help under a few-hundred-per-day quota, and because not
+caching one re-discloses the indicator every run. *An expired entry is served
+explicitly `stale` when the live query fails* — the record was never evicted, and
+`concept/02` defines `stale` as precisely that: the claim stands and its age is
+now part of what it is worth. That answer carries **two** retrieval steps, a
+`cache_hit` citing rows that are every one of them `stale` and a `live_query`
+carrying the typed failure, so `stale` and `failed` reach the agent as
+themselves. A failure beside an `ok` row is still refused.
+
+**A failure is not cached** — an outage is not a record of what a source said —
+and a response that arrived and would not map is handled in between: the bytes
+are stored under their digest *before* anything is read out of them
+(`concept/05` rule 5), no claim is, and the next lookup is still a miss. That
+order is what makes a replay read what the provider said rather than what it
+would say today.
+
+**Cache-key normalization folds only documented equivalences.** `2001:0DB8::0001`
+and `2001:db8::1` are one address; `Example.COM.` and `example.com` are one
+domain; a default port and an empty path fold out of a URL. A path's case, a
+fragment, and an IDN's two forms do **not** fold, because a fold that is too
+eager serves one indicator's evidence for another while one that is too timid
+costs a single query. There is no `status` column: `ok` and `stale` are
+properties of *now*, derived at read time, which is the decision
+`helena.enrichment.feed_status` already made for feeds.

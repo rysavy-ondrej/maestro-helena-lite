@@ -1009,10 +1009,11 @@ ENRICHMENT_TIER = "enrichment"
 #: value nothing could be wrong about -- so it enters with the tool layer that
 #: writes it: every record a provider tool returns is tagged `analyst`, which is
 #: what keeps a live lookup out of the precomputed triage path
-#: (`concept/03-architecture.md`). **No SQL holds this literal yet**: nothing is
-#: stored, so there is no second copy to assert equal. The increment that stores
-#: a retrieved record owes that assertion, exactly as `tests/test_rendering.py`
-#: owes it for `enrichment`.
+#: (`concept/03-architecture.md`). Its second home is
+#: `sql/migrations/0017_analyst_lookup_cache.sql`, which puts the literal on
+#: `helena_reference_evidence_analyst` exactly as 0014 puts `enrichment` on the
+#: feed mapping views, and `tests/test_tools.py` asserts the two equal by asking
+#: the engine what that view produces.
 ANALYST_TIER = "analyst"
 
 #: Both, in the order `concept/03` introduces them. The allow-list per emitter is
