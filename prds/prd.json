@@ -472,7 +472,7 @@
         "Add a test that a budget-truncated run can return `unknown` but can never return `normal`",
         "Record budgets consumed, latency, tokens and derived monetary cost on the assessment rather than capping cost separately"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D5 Tools] Disclosure recording and send policy",
