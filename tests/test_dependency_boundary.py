@@ -44,7 +44,20 @@ APPROVED_DEV_DISTRIBUTIONS = {"pytest": "pytest"}
 # "not at all" rather than "not yet". So this list is no longer a schedule: it is
 # an open escalation for the operator, and `docs/decisions/0020-the-model-client.md`
 # §1 is where it is recorded. The question returns with the analyst's tool loop.
+#
+# `mcp` is here for a related but distinct reason, and
+# `docs/decisions/0024-provider-tools-and-the-mcp-boundary.md` is where it is
+# argued: `concept/03-architecture.md` asks for provider tools that own
+# credentials, scope by tenant, are cache-first, enforce budgets at the boundary,
+# record disclosure and validate the response. Every one of those is a property
+# of the **boundary**, and `helena.tools` implements them in-process. A
+# per-provider MCP server would add a transport, a second process and a second
+# place a credential lives, in the increment that first needed none of them —
+# `concept/instruction.md` §3 makes both the dependency and the surface an
+# escalation. Adopting the wire protocol later is a decision, and it starts by
+# changing this line.
 DELIBERATELY_ABSENT = (
+    "mcp",
     "langchain",
     "langchain_core",
     "langchain_openai",

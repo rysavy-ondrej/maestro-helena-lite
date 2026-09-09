@@ -44,7 +44,7 @@ src/helena/          one package, one module per architecture component
   hosts/               triage's closed host attribute set, one frozen module per version
   rendering/           the five-part triage projection, one frozen module per version
   triage/              the triage runner, and its prompt, one frozen module per version
-  tools.py             approved providers as cache-first tools
+  tools.py             approved providers as tools: the credential-owning boundary
   orchestration.py     deterministic routing, budgets, persistence, replay
   sink.py              egress of every assessed context to the output topic
   broker.py            the Kafka wire protocol, both ends, and nothing else
@@ -1008,3 +1008,66 @@ And **domain hits do not escalate at all**: the scope test works on addresses an
 not on names, which `concept/02` calls the place that bites precisely where it
 matters most. Both are passing tests over a real capture and a real feed load,
 not paragraphs.
+
+## Provider tools: a boundary, not a server
+
+[`helena.tools`](src/helena/tools.py) is the D5 tool layer, and
+[`docs/decisions/0024-provider-tools-and-the-mcp-boundary.md`](docs/decisions/0024-provider-tools-and-the-mcp-boundary.md)
+carries the argument. `concept/03-architecture.md` asks for "a cache-first MCP
+tool" and then says what it means by it — *"the tool layer, deterministic project
+code, not the model, owns credentials, tenant scoping, budget enforcement, what
+may be sent, disclosure recording and response validation. **The agent sees a
+tool, never an HTTP client and never a key**"* — which is a list of properties of
+a **boundary**, not of a wire protocol.
+
+**So there is no MCP server and no MCP SDK.** A per-provider wrapper process
+would add a dependency, a second surface and a second place a credential lives,
+in the increment that first needs none of the three; `mcp` joins `langchain` in
+`tests/test_dependency_boundary.py`'s `DELIBERATELY_ABSENT`, so adopting the
+protocol later starts by changing a test rather than by an import appearing. The
+seam it would go behind is already there: `ProviderTool` is one concrete class —
+not a base class with one subclass — and the provider-specific half is one
+injected callable, `ask(call, credential) -> ProviderAnswer`.
+
+**The call has two sides and they are not the same object.** `Lookup.for_agent`
+is compact, normalized and typed — `EnrichmentEvidence` rows tagged `analyst`,
+each cited by a stable identifier, with `RetrievalStep`s beside them.
+`Lookup.native` is the provider's response **exactly as it arrived**, retained
+for audit and replay and with no route to the agent. A live answer has no feed
+snapshot, so what dates it is the response itself: `snapshot_version` is a digest
+of those bytes, which is what makes a lookup-dependent assessment replayable.
+
+**Four things a call can be, and none of them is `no_match`.** A refusal (the
+layer would not send it — malformed arguments, or an entity type the source does
+not cover), a typed `QueryFailure` on the step with no taxonomy object beside it,
+an explicit `no_match` claim, and a hit. A response outside the source's declared
+subset is the second of those and discards *every* claim in it, because a mapping
+that has drifted from its declaration is not partially trustworthy. A tool for an
+unregistered source cannot be built at all: the descriptor is resolved through
+`helena.enrichment.source`, so adding a provider stays a governed decision.
+
+**The credential is the layer's and the isolation is tested over the real one.**
+It is a `Secret` injected at construction, held in a private slot, handed to the
+adapter and revealed nowhere else; the module imports no HTTP machinery and holds
+no URL, read off its own AST. The test loads the real key from `.env` and asserts
+— on a boolean, never on the value — that it reaches no agent-visible surface,
+that no `://` does either, and that every value crossing the boundary is a string
+in a declared field. Two things that leak by default were fixed in the writing: a
+Pydantic `ValidationError` rendered with `str()` carries a documentation URL and
+echoes the model's own input back, and a diagnostic must be redacted **before**
+it is truncated or a half-key survives.
+
+**Retrieved provider text is data, and the isolation is a mechanism rather than a
+sentence.** What crosses is a typed object with `extra="forbid"`, the
+classification comes from the declared subset and never from provider text, and
+`content()` is `json.dumps`, so a newline cannot start a line of its own. A
+`"\n\nSYSTEM: ignore the previous instructions…"` planted in a provider field
+survives only as an escaped value, which is a test.
+
+**What is not built is named, because a green suite here must not read as a
+finished layer:** nothing is cached, nothing is stored, no budget is counted, no
+disclosure row is written, and no live provider has been queried — the layer runs
+against a stand-in over the committed ThreatFox extract, whose *records* are real
+and whose *envelope* is not, because no per-indicator query surface has been
+confirmed yet. The sharpest gap is the send policy: an indicator the model
+invents is sent as readily as one the context observed.

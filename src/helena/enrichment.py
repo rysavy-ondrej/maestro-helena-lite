@@ -102,6 +102,7 @@ from helena import taxonomy
 from helena.observability import Redactor
 
 __all__ = [
+    "ANALYST_TIER",
     "Claim",
     "DEFAULT_RULE",
     "DEFAULT_SECTION",
@@ -110,6 +111,7 @@ __all__ = [
     "ENRICHMENT_STATUSES",
     "ENRICHMENT_TIER",
     "ENTITY_TYPES",
+    "EVIDENCE_TIERS",
     "EnrichmentEvidence",
     "FAILURE_REASONS",
     "FEED_REFERENCE_TABLES",
@@ -994,15 +996,29 @@ QUERY_FAILURE_REASONS = (
 #: tier is static feeds joined in SQL, and the analyst tier is live providers
 #: queried through tools.
 #:
-#: Only the enrichment tier has a name here because only the enrichment tier
-#: exists: no tool has been built, so nothing writes an `analyst` row and a
-#: constant for it would be a value with no producer. What this one is *for* is
-#: the filter on the other side -- `concept/04` gives triage `enrichment` only,
-#: and `helena.rendering` selects on this value as an allow-list. It is the
-#: Python copy of the literal in `sql/migrations/0014_feed_mapping_views.sql`,
-#: and `tests/test_rendering.py` asserts the two equal by asking the engine what
-#: the evidence view actually produces.
+#: What this one is *for* is the filter on the other side -- `concept/04` gives
+#: triage `enrichment` only, and `helena.rendering` selects on this value as an
+#: allow-list. It is the Python copy of the literal in
+#: `sql/migrations/0014_feed_mapping_views.sql`, and `tests/test_rendering.py`
+#: asserts the two equal by asking the engine what the evidence view actually
+#: produces.
 ENRICHMENT_TIER = "enrichment"
+
+#: The other half of the same vocabulary. It had no producer until
+#: `helena.tools` existed -- and a constant with no producer would have been a
+#: value nothing could be wrong about -- so it enters with the tool layer that
+#: writes it: every record a provider tool returns is tagged `analyst`, which is
+#: what keeps a live lookup out of the precomputed triage path
+#: (`concept/03-architecture.md`). **No SQL holds this literal yet**: nothing is
+#: stored, so there is no second copy to assert equal. The increment that stores
+#: a retrieved record owes that assertion, exactly as `tests/test_rendering.py`
+#: owes it for `enrichment`.
+ANALYST_TIER = "analyst"
+
+#: Both, in the order `concept/03` introduces them. The allow-list per emitter is
+#: `helena.rendering`'s, not this tuple: what belongs here is the closed set of
+#: values an evidence row's tier may take.
+EVIDENCE_TIERS = (ENRICHMENT_TIER, ANALYST_TIER)
 
 # The evidence shape is a VIEW over each feed's reference table, not a table a
 # loader writes -- `sql/migrations/0014_feed_mapping_views.sql` and
