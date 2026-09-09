@@ -430,7 +430,7 @@
         "Add a test that escalation is computed even when triage produced a typed failure",
         "Record the policy version on every assessment"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D5 Tools] MCP provider tool framework with credential ownership",
