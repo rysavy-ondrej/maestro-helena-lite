@@ -898,3 +898,57 @@ deterministic escalation is independent of whether triage ran at all — and tha
 evaluator does not exist yet, so until it does a context whose model call failed
 is dropped and nothing else looks at it. That is the one thing this stage leaves
 genuinely unsafe, and it is written down rather than left to a green suite.
+
+## The composition rule: scope before severity
+
+[`helena.policy`](src/helena/policy/__init__.py) is the machinery and
+`helena.policy.v1` is the rule, frozen the moment an assessment records
+`policy_version = "v1"` — the sixth versioned package, and the version dimension
+that had no owner until now. `concept/02-concepts-and-taxonomy.md` calls it *the
+single most consequential rule in the taxonomy* and says where it has to live:
+*"the model classifies, the policy constrains what evidence can support what
+verdict. This is where over-alerting will come from if it is wrong."*
+[`docs/decisions/0022-the-composition-rule.md`](docs/decisions/0022-the-composition-rule.md)
+carries the argument for each choice below.
+
+**It runs after the prompt, on the model's own answer, and does not rewrite it.**
+The prompt tells the model how to *read* the rendering; the contract says whether
+the answer is well-formed; `check_exchange` says whether it holds against its own
+request; and then `constrain` asks whether the cited evidence can support the
+verdict. A rule stated in the prompt would be one more sentence in the
+instruction position that attacker-influenced data is trying to argue with, and
+it would be testable only for its own presence. The `Decision` is a **second**
+record beside the `AgentResult`, because an evaluation that could not tell a
+model's answer from a policy's correction of it would be measuring the wrong
+thing.
+
+**Seven rules, one per sentence of the note**, each a named function and each a
+row of the table in `tests/test_policy.py`: a C2 hit on an address the host
+contacted with bytes in both directions stands; the same hit with one failed
+connection and no bytes returned is `suspicious` at most; a claim scoped to a
+port the host never reached is too — which is the decision
+`sql/migrations/0015_enriched_context.sql` explicitly deferred here; a contacted
+phishing domain reaches `malicious.phishing` and never `malicious.compromised`,
+because the user was targeted and the host was not; a malicious indicator on
+shared infrastructure transfers nothing without corroboration; `normal` on
+contacted indicators never establishes `normal` for the context; and domain-only
+support is capped, because **the scope test works on address entities and not on
+domain ones**.
+
+**A cap is a bare root and never a path** — *"emit the parent rather than
+guessing a child"* — and it is resolved against the taxonomy for the emitter the
+result came from, so a policy that capped to something that emitter could not
+have said fails rather than inventing a label. What a rule permits is
+three-valued: the proposed path, a weaker root, or `None` for *this evidence
+establishes nothing*, which is neither `normal` nor `unknown` and is deliberately
+not turned into a verdict here.
+
+**The two limitations are outcomes, not footnotes.** `domain_scope_untestable`
+is recorded whenever a name is what carried a capped verdict, and
+`shared_infrastructure_undetermined` is recorded whenever a `malicious` verdict
+**survives** — because a CDN, a cloud tenant and a shared subdomain are external
+facts no source in this deployment supplies, and only the resolver case is
+observable from the ports the host actually reached. They are the policy's own
+gap kinds and not the contract's seven: none of those names a test that does not
+apply, and spelling `missing` here would collapse "the lookup did not happen"
+into "the rule could not be run".

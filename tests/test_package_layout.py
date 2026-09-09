@@ -108,7 +108,24 @@ SUPPORT_MODULES = {
 # `rendering` is not: `concept/03-architecture.md` puts routing on the triage
 # result inside Orchestration, and what has to stay frozen is the prompt, not the
 # code that sends it.
-VERSIONED_PACKAGES = {"taxonomy", "contracts", "hosts", "rendering", "triage"}
+#
+# `policy` is the sixth, and it is the dimension `helena.versions` left without
+# an owner: every citable row records `policy_version`, and
+# `concept/02-concepts-and-taxonomy.md` requires the composition rule to live as
+# "explicit, testable policy rather than in the model's judgement". A stored
+# assessment is entitled to have the rule that constrained it stay exactly as it
+# was, so the rules are a frozen module and the read that assembles their input is
+# the machinery beside them. It is not in COMPONENT_MODULES for the reason the
+# comment at the head of this file gives: `concept/03-architecture.md` puts the
+# policy guard inside Orchestration rather than making it a stage.
+VERSIONED_PACKAGES = {
+    "taxonomy",
+    "contracts",
+    "hosts",
+    "rendering",
+    "triage",
+    "policy",
+}
 
 # What a file inside a versioned package may be called. Anything else -- a
 # helper, a shared base, a `common.py` -- is the thing that would let a later
