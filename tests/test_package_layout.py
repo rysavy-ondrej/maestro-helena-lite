@@ -16,14 +16,25 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PACKAGE_ROOT = PROJECT_ROOT / "src" / "helena"
 
-# The components of concept/03-architecture.md. Enrichment views and the policy
-# and budget guards are not modules of their own: the views are SQL, and the
-# guards are the deterministic code in `orchestration`.
+# The components of concept/03-architecture.md. Enrichment views are not a module
+# of their own: they are SQL.
+#
+# `budgets` is the note's "policy and budget guards" row, and it is a module
+# because it could not be the one this comment used to name. Until task 36 the
+# guards were "the deterministic code in `orchestration`", which is where
+# concept/03 puts budget enforcement -- but the ledger has to be charged by
+# `helena.agents` *and* by `helena.tools`, and `orchestration` is the module that
+# will import both, so a ledger defined there is an import cycle. The policy half
+# of that row stayed in `helena.policy` for its own reason (a frozen rule version
+# needs a versioned package); `docs/decisions/0026-the-budget-guard.md` records
+# both. `orchestration` keeps the rest of the row: routing, validation,
+# persistence and replay.
 COMPONENT_MODULES = {
     "normalizer",
     "context",
     "enrichment",
     "agents",
+    "budgets",
     "tools",
     "orchestration",
     "sink",

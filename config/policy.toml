@@ -67,3 +67,95 @@ thresholds_version = "2026-09-09"
 # ThreatFox. Tier B in `concept/05-threat-intelligence.md`'s catalogue: "explicit
 # provider verdict or high-quality curated listing without full direct evidence".
 threatfox = 0.80
+
+# --- Budgets ------------------------------------------------------------------
+#
+# The four dimensions enforced per agent run — policy, not constants in a branch,
+# by the same sentence of `concept/07-principles.md` that says it of the
+# thresholds above: "budget values are **policy, not constants in a branch**; the
+# same applies to confidence thresholds." `helena.budgets.load()` reads these and
+# `helena.budgets.RunBudget` is what spends them; there is no default in the code
+# and no fallback if a value below is absent.
+#
+# ## Three dimensions are written here and the fourth is derived
+#
+# `concept/07` is emphatic that the wall clock and the live-query count are **not
+# set independently**: "at a few lookups per minute, an analyst run checking six
+# indicators spends over a minute waiting on the rate limit alone, before any
+# inference." So `live_queries` is not a key. It is
+#
+#     floor(retrieval_seconds x slowest [rate_limits] entry / 60)
+#
+# and the loader refuses a pair that contradicts itself: a retrieval allowance
+# that does not fit inside the wall clock, one that buys no query at the slowest
+# configured rate, or a step budget too small to reach the live queries it was
+# given.
+#
+# `[budgets.triage]` states neither `steps` nor `retrieval_seconds` and is given
+# zero of both. `concept/04-the-two-agents.md` gives triage "no tools at all", and
+# `helena.contracts.v1.AgentRequest` refuses a triage request that budgets a step;
+# a key here that could be set to 1 would be a lookup nobody has to justify.
+#
+# ## Where these numbers came from, and what would change them
+#
+# **Candidates, not decisions** — the same standing this file's 0.80 and
+# `config/agents.toml`'s 3 have, and for the same reason: nothing has run against
+# a labelled corpus, and no live provider has been queried through the tool layer
+# at all. What is demonstrated is that the values are loaded from here, enforced
+# at the boundary rather than in a prompt, and changeable without touching code.
+#
+# `[budgets.triage]` — triage runs on every context, so its budget is the one that
+# multiplies. 8 000 tokens is `config/rendering.toml`'s 25 000-character rendering
+# (~6-7 k tokens by the character-count reasoning in
+# `docs/decisions/0019-the-rendering-size-budget.md`) plus the prompt and a small
+# answer, with the retries of `config/agents.toml` spending the same budget; the
+# run ends on the budget rather than on the retry count when a model keeps failing
+# the schema, which is the intended order. 30 s is a stream stage's patience for a
+# hosted call, not a measurement of one.
+#
+# `[budgets.analyst]` — the selective stage, so a number that would be reckless
+# per context is affordable here. 300 s wall clock of which at most 120 s may be
+# spent waiting on providers: at the 4 queries/minute below that derives **8**
+# live queries, which covers `concept/07`'s own worked example of six indicators
+# (90 s at that rate) and leaves 180 s for inference. 12 steps is those 8 live
+# queries plus room for cache hits and for a refused call, because every one of
+# those is a step; the loader would refuse a step budget below the derived
+# live-query count.
+#
+# What would change any of them: measured per-run token consumption, a measured
+# provider latency distribution, and a published or measured provider rate limit.
+# All three are the same missing thing — nothing has run end to end against a live
+# provider yet.
+
+[budgets.triage]
+tokens = 8000
+wall_clock_seconds = 30.0
+
+[budgets.analyst]
+steps = 12
+tokens = 60000
+wall_clock_seconds = 300.0
+# How much of that wall clock may be spent waiting on providers. Half the run
+# would leave inference on the same footing as retrieval; this is 40 %.
+retrieval_seconds = 120.0
+
+# The rate the **tool layer holds itself to**, per source, in queries per minute.
+#
+# `concept/05-threat-intelligence.md`: "fair-use terms bind both tiers, and rate
+# limits are **policy the tool layer enforces**, not an afterthought." So this is
+# a self-imposed ceiling and **not a measured provider limit** — abuse.ch
+# publishes fair-use terms rather than a number this project has verified, and
+# measuring one would mean deliberately exceeding it against a live service.
+# `concept/07`'s "a few lookups per minute" is the shape 4 comes from.
+#
+# It must be lowered the moment a provider states less. An entry must name a
+# registered source (`helena.enrichment.SOURCES`); a source needs one only if
+# something queries it live, so a feed loader has none — its fetch floor is on its
+# descriptor, and a rate limit here would be a key nothing reads.
+#
+# **Nothing paces calls to this rate yet.** It is read for the derivation above
+# and no throttle exists; the live adapter is what has to sleep between calls, and
+# the wall-clock budget is what catches it when it does — provider waits are on
+# the same clock as the model calls.
+[rate_limits]
+threatfox = 4

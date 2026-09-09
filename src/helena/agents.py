@@ -111,7 +111,6 @@ measured a schema-violation rate for any model.
 from __future__ import annotations
 
 import json
-import time
 import tomllib
 import urllib.error
 import urllib.request
@@ -123,6 +122,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt, ValidationError
 
 from helena import observability, taxonomy
+from helena.budgets import BudgetExhausted, RunBudget
 from helena.config import AGENTS, ModelSettings, Settings
 from helena.contracts import v1 as contract
 from helena.enrichment import ENTITY_TYPES, QUERY_FAILURE_REASONS
@@ -716,37 +716,13 @@ def _bound(text: str, limit: int = MAX_FEEDBACK) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _cost(
-    *,
-    prompt_tokens: int,
-    completion_tokens: int,
-    attempts: int,
-    started: float,
-) -> contract.Cost:
-    """What the run spent. `steps`, `live_queries` and `cache_hits` are zero here.
-
-    Not because triage has no tools — that is the contract's rule and it checks it
-    — but because **this module has no tool loop at all**. The analyst's loop is a
-    later increment, and a non-zero count written by a module that cannot make a
-    tool call would be a number with nothing behind it.
-    """
-    return contract.Cost(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        steps=0,
-        live_queries=0,
-        cache_hits=0,
-        retries=max(attempts - 1, 0),
-        wall_clock_seconds=time.monotonic() - started,
-    )
-
-
 def assess(
     request: contract.AgentRequest,
     *,
     client: ModelClient,
     messages: Sequence[Message],
     policy: RetryPolicy,
+    budget: RunBudget,
     propose: Sequence[str] | None = None,
     vocabularies: Mapping[str, Sequence[str]] | None = None,
 ) -> contract.AgentResult | contract.AgentFailure:
@@ -759,6 +735,20 @@ def assess(
 
     `policy` has no default for the reason `helena.rendering.v1.render`'s budget
     has none: a caller that could forget it would run unbounded.
+
+    **`budget` is the run's ledger, not this call's**, and it has no default for a
+    sharper version of the same reason. `helena.budgets.RunBudget` is built once
+    per agent run and charged by everything in it — the model calls here and every
+    provider lookup — so the wall clock covers *the whole run including provider
+    waits* and the token budget covers every attempt of it. A ledger built inside
+    this function would restart the clock on every turn of an analyst's tool loop,
+    which is the unbounded run the dimension exists to bound. It is checked
+    against `request.budgets` on the way in, because a ledger built from another
+    request's numbers would enforce a budget nobody handed this run.
+
+    Two dimensions are charged here and two are not: tokens and the wall clock are
+    this module's, and steps and live queries are `helena.tools`' — a model call
+    spends neither.
 
     **What this does not do**, and what the runner around it owes:
 
@@ -773,17 +763,19 @@ def assess(
       module cannot look either up, because looking them up means knowing which
       agent is running.
     """
+    if budget.limits != request.budgets:
+        raise AgentError(
+            f"the request budgets {request.budgets} and the ledger enforces "
+            f"{budget.limits}. `helena.budgets.RunBudget.of(request)` is what "
+            f"builds one, because a run enforced against a budget it was not "
+            f"given is a budget nobody set (`concept/instruction.md` §2)."
+        )
     result_type = contract.AgentResult
     schema = proposal_schema(result_type, propose, vocabularies=vocabularies)
-    started = time.monotonic()
-    deadline = started + request.budgets.wall_clock_seconds
 
-    prompt_tokens = 0
-    completion_tokens = 0
     attempts = 0
     reported: str | None = None
     validation_error: str | None = None
-    exhausted: contract.Gap | None = None
 
     def failure(reason: str, detail: str, *, gap: contract.Gap | None) -> contract.AgentFailure:
         return contract.AgentFailure(
@@ -791,12 +783,7 @@ def assess(
             reason=reason,
             detail=_bound(detail),
             gaps=() if gap is None else (gap,),
-            cost=_cost(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                attempts=attempts,
-                started=started,
-            ),
+            cost=budget.cost(retries=max(attempts - 1, 0)),
             versions=request.versions,
             # `model_unavailable` means nothing answered, and the contract
             # refuses a reported version there. Every other reason carries what
@@ -805,18 +792,17 @@ def assess(
         )
 
     while attempts < policy.attempts:
-        remaining_tokens = request.budgets.tokens - prompt_tokens - completion_tokens
-        remaining_seconds = deadline - time.monotonic()
-        if remaining_tokens <= 0:
-            exhausted = contract.Gap(
-                kind=contract.BUDGET_EXHAUSTED,
-                detail=(
-                    f"the token budget of {request.budgets.tokens} was spent over "
-                    f"{attempts} attempt(s); the retries a schema-invalid answer "
-                    f"costs are spent against it"
-                ),
-            )
+        try:
+            # The ledger's own guard, so that "the run wanted another attempt and
+            # could not have one" is recorded where it happened and reaches the
+            # `budget_exhausted` gap below. `concept/07`: the retries a
+            # schema-invalid answer costs are spent against this budget, so a run
+            # can end here before it ends on `policy.attempts`.
+            budget.check_tokens()
+        except BudgetExhausted:
             break
+        remaining_tokens = budget.remaining_tokens
+        remaining_seconds = budget.remaining_seconds
         if remaining_seconds <= 0:
             return failure(
                 contract.TIMED_OUT,
@@ -851,18 +837,14 @@ def assess(
                 ),
             )
 
-        prompt_tokens += completion.prompt_tokens
-        completion_tokens += completion.completion_tokens
+        budget.record_tokens(
+            prompt=completion.prompt_tokens, completion=completion.completion_tokens
+        )
         reported = completion.model_reported
 
         # Built outside the `try` on purpose: these are what the *code* measured,
         # and a failure here is this module's bug, not an answer worth retrying.
-        spent = _cost(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            attempts=attempts,
-            started=started,
-        )
+        spent = budget.cost(retries=max(attempts - 1, 0))
         versions = request.versions.completed_by(completion.model_reported)
 
         try:
@@ -898,13 +880,13 @@ def assess(
         return failure(
             contract.MODEL_UNAVAILABLE,
             f"no attempt was made in {attempts} attempt(s); the run had no budget",
-            gap=exhausted,
+            gap=budget.gap(),
         )
     return failure(
         contract.SCHEMA_INVALID,
         f"no answer validated in {attempts} attempt(s). The last error was: "
         f"{validation_error}",
-        gap=exhausted,
+        gap=budget.gap(),
     )
 
 

@@ -48,6 +48,7 @@ from helena.agents import (
     proposal_schema,
     retry_policy,
 )
+from helena.budgets import RunBudget
 from helena.config import AGENTS, ModelSettings, Secret, Settings
 from helena.contracts.v1 import (
     BUDGET_EXHAUSTED,
@@ -154,6 +155,20 @@ def messages() -> tuple[Message, ...]:
         Message(role="system", content="Triage this host. Answer as JSON."),
         Message(role="user", content=RENDERED_BODY),
     )
+
+
+def assessed(the_request: AgentRequest, **kwargs):
+    """`assess` with the ledger a runner would hand it.
+
+    `assess` takes a `RunBudget` and has no default for it: the ledger is built
+    once per agent **run** and charged by the tool loop as well as by the model
+    calls, so a default built inside `assess` would restart the wall clock on
+    every turn of a loop (`helena.budgets`). Every test here is a single
+    exchange, so the ledger is built from the same request that carries the
+    budgets — which is what `RunBudget.of` is for, and what
+    `test_a_ledger_built_from_another_request_is_refused` covers when it is not.
+    """
+    return assess(the_request, budget=RunBudget.of(the_request), **kwargs)
 
 
 def environment(**overrides: str) -> dict[str, str]:
@@ -497,7 +512,7 @@ def test_a_retry_bound_of_zero_is_refused(tmp_path):
 
 def test_a_valid_answer_becomes_a_result_carrying_what_the_run_spent():
     with _Endpoint([answer(VALID, prompt=91, completion=87)]) as endpoint:
-        outcome = assess(
+        outcome = assessed(
             request(),
             client=endpoint.client(),
             messages=messages(),
@@ -520,7 +535,7 @@ def test_the_recorded_model_is_the_one_that_answered_not_the_one_requested():
     """`docs/decisions/0008`: the configured name is what stays stable while what
     answers to it changes, so the response's identity is what is recorded."""
     with _Endpoint([answer(VALID, model="stub-model-2026-05")]) as endpoint:
-        outcome = assess(
+        outcome = assessed(
             request(),
             client=endpoint.client(),
             messages=messages(),
@@ -533,7 +548,7 @@ def test_the_recorded_model_is_the_one_that_answered_not_the_one_requested():
 
 def test_the_schema_goes_to_the_endpoint_and_the_credential_goes_in_a_header():
     with _Endpoint([answer(VALID)]) as endpoint:
-        assess(
+        assessed(
             request(),
             client=endpoint.client(),
             messages=messages(),
@@ -557,7 +572,7 @@ def test_the_schema_goes_to_the_endpoint_and_the_credential_goes_in_a_header():
 def test_a_schema_invalid_answer_is_retried_with_the_validation_error_fed_back():
     """`concept/07`, and the retry count is what makes it visible afterwards."""
     with _Endpoint([answer(INVALID_STANCE), answer(VALID)]) as endpoint:
-        outcome = assess(
+        outcome = assessed(
             request(),
             client=endpoint.client(),
             messages=messages(),
@@ -590,7 +605,7 @@ def test_no_repair_call_path_exists():
     with _Endpoint([answer(INVALID_STANCE), answer(INVALID_STANCE), answer(VALID)]) as (
         endpoint
     ):
-        outcome = assess(
+        outcome = assessed(
             request(),
             client=endpoint.client(),
             messages=messages(),
@@ -616,7 +631,7 @@ def test_the_prompt_does_not_grow_with_the_retries():
     with _Endpoint([answer(INVALID_STANCE), answer(INVALID_STANCE), answer(VALID)]) as (
         endpoint
     ):
-        assess(
+        assessed(
             request(),
             client=endpoint.client(),
             messages=messages(),
@@ -629,7 +644,7 @@ def test_the_prompt_does_not_grow_with_the_retries():
 def test_exhausted_retries_become_a_typed_failure_and_never_a_verdict():
     """`concept/07`: a typed failure and a verdict are not collapsed, ever."""
     with _Endpoint([answer(INVALID_STANCE)] * 3) as endpoint:
-        outcome = assess(
+        outcome = assessed(
             request(),
             client=endpoint.client(),
             messages=messages(),
@@ -650,7 +665,7 @@ def test_exhausted_retries_become_a_typed_failure_and_never_a_verdict():
 def test_the_retry_bound_is_the_configured_one():
     """One attempt configured is one call, and then a typed failure."""
     with _Endpoint([answer(INVALID_STANCE)]) as endpoint:
-        outcome = assess(
+        outcome = assessed(
             request(),
             client=endpoint.client(),
             messages=messages(),
@@ -672,7 +687,7 @@ def test_an_answer_setting_a_field_the_code_owns_is_refused_rather_than_dropped(
         }
     )
     with _Endpoint([answer(smuggled), answer(VALID)]) as endpoint:
-        outcome = assess(
+        outcome = assessed(
             request(),
             client=endpoint.client(),
             messages=messages(),
@@ -687,7 +702,7 @@ def test_a_classification_the_taxonomy_does_not_have_is_a_schema_violation():
     """`AgentResult` raises `TaxonomyError`, not `ValidationError` — both retry."""
     invented = json.dumps({"classification": "malicious.telepathy", "confidence": 0.9})
     with _Endpoint([answer(invented)] * 3) as endpoint:
-        outcome = assess(
+        outcome = assessed(
             request(),
             client=endpoint.client(),
             messages=messages(),
@@ -701,7 +716,7 @@ def test_a_classification_the_taxonomy_does_not_have_is_a_schema_violation():
 
 def test_an_answer_that_is_not_json_is_retried_and_then_typed():
     with _Endpoint([answer("I think this host looks fine.")] * 2) as endpoint:
-        outcome = assess(
+        outcome = assessed(
             request(),
             client=endpoint.client(),
             messages=messages(),
@@ -724,7 +739,7 @@ def test_retries_are_spent_against_the_token_budget():
     `schema_invalid` failure, because those are two different facts.
     """
     with _Endpoint([answer(INVALID_STANCE, prompt=40, completion=20)] * 3) as endpoint:
-        outcome = assess(
+        outcome = assessed(
             request(budgets=Budgets(
                 steps=0, tokens=100, wall_clock_seconds=20.0, live_queries=0
             )),
@@ -745,7 +760,7 @@ def test_the_remaining_budget_is_what_the_next_attempt_may_spend():
     with _Endpoint([answer(INVALID_STANCE, prompt=40, completion=20), answer(VALID)]) as (
         endpoint
     ):
-        assess(
+        assessed(
             request(budgets=Budgets(
                 steps=0, tokens=500, wall_clock_seconds=20.0, live_queries=0
             )),
@@ -757,13 +772,59 @@ def test_the_remaining_budget_is_what_the_next_attempt_may_spend():
     assert [sent["max_tokens"] for sent in endpoint.received] == [500, 440]
 
 
+def test_one_ledger_spans_every_model_call_of_one_run():
+    """The budget is the **run's**, not the call's, which is what an analyst loop needs.
+
+    `helena.budgets`: a ledger built inside `assess` would restart the wall clock
+    and the token count on every turn of a tool loop, so a run could spend its
+    whole budget arbitrarily many times. Two exchanges on one ledger here: the
+    second is offered only what the first left.
+    """
+    given = request()
+    budget = RunBudget.of(given)
+    answers = [answer(VALID, prompt=40, completion=20)] * 2
+    with _Endpoint(answers) as endpoint:
+        client = endpoint.client()
+        for _ in range(2):
+            outcome = assess(
+                given,
+                client=client,
+                messages=messages(),
+                policy=THREE_ATTEMPTS,
+                budget=budget,
+                propose=TRIAGE_PROPOSABLE,
+            )
+    assert [sent["max_tokens"] for sent in endpoint.received] == [8000, 7940]
+    assert (outcome.cost.prompt_tokens, outcome.cost.completion_tokens) == (80, 40)
+    assert budget.exhausted == ()
+
+
+def test_a_ledger_built_from_another_requests_budgets_is_refused():
+    """A run enforced against a budget it was not given is a budget nobody set."""
+    other = request(
+        budgets=Budgets(steps=0, tokens=50, wall_clock_seconds=1.0, live_queries=0)
+    )
+    with _Endpoint([answer(VALID)]) as endpoint:
+        with pytest.raises(AgentError) as refused:
+            assess(
+                request(),
+                client=endpoint.client(),
+                messages=messages(),
+                policy=THREE_ATTEMPTS,
+                budget=RunBudget.of(other),
+                propose=TRIAGE_PROPOSABLE,
+            )
+    assert "RunBudget.of(request)" in str(refused.value)
+    assert endpoint.received == [], "nothing was asked"
+
+
 # --- The endpoint failing is not the model failing ---------------------------
 
 
 def test_an_endpoint_that_refuses_is_model_unavailable_with_no_reported_version():
     """`model_unavailable` means nothing answered, so no identity is recorded."""
     with _Endpoint([503]) as endpoint:
-        outcome = assess(
+        outcome = assessed(
             request(),
             client=endpoint.client(),
             messages=messages(),
@@ -784,7 +845,7 @@ def test_an_endpoint_that_stops_answering_mid_retry_is_not_called_unanswered():
     rather than collapsed into the reason.
     """
     with _Endpoint([answer(INVALID_STANCE), 502]) as endpoint:
-        outcome = assess(
+        outcome = assessed(
             request(),
             client=endpoint.client(),
             messages=messages(),
@@ -800,7 +861,7 @@ def test_an_endpoint_that_stops_answering_mid_retry_is_not_called_unanswered():
 def test_a_response_that_is_not_a_chat_completion_is_the_endpoint_not_the_model():
     """A deployment pointed at the wrong service is not a model that needs retrying."""
     with _Endpoint([{"result": "ok"}]) as endpoint:
-        outcome = assess(
+        outcome = assessed(
             request(),
             client=endpoint.client(),
             messages=messages(),
@@ -817,7 +878,7 @@ def test_a_response_with_no_usage_is_refused_rather_than_counted_as_zero():
     body = answer(VALID)
     del body["usage"]
     with _Endpoint([body]) as endpoint:
-        outcome = assess(
+        outcome = assessed(
             request(),
             client=endpoint.client(),
             messages=messages(),
@@ -830,7 +891,7 @@ def test_a_response_with_no_usage_is_refused_rather_than_counted_as_zero():
 
 def test_the_wall_clock_budget_produces_a_timed_out_failure():
     with _Endpoint(["hang"]) as endpoint:
-        outcome = assess(
+        outcome = assessed(
             request(budgets=Budgets(
                 steps=0, tokens=8000, wall_clock_seconds=0.3, live_queries=0
             )),
@@ -851,7 +912,7 @@ def test_every_call_records_the_endpoint_host_and_both_model_identities():
     """`concept/07`: enough to know what produced a result. Cross-wiring detectable."""
     stream = io.StringIO()
     with _Endpoint([answer(VALID)]) as endpoint:
-        assess(
+        assessed(
             request(),
             client=endpoint.client(stream),
             messages=messages(),
@@ -872,7 +933,7 @@ def test_no_prompt_and_no_rendering_ever_reaches_the_log():
     """The rendering is attacker-influenced text and a prompt is not a diagnostic."""
     stream = io.StringIO()
     with _Endpoint([answer(INVALID_STANCE), answer(VALID)]) as endpoint:
-        assess(
+        assessed(
             request(),
             client=endpoint.client(stream),
             messages=messages(),
@@ -907,7 +968,7 @@ def test_the_configured_triage_model_answers_this_schema():
     resolved = Settings.load(environ={}, env_file=PROJECT_ROOT / ".env")
     client = ModelClient.for_agent(resolved, "triage", stream=io.StringIO())
     try:
-        outcome = assess(
+        outcome = assessed(
             request(versions=versions(model_requested=resolved.triage.model)),
             client=client,
             messages=messages(),

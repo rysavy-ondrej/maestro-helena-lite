@@ -34,8 +34,10 @@ import pytest
 from pydantic import ValidationError
 
 from helena import enrichment, observability, tools
+from helena.budgets import BudgetExhausted, RunBudget
 from helena.config import REDACTED, Secret, Settings
 from helena.contracts.v1 import (
+    BUDGET_EXHAUSTED,
     CACHE_HIT,
     CONTRACT_VERSION,
     LIVE_QUERY,
@@ -244,6 +246,28 @@ def scope(tenant: str = TENANT, sensor: str = SENSOR) -> tools.RunScope:
     return tools.RunScope(tenant=tenant, sensor=sensor)
 
 
+def ledger(**overrides: object) -> RunBudget:
+    """One run's budget ledger. Generous unless a test is about the budget.
+
+    `lookup` charges a step and, on a miss, a live query, so a ledger is not
+    optional: budgets are enforced at the tool boundary and there is no argument
+    a caller can leave out (`concept/07`). The default here buys more of every
+    dimension than any test below spends, so that a test asserting something
+    else cannot fail on a budget it never mentioned.
+    """
+    return RunBudget(
+        Budgets(
+            **{
+                "steps": 50,
+                "tokens": 8000,
+                "wall_clock_seconds": 300.0,
+                "live_queries": 50,
+                **overrides,
+            }
+        )
+    )
+
+
 def request(**overrides: object) -> AgentRequest:
     return AgentRequest(
         **{
@@ -291,7 +315,7 @@ def lookup(
 ):
     return tool(**kwargs).lookup(
         {"entity_type": entity_type, "entity_value": entity_value},
-        scope=scope(),
+        scope=scope(), budget=ledger(),
         now=at,
     )
 
@@ -349,7 +373,7 @@ def test_the_scope_comes_from_the_request_and_not_from_the_model():
 
     refused = tool().lookup(
         {"entity_type": "domain", "entity_value": LISTED, "tenant": "somebody-else"},
-        scope=scope(),
+        scope=scope(), budget=ledger(),
         now=NOW,
     )
     assert refused.refusal.reason == tools.MALFORMED_ARGUMENTS
@@ -367,8 +391,8 @@ def test_two_tenants_asking_the_same_question_get_different_evidence_identifiers
     """The tenant is in the digest, so one store cannot upsert across deployments."""
     provider = tool()
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    mine = provider.lookup(arguments, scope=scope(), now=NOW)
-    theirs = provider.lookup(arguments, scope=scope(tenant="other"), now=NOW)
+    mine = provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    theirs = provider.lookup(arguments, scope=scope(tenant="other"), budget=ledger(), now=NOW)
     assert {record.evidence_id for record in mine.answer.evidence}.isdisjoint(
         record.evidence_id for record in theirs.answer.evidence
     )
@@ -605,7 +629,7 @@ def test_a_tool_answer_cannot_be_tagged_enrichment():
 )
 def test_a_call_that_is_not_a_tool_call_is_refused_and_nothing_is_queried(arguments):
     calls: list = []
-    result = tool(ask=adapter(calls=calls)).lookup(arguments, scope=scope(), now=NOW)
+    result = tool(ask=adapter(calls=calls)).lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
     assert result.refusal.reason == tools.MALFORMED_ARGUMENTS
     assert calls == []
     assert result.native is None
@@ -686,12 +710,12 @@ def test_no_agent_visible_object_exposes_a_credential_a_url_or_an_http_client():
     surfaces: list[str] = [repr(provider), json.dumps(provider.declaration())]
     for result in (
         provider.lookup(
-            {"entity_type": "domain", "entity_value": LISTED}, scope=scope(), now=NOW
+            {"entity_type": "domain", "entity_value": LISTED}, scope=scope(), budget=ledger(), now=NOW
         ),
         provider.lookup(
-            {"entity_type": "domain", "entity_value": UNLISTED}, scope=scope(), now=NOW
+            {"entity_type": "domain", "entity_value": UNLISTED}, scope=scope(), budget=ledger(), now=NOW
         ),
-        provider.lookup({"entity_type": "nonsense"}, scope=scope(), now=NOW),
+        provider.lookup({"entity_type": "nonsense"}, scope=scope(), budget=ledger(), now=NOW),
     ):
         surfaces.append(tools.content(result))
         for text in agent_visible(result):
@@ -835,8 +859,8 @@ def test_a_second_identical_call_is_served_from_the_store_and_sends_nothing():
     provider = tool(ask=adapter(calls=calls))
     arguments = {"entity_type": "domain", "entity_value": LISTED}
 
-    first = provider.lookup(arguments, scope=scope(), now=NOW)
-    second = provider.lookup(arguments, scope=scope(), now=NOW + timedelta(seconds=30))
+    first = provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    second = provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW + timedelta(seconds=30))
 
     assert len(calls) == 1
     assert [step.outcome for step in first.answer.steps] == [LIVE_QUERY]
@@ -852,9 +876,9 @@ def test_a_cache_hit_carries_the_retrieval_time_of_the_underlying_record():
     """
     provider = tool()
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    provider.lookup(arguments, scope=scope(), now=NOW)
+    provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
     later = NOW + timedelta(minutes=17)
-    (step,) = provider.lookup(arguments, scope=scope(), now=later).answer.steps
+    (step,) = provider.lookup(arguments, scope=scope(), budget=ledger(), now=later).answer.steps
 
     assert step.outcome == CACHE_HIT
     assert step.retrieved_at == NOW
@@ -869,8 +893,8 @@ def test_two_runs_differing_only_in_cache_state_are_distinguishable_afterwards()
     """
     provider = tool()
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    live = provider.lookup(arguments, scope=scope(), now=NOW)
-    hit = provider.lookup(arguments, scope=scope(), now=NOW + timedelta(minutes=1))
+    live = provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    hit = provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW + timedelta(minutes=1))
 
     assert {step.outcome for step in live.answer.steps} == {LIVE_QUERY}
     assert {step.outcome for step in hit.answer.steps} == {CACHE_HIT}
@@ -891,8 +915,8 @@ def test_a_negative_result_is_cached_too_and_the_decision_is_recorded():
     provider = tool(ask=adapter(calls=calls))
     arguments = {"entity_type": "domain", "entity_value": UNLISTED}
 
-    first = provider.lookup(arguments, scope=scope(), now=NOW)
-    second = provider.lookup(arguments, scope=scope(), now=NOW + timedelta(minutes=1))
+    first = provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    second = provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW + timedelta(minutes=1))
 
     assert len(calls) == 1
     assert first.answer.evidence[0].classification == NO_MATCH
@@ -911,13 +935,13 @@ def test_a_failed_query_is_not_cached_and_the_decision_is_recorded():
         ask=adapter(calls=calls, fail=tools.ProviderQueryFailed(enrichment.TIMEOUT))
     )
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    failing.lookup(arguments, scope=scope(), now=NOW)
-    failing.lookup(arguments, scope=scope(), now=NOW + timedelta(seconds=1))
+    failing.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    failing.lookup(arguments, scope=scope(), budget=ledger(), now=NOW + timedelta(seconds=1))
     assert len(calls) == 2
 
     # And the next working call is a live query, not a cached failure.
     recovered = tool(ask=adapter()).lookup(
-        arguments, scope=scope(), now=NOW + timedelta(seconds=2)
+        arguments, scope=scope(), budget=ledger(), now=NOW + timedelta(seconds=2)
     )
     assert recovered.answer.steps[0].outcome == LIVE_QUERY
     assert recovered.answer.evidence[0].classification == "malicious"
@@ -927,8 +951,8 @@ def test_an_entry_past_its_retention_is_queried_again():
     calls: list = []
     provider = tool(ask=adapter(calls=calls))
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    provider.lookup(arguments, scope=scope(), now=NOW)
-    fresh = provider.lookup(arguments, scope=scope(), now=LATER)
+    provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    fresh = provider.lookup(arguments, scope=scope(), budget=ledger(), now=LATER)
 
     assert len(calls) == 2
     assert fresh.answer.steps[0].outcome == LIVE_QUERY
@@ -945,12 +969,12 @@ def test_an_expired_entry_is_served_explicitly_stale_when_the_provider_is_unreac
     the outage is still countable and the agent is not told the answer is fresh.
     """
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    tool().lookup(arguments, scope=scope(), now=NOW)
+    tool().lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
 
     unreachable = tool(
         ask=adapter(fail=tools.ProviderQueryFailed(enrichment.TRANSPORT_ERROR, "down"))
     )
-    served = unreachable.lookup(arguments, scope=scope(), now=LATER)
+    served = unreachable.lookup(arguments, scope=scope(), budget=ledger(), now=LATER)
 
     (record,) = served.answer.evidence
     assert record.status == enrichment.STALE
@@ -975,10 +999,10 @@ def test_an_expired_entry_is_served_explicitly_stale_when_the_provider_is_unreac
 def test_a_stale_fallback_is_the_same_claim_the_fresh_one_was():
     """The status is deliberately not in `evidence_id`: a claim that ages is one claim."""
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    fresh = tool().lookup(arguments, scope=scope(), now=NOW)
+    fresh = tool().lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
     stale = tool(
         ask=adapter(fail=tools.ProviderQueryFailed(enrichment.TIMEOUT))
-    ).lookup(arguments, scope=scope(), now=LATER)
+    ).lookup(arguments, scope=scope(), budget=ledger(), now=LATER)
 
     assert [record.evidence_id for record in stale.answer.evidence] == [
         record.evidence_id for record in fresh.answer.evidence
@@ -1041,8 +1065,8 @@ def test_a_response_that_produced_no_claim_is_not_a_cache_entry():
     calls: list = []
     provider = tool(ask=adapter(calls=calls, path="suspicious"))
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    provider.lookup(arguments, scope=scope(), now=NOW)
-    provider.lookup(arguments, scope=scope(), now=NOW + timedelta(seconds=1))
+    provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW + timedelta(seconds=1))
     assert len(calls) == 2
 
 
@@ -1051,8 +1075,8 @@ def test_a_cache_hit_returns_the_provider_bytes_exactly_as_they_arrived():
     body = json.dumps([{"weird": "é", "n": None}]).encode()
     provider = tool(ask=adapter(body=body))
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    provider.lookup(arguments, scope=scope(), now=NOW)
-    hit = provider.lookup(arguments, scope=scope(), now=NOW + timedelta(seconds=5))
+    provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    hit = provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW + timedelta(seconds=5))
 
     assert hit.native.body == body
     assert hit.native.response_version == tools.response_version(body)
@@ -1064,8 +1088,8 @@ def test_the_cache_is_scoped_to_the_tenant():
     calls: list = []
     provider = tool(ask=adapter(calls=calls))
     arguments = {"entity_type": "domain", "entity_value": LISTED}
-    provider.lookup(arguments, scope=scope(), now=NOW)
-    theirs = provider.lookup(arguments, scope=scope(tenant="other"), now=NOW)
+    provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    theirs = provider.lookup(arguments, scope=scope(tenant="other"), budget=ledger(), now=NOW)
 
     assert len(calls) == 2
     assert theirs.answer.steps[0].outcome == LIVE_QUERY
@@ -1076,10 +1100,10 @@ def test_the_endpoint_is_part_of_the_cache_key():
     calls: list = []
     arguments = {"entity_type": "domain", "entity_value": LISTED}
     tool(ask=adapter(calls=calls), endpoint="indicator").lookup(
-        arguments, scope=scope(), now=NOW
+        arguments, scope=scope(), budget=ledger(), now=NOW
     )
     other = tool(ask=adapter(calls=calls), endpoint="tag").lookup(
-        arguments, scope=scope(), now=NOW
+        arguments, scope=scope(), budget=ledger(), now=NOW
     )
 
     assert len(calls) == 2
@@ -1097,15 +1121,15 @@ def test_retention_is_configured_per_source_and_per_endpoint():
     calls: list = []
     long_lived = tool(ask=adapter(calls=calls), endpoint="registration", retention_seconds=86400)
     short_lived = tool(ask=adapter(calls=calls), endpoint="score", retention_seconds=60)
-    long_lived.lookup(arguments, scope=scope(), now=NOW)
-    short_lived.lookup(arguments, scope=scope(), now=NOW)
+    long_lived.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+    short_lived.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
     assert len(calls) == 2
 
     moment = NOW + timedelta(seconds=600)
-    assert long_lived.lookup(arguments, scope=scope(), now=moment).answer.steps[
+    assert long_lived.lookup(arguments, scope=scope(), budget=ledger(), now=moment).answer.steps[
         0
     ].outcome == CACHE_HIT
-    assert short_lived.lookup(arguments, scope=scope(), now=moment).answer.steps[
+    assert short_lived.lookup(arguments, scope=scope(), budget=ledger(), now=moment).answer.steps[
         0
     ].outcome == LIVE_QUERY
 
@@ -1196,11 +1220,11 @@ def test_a_differently_spelled_indicator_hits_the_same_stored_record():
     calls: list = []
     provider = tool(ask=adapter(calls=calls))
     first = provider.lookup(
-        {"entity_type": "domain", "entity_value": LISTED}, scope=scope(), now=NOW
+        {"entity_type": "domain", "entity_value": LISTED}, scope=scope(), budget=ledger(), now=NOW
     )
     second = provider.lookup(
         {"entity_type": "domain", "entity_value": f"{LISTED.upper()}."},
-        scope=scope(),
+        scope=scope(), budget=ledger(),
         now=NOW + timedelta(seconds=1),
     )
 
@@ -1218,7 +1242,7 @@ def test_what_was_disclosed_is_kept_beside_the_normalized_key():
     provider = tool()
     provider.lookup(
         {"entity_type": "domain", "entity_value": f"{LISTED.upper()}."},
-        scope=scope(),
+        scope=scope(), budget=ledger(),
         now=NOW,
     )
     connection = _ENGINE[-1]
@@ -1329,9 +1353,9 @@ def test_two_endpoints_that_read_the_same_claim_keep_two_rows():
     """
     arguments = {"entity_type": "domain", "entity_value": LISTED}
     tool(endpoint="registration", retention_seconds=86400).lookup(
-        arguments, scope=scope(), now=NOW
+        arguments, scope=scope(), budget=ledger(), now=NOW
     )
-    tool(endpoint="score", retention_seconds=60).lookup(arguments, scope=scope(), now=NOW)
+    tool(endpoint="score", retention_seconds=60).lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
 
     connection = _ENGINE[-1]
     connection.execute("FLUSH")
@@ -1342,3 +1366,241 @@ def test_two_endpoints_that_read_the_same_claim_keep_two_rows():
     assert [row[0] for row in rows] == ["registration", "score"]
     assert rows[0][1] == rows[1][1]  # the same claim
     assert rows[0][2] != rows[1][2]  # and its own retention on each
+
+
+# --- Budgets, enforced at this boundary ---------------------------------------
+#
+# `concept/07`: "budgets are enforced at the tool boundary, so an agent cannot
+# reason its way around them", and `concept/05` says the same of an MCP provider
+# tool. Every test below drives the real ledger through the real dispatch; the
+# ledger's own arithmetic is `tests/test_budgets.py`.
+
+
+class Clock:
+    """A monotonic source the test moves, so no test sleeps to spend a budget."""
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def driven(**overrides: object):
+    """A ledger whose clock a test moves, and the clock beside it."""
+    clock = Clock()
+    return (
+        RunBudget(
+            Budgets(
+                **{
+                    "steps": 50,
+                    "tokens": 8000,
+                    "wall_clock_seconds": 20.0,
+                    "live_queries": 50,
+                    **overrides,
+                }
+            ),
+            clock=clock,
+        ),
+        clock,
+    )
+
+
+def test_a_lookup_without_a_budget_does_not_run():
+    """As with the scope: a call that did not say what bounds it does not compile.
+
+    This is what "enforced at the tool boundary" is, mechanically. There is no
+    argument a model could put a budget in, and no way for a caller to leave one
+    out and get a lookup anyway.
+    """
+    with pytest.raises(TypeError):
+        tool().lookup(
+            {"entity_type": "domain", "entity_value": LISTED}, scope=scope()
+        )
+
+
+def test_the_refusal_reason_and_the_gap_kind_are_one_string():
+    """The model's refusal and the assessment's gap are the same fact at two layers."""
+    assert tools.BUDGET_EXHAUSTED == BUDGET_EXHAUSTED
+    assert tools.BUDGET_EXHAUSTED in tools.REFUSAL_REASONS
+
+
+def test_every_accepted_call_costs_a_step_including_one_refused_as_malformed():
+    """That is what bounds the loop: an unbounded one cannot be bought with bad calls."""
+    calls: list = []
+    provider = tool(ask=adapter(calls=calls))
+    budget = ledger(steps=2)
+
+    malformed = provider.lookup({"entity_type": "nonsense"}, scope=scope(), budget=budget, now=NOW)
+    assert malformed.refusal.reason == tools.MALFORMED_ARGUMENTS
+    assert budget.steps_spent == 1
+    assert calls == []
+
+    answered = provider.lookup(
+        {"entity_type": "domain", "entity_value": LISTED},
+        scope=scope(),
+        budget=budget,
+        now=NOW,
+    )
+    assert answered.answer is not None
+    assert (budget.steps_spent, budget.remaining_steps) == (2, 0)
+
+
+def test_a_spent_step_budget_refuses_the_call_and_queries_nothing():
+    calls: list = []
+    provider = tool(ask=adapter(calls=calls))
+    budget = ledger(steps=1)
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+
+    provider.lookup(arguments, scope=scope(), budget=budget, now=NOW)
+    refused = provider.lookup(arguments, scope=scope(), budget=budget, now=NOW)
+
+    assert refused.answer is None
+    assert refused.refusal.reason == tools.BUDGET_EXHAUSTED
+    assert "step budget" in refused.refusal.detail
+    assert refused.native is None
+    assert len(calls) == 1, "the refused call reached no provider"
+    assert budget.exhausted == ("steps",)
+
+
+def test_a_cache_hit_still_answers_after_the_live_query_quota_is_spent():
+    """The ordering is the whole of what makes a hit cheap.
+
+    `concept/07`: a hit "returns it without touching the network", and
+    `docs/decisions/0025` adds that it discloses nothing. The live query is
+    therefore charged **after** the cache read, so a run out of quota can still
+    read what it already fetched — and a run out of quota that has nothing stored
+    is refused rather than served something older than it asked for.
+    """
+    calls: list = []
+    provider = tool(ask=adapter(calls=calls))
+    budget = ledger(live_queries=1)
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+
+    live = provider.lookup(arguments, scope=scope(), budget=budget, now=NOW)
+    assert live.answer.steps[0].outcome == LIVE_QUERY
+    assert budget.remaining_live_queries == 0
+
+    hit = provider.lookup(
+        arguments, scope=scope(), budget=budget, now=NOW + timedelta(seconds=30)
+    )
+    assert {step.outcome for step in hit.answer.steps} == {CACHE_HIT}
+    assert len(calls) == 1
+    assert (budget.live_queries_spent, budget.cache_hits) == (1, 1)
+    assert budget.exhausted == (), "nothing was refused"
+
+
+def test_a_spent_live_query_budget_refuses_a_miss_rather_than_serving_a_stale_record():
+    """An exhausted quota is not an unreachable provider, and the two produce different rows.
+
+    The stale fallback exists because the provider did not answer and the expired
+    record is then the best available evidence. A run that is out of quota is a
+    different fact — nothing was asked — so it is a refusal, and a budget does not
+    get to decide what the evidence is.
+    """
+    calls: list = []
+    provider = tool(ask=adapter(calls=calls))
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+
+    budget = ledger(live_queries=0)
+    refused = provider.lookup(arguments, scope=scope(), budget=budget, now=LATER)
+
+    assert refused.answer is None
+    assert refused.refusal.reason == tools.BUDGET_EXHAUSTED
+    assert "live-query budget" in refused.refusal.detail
+    assert len(calls) == 1, "the quota was spent, so nothing was asked"
+    assert budget.steps_spent == 1, "the call still cost a step"
+    assert budget.exhausted == ("live_queries",)
+
+
+def test_a_spent_wall_clock_refuses_the_call_before_the_cache_is_even_read():
+    """The run is over. Serving it a stored record would be work nobody can use."""
+    calls: list = []
+    provider = tool(ask=adapter(calls=calls))
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    provider.lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+
+    budget, clock = driven()
+    clock.advance(20.1)
+    refused = provider.lookup(
+        arguments, scope=scope(), budget=budget, now=NOW + timedelta(seconds=30)
+    )
+
+    assert refused.refusal.reason == tools.BUDGET_EXHAUSTED
+    assert "wall-clock budget" in refused.refusal.detail
+    assert budget.cache_hits == 0, "a valid record was there and was not read"
+    assert len(calls) == 1
+
+
+def test_a_provider_wait_is_spent_from_the_same_clock_the_model_calls_use():
+    """`concept/07`'s reason the two budgets are set against each other.
+
+    "At a few lookups per minute, an analyst run checking six indicators spends
+    over a minute waiting on the rate limit alone, before any inference." Here one
+    lookup takes most of the run's clock, and what is left is what the model call
+    would be given as its timeout — which is the property a per-call clock would
+    silently lose.
+    """
+    budget, clock = driven(wall_clock_seconds=20.0)
+
+    def slow(call, credential):
+        clock.advance(19.0)
+        return adapter()(call, credential)
+
+    provider = tool(ask=slow)
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    served = provider.lookup(arguments, scope=scope(), budget=budget, now=NOW)
+
+    assert served.answer is not None
+    assert budget.remaining_seconds == pytest.approx(1.0)
+
+    clock.advance(2.0)
+    refused = provider.lookup(
+        arguments, scope=scope(), budget=budget, now=NOW + timedelta(seconds=1)
+    )
+    assert refused.refusal.reason == tools.BUDGET_EXHAUSTED
+    assert budget.exhausted == ("wall_clock_seconds",)
+
+
+def test_what_the_ledger_counted_is_what_the_cost_records():
+    """`concept/03`: budgets consumed, latency, tokens, and cache-hit versus live-query."""
+    budget, clock = driven()
+    provider = tool()
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    provider.lookup(arguments, scope=scope(), budget=budget, now=NOW)
+    clock.advance(1.5)
+    provider.lookup(
+        arguments, scope=scope(), budget=budget, now=NOW + timedelta(seconds=10)
+    )
+
+    spent = budget.cost(retries=0)
+    assert (spent.steps, spent.live_queries, spent.cache_hits) == (2, 1, 1)
+    assert spent.wall_clock_seconds == 1.5
+    # No tool call spends a token, and this ledger was handed to no model.
+    assert (spent.prompt_tokens, spent.completion_tokens) == (0, 0)
+
+
+def test_the_stale_fallback_is_the_one_call_that_is_both_a_query_and_a_hit():
+    """It reached the provider, which spent the quota, and then served stored rows.
+
+    Recorded as both rather than as one, because it did both: the trace already
+    carries a `live_query` step for the outage beside a `cache_hit` step per
+    served record, and a counter that hid either would disagree with it.
+    """
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    tool().lookup(arguments, scope=scope(), budget=ledger(), now=NOW)
+
+    budget = ledger()
+    unreachable = tool(
+        ask=adapter(fail=tools.ProviderQueryFailed(enrichment.TRANSPORT_ERROR, "refused"))
+    )
+    served = unreachable.lookup(arguments, scope=scope(), budget=budget, now=LATER)
+
+    assert served.answer.failure is not None
+    assert {record.status for record in served.answer.evidence} == {enrichment.STALE}
+    assert (budget.live_queries_spent, budget.cache_hits) == (1, 1)
+    assert budget.steps_spent == 1

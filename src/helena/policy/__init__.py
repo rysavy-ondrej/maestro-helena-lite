@@ -125,10 +125,12 @@ from helena.enrichment import ENRICHMENT_STATUSES, ENTITY_TYPES, SOURCES, Tier
 from helena.rendering import ContextProjection
 
 __all__ = [
+    "BUDGET_KEYS",
     "POLICY_FILE",
     "PolicyError",
     "PolicyVersion",
     "Support",
+    "THRESHOLD_KEYS",
     "THRESHOLD_TIER",
     "Thresholds",
     "UnknownVersion",
@@ -146,6 +148,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 #: keeps its policy elsewhere passes the path. A missing file is a loud failure
 #: naming it, never a default threshold.
 POLICY_FILE = PROJECT_ROOT / "config" / "policy.toml"
+
+#: The top-level keys of that file `thresholds()` reads, and the ones
+#: `helena.budgets.load` reads out of the same file. Two tables of one policy
+#: file, because `concept/07-principles.md` puts budget values and confidence
+#: thresholds in one sentence as the two things that are policy rather than
+#: constants in a branch.
+#:
+#: Both sets are named here, in the module that owns the path, so that neither
+#: loader can drift into rejecting a key the other one requires: each refuses a
+#: key **nothing** reads and neither refuses a key the other reads.
+#: `helena.budgets` imports both rather than keeping a second copy.
+THRESHOLD_KEYS = frozenset({"policy_version", "thresholds_version", "thresholds"})
+BUDGET_KEYS = frozenset({"budgets", "rate_limits"})
 
 #: The one tier whose independent escalation is conditional on a number.
 #: `concept/02`: Tier A "may establish `malicious` by itself if scope and
@@ -442,12 +457,12 @@ def thresholds(path: Path | str = POLICY_FILE) -> Thresholds:
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as malformed:
         raise PolicyError(f"{path} is not readable TOML: {malformed}") from malformed
 
-    expected = {"policy_version", "thresholds_version", "thresholds"}
-    unexpected = sorted(set(document) - expected)
+    unexpected = sorted(set(document) - THRESHOLD_KEYS - BUDGET_KEYS)
     if unexpected:
         raise PolicyError(
-            f"{path} has top-level keys {unexpected}; the file is two versions "
-            f"and a [thresholds] table. A key nothing reads is a policy somebody "
+            f"{path} has top-level keys {unexpected}; this loader reads "
+            f"{sorted(THRESHOLD_KEYS)} and `helena.budgets.load` reads "
+            f"{sorted(BUDGET_KEYS)}. A key nothing reads is a policy somebody "
             f"set and nothing applies."
         )
     declared = {

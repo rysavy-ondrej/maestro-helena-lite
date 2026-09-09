@@ -1066,8 +1066,8 @@ classification comes from the declared subset and never from provider text, and
 survives only as an escaped value, which is a test.
 
 **What is not built is named, because a green suite here must not read as a
-finished layer:** no budget is counted, no disclosure row is written, and no live
-provider has been queried — the layer runs against a stand-in over the committed
+finished layer:** no disclosure row is written, nothing paces calls to the
+configured rate, and no live provider has been queried — the layer runs against a stand-in over the committed
 ThreatFox extract, whose *records* are real and whose *envelope* is not, because
 no per-indicator query surface has been confirmed yet. The sharpest gap is the
 send policy: an indicator the model invents is sent as readily as one the context
@@ -1121,3 +1121,61 @@ eager serves one indicator's evidence for another while one that is too timid
 costs a single query. There is no `status` column: `ok` and `stale` are
 properties of *now*, derived at read time, which is the decision
 `helena.enrichment.feed_status` already made for feeds.
+
+## Budgets: four dimensions, one ledger, charged at the boundary
+
+[`helena.budgets`](src/helena/budgets.py), with the argument in
+[`docs/decisions/0026-the-budget-guard.md`](docs/decisions/0026-the-budget-guard.md).
+`concept/07-principles.md` gives four dimensions — steps, tokens, wall clock,
+live external queries — and one rule about where they are checked: *"budgets are
+enforced at the tool boundary, so an agent cannot reason its way around them"*.
+
+**`RunBudget` is one ledger per agent run, not four counters per call.** Both
+`helena.agents.assess` and `helena.tools.ProviderTool.lookup` take it,
+keyword-only and with no default, and both charge the same object — which is what
+makes the wall clock cover *the whole run including provider waits*.
+`concept/07`'s own reason: at a few lookups per minute an analyst run checking six
+indicators spends over a minute on the rate limit alone, so a per-call clock would
+hand the run its full budget again after every lookup. A test drives an injected
+clock through a slow adapter and watches the second lookup get refused on the
+first one's wait.
+
+**A cache hit answers after the quota is spent, and a miss does not.** The live
+query is charged *after* the cache read, so a run out of quota can still read what
+it already fetched; a step and the clock are charged before anything, so an
+unbounded loop cannot be bought with malformed calls. A spent dimension is a typed
+`ToolRefusal` carrying `budget_exhausted` — the same string as the gap kind, not a
+second spelling of it — and never a `QueryFailure`, because nothing was queried.
+An exhausted quota is also **not** the stale fallback: that exists because the
+provider did not answer, and letting a budget decide what the evidence is would
+make two runs differing only in budget differ in what they cite.
+
+**Spent is not truncated.** A dimension is exhausted when the run *asked for more
+and was refused*, not when a remainder reached zero: a run that spent its last
+token on the answer it returned finished, and degrading it would collapse
+*unassessable* into *assessed* from the accounting side. What a truncated run
+returns is `concept/07`'s rule and `degraded` is the one place code rewrites a
+classification — `normal` becomes `unknown` with the exhaustion explicit,
+everything else keeps its verdict and gains the gap, and a typed failure stays a
+typed failure. It re-validates through the contract rather than copying, so the
+"never `normal`" rule is enforced by the same code that would refuse the outcome
+built by hand; the test asserts it from both sides. A truncated triage `normal`
+raises instead: triage has no `unknown` root, and `assess` already turns that run
+into a typed failure carrying the gap.
+
+**The values are policy and the fourth is derived.** `config/policy.toml` gained a
+`[budgets]` table beside its thresholds — one sentence of `concept/07` makes both
+"policy, not constants in a branch" — and `live_queries` is not a key in it. It is
+`floor(retrieval_seconds x slowest rate / 60)`, so the two dimensions
+`concept/07` requires to be set against each other are set against each other by
+construction, and the loader refuses four ways the pair can contradict itself.
+`[rate_limits]` is **the rate the tool layer holds itself to, not a measured
+provider limit**, and nothing paces calls to it yet. Every number in those tables
+is a candidate, for the same reason nothing else here is calibrated.
+
+**What is not demonstrated:** no analyst tool loop exists yet, so nothing has
+driven all four dimensions through one real agent run; nothing stores a `Cost`, so
+"budgets consumed are recorded on the assessment" is a ready shape and not a
+property that holds; and there is **no monetary figure**, because deriving one
+needs a price table this repository does not have — `concept/06` makes the cost
+derived rather than capped, and the tokens it would be derived from are measured.

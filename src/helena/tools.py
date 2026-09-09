@@ -57,6 +57,11 @@ None of them is `no_match`, and none of them collapses into another
 | the query completed and the provider lists nothing | evidence classified `no_match` — an answer | a step and a live query |
 | the source is not registered | no tool exists; `ProviderTool` cannot be built | nothing |
 
+Three of the refusals are the run's budget rather than the call: a spent step
+count, a spent live-query quota and a spent wall clock all arrive as a
+`ToolRefusal` carrying `budget_exhausted`. They are refusals and not failures
+because nothing was queried — see "Budgets, at this boundary" below.
+
 The last one is deliberate: `ProviderTool` resolves its descriptor through
 `helena.enrichment.source`, so a tool for an unregistered source raises
 `SourceError` at construction. **Registration is the gate**, and adding a source
@@ -88,6 +93,27 @@ Five things follow, and `docs/decisions/0025-the-lookup-cache.md` argues each:
 cache hit, not the step's, which is what makes two runs differing only in cache
 state distinguishable afterwards.
 
+## Budgets, at this boundary
+
+`concept/07`: **"budgets are enforced at the tool boundary, so an agent cannot
+reason its way around them"**, and `concept/05`'s tool rules say the same in the
+same words. `lookup` takes a `helena.budgets.RunBudget` — keyword-only, no
+default, one per agent run — and charges it before it does anything else:
+
+| | |
+| --- | --- |
+| a step | every accepted call, including one then refused as malformed. That is what bounds the loop |
+| the wall clock | checked on the same ledger the model calls use, so a provider wait shortens the time left to reason |
+| a live query | **after** the cache read, so a hit costs nothing and discloses nothing |
+| tokens | not here. A tool call spends none; `helena.agents.assess` charges those |
+
+There is no argument a model could put a budget in and no prompt line that could
+grant one, which is the property the boundary is for. What the model sees when a
+dimension is spent is a typed `ToolRefusal`, and what the *assessment* records is
+a `budget_exhausted` gap from `RunBudget.gap()` — `helena.budgets.degraded` is
+what puts it there, and it is why a truncated run may return `unknown` and may
+never return `normal`.
+
 Reads: `helena.enrichment.SOURCES` (the descriptor: tier, entity types, declared
 subset) and `helena_reference_evidence_analyst`. Writes:
 `helena_reference_analyst_response` (the bytes, before they are evaluated) and
@@ -98,14 +124,16 @@ provider adapter over the committed ThreatFox export shape, against a real
 migrated engine for the cache, and against the real credential from `.env` for
 the isolation properties. **No live provider has been queried through it**: the
 query surface of the hunting API is confirmed, and the adapter written against
-it, in the first-live-provider increment. Budget enforcement and the disclosure
-record are named in the docstring above because they are the layer's, and are
-**not built here** — see the "deliberately not here" section below.
+it, in the first-live-provider increment. The disclosure record is named in the
+docstring above because it is the layer's, and is **not built here** — see the
+"deliberately not here" section below.
 
 ## Deliberately not here, and named so a green suite does not read as a finished layer
 
-- **Budget enforcement.** Nothing counts steps, live queries, tokens or seconds.
-  A cache hit already costs no live query, and nothing is counting.
+- **Pacing calls to the configured rate.** `config/policy.toml` states the rate
+  the tool layer holds itself to, and the live-query budget is derived from it;
+  nothing sleeps between calls. The adapter that speaks to a live provider is
+  what has to, and the wall-clock budget is what catches it when it does.
 - **The disclosure record.** A call is logged locally; no disclosure row exists,
   and the send policy that decides *what may be sent to which source* is not
   written. In particular an indicator the model invents is sent as readily as one
@@ -135,6 +163,7 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from helena import taxonomy
+from helena.budgets import BudgetExhausted, RunBudget
 from helena.config import Secret
 from helena.contracts import v1 as contract
 from helena.enrichment import (
@@ -162,6 +191,7 @@ __all__ = [
     "ANALYST_EVIDENCE_TABLE",
     "ANALYST_EVIDENCE_VIEW",
     "ANALYST_RESPONSE_TABLE",
+    "BUDGET_EXHAUSTED",
     "DEFAULT_PORTS",
     "ENDPOINT",
     "ENTITY_TYPE_NOT_COVERED",
@@ -207,9 +237,19 @@ MAX_INDICATOR = 2048
 #:   entity_type_not_covered  a well-formed call about something this source does
 #:                            not answer about -- `concept/05`, "a JA3 list has
 #:                            nothing to say about a domain"
+#:   budget_exhausted         the run has no step, no live query or no wall clock
+#:                            left. `concept/07`: budgets are enforced at the tool
+#:                            boundary "so an agent cannot reason its way around
+#:                            them", and this is the boundary saying so in a field
+#:                            the model can read and not argue with
 MALFORMED_ARGUMENTS = "malformed_arguments"
 ENTITY_TYPE_NOT_COVERED = "entity_type_not_covered"
-REFUSAL_REASONS = (MALFORMED_ARGUMENTS, ENTITY_TYPE_NOT_COVERED)
+#: The gap kind, reused rather than respelled: the refusal the model sees and the
+#: gap the assessment records are the same fact at two layers, and a second
+#: spelling of it is the drift `concept/instruction.md` §2 rejects for version
+#: constants. `tests/test_tools.py` asserts they are one string.
+BUDGET_EXHAUSTED = contract.BUDGET_EXHAUSTED
+REFUSAL_REASONS = (MALFORMED_ARGUMENTS, ENTITY_TYPE_NOT_COVERED, BUDGET_EXHAUSTED)
 
 
 class ToolError(RuntimeError):
@@ -1210,25 +1250,55 @@ class ProviderTool:
         arguments: Mapping[str, Any],
         *,
         scope: RunScope,
+        budget: RunBudget,
         now: datetime | None = None,
     ) -> Lookup:
-        """Ask this provider about one indicator, scoped to one tenant. Cache-first.
+        """Ask this provider about one indicator, scoped to one tenant. Cache-first, budgeted.
 
-        `scope` is keyword-only and has no default: a call that did not say whose
-        it is does not compile, which is the shape `concept/instruction.md` §6
-        asks for -- fail at the call, never a defaulted tenant.
+        `scope` and `budget` are keyword-only and have no default: a call that did
+        not say whose it is, or what bounds it, does not compile. That is the
+        shape `concept/instruction.md` §6 asks for -- fail at the call, never a
+        defaulted tenant, and never an unbounded loop -- and it is why this is
+        where the budget is enforced rather than in a prompt: **there is no
+        argument a model could put a budget in, and no sentence it could write
+        that skips one** (`concept/07`).
 
-        The order is `concept/07`'s, and each branch is a different fact:
+        Three of the four dimensions are charged here, in this order, and the
+        order is the whole of what makes a cache hit cheap:
 
         | | |
         | --- | --- |
-        | a valid, unexpired record | served, **nothing is sent**, one `cache_hit` step per record |
+        | a step, and the clock | before anything else. Every accepted call is a turn of the loop, including one refused as malformed |
+        | a live query | **after** the cache read, because a hit sends nothing and spends no quota |
+        | the token budget | not here at all -- a tool call spends none; `helena.agents.assess` charges those |
+
+        A dimension with nothing left is a `ToolRefusal` carrying
+        `budget_exhausted`, never an exception and never a `QueryFailure`: nothing
+        was queried, so there is no provider to attribute an outage to, and a run
+        that spent its budget is still a run that can produce a verdict on what it
+        gathered.
+
+        The rest of the order is `concept/07`'s, and each branch is a different fact:
+
+        | | |
+        | --- | --- |
+        | a valid, unexpired record | served, **nothing is sent**, no live query charged, one `cache_hit` step per record |
         | nothing stored | queried, stored, served, `live_query` |
         | stored and expired | queried; the fresh answer replaces it |
         | stored, expired, and the query did not complete | the expired record served explicitly `stale`, **beside** the typed failure |
         | nothing stored and the query did not complete | the typed failure alone |
+        | expired, or nothing stored, and no live query left | refused. See the note in the body: the stale fallback is not reused here |
         """
         retrieved_at = now or datetime.now(timezone.utc)
+        try:
+            # The step first, so an unbounded loop cannot be bought with
+            # malformed calls, and the clock with it: a run whose wall clock is
+            # spent is over, and reading the cache for it would be work nobody
+            # can use.
+            budget.charge_step()
+            budget.check_clock()
+        except BudgetExhausted as spent:
+            return self._refuse(BUDGET_EXHAUSTED, spent.detail)
         try:
             call = ToolCall.model_validate(dict(arguments))
         except ValidationError as invalid:
@@ -1243,7 +1313,20 @@ class ProviderTool:
         key = CacheKey.of(self._descriptor, self._endpoint, call, scope)
         stored = self._cache.read(key)
         if stored is not None and not stored.expired(retrieved_at):
-            return self._served(key, stored, retrieved_at)
+            return self._served(key, stored, retrieved_at, budget=budget)
+
+        try:
+            # Charged before the call, not after: a query that did not complete
+            # still reached the provider and still spent its quota, which is what
+            # the dimension bounds. An exhausted budget refuses the call and does
+            # **not** fall back to an expired record -- the stale fallback exists
+            # because the provider was unreachable and the record is then the best
+            # available answer, and a run out of quota is a different fact. Making
+            # exhaustion serve stale rows would let a budget decide what the
+            # evidence is.
+            budget.charge_live_query()
+        except BudgetExhausted as spent:
+            return self._refuse(BUDGET_EXHAUSTED, spent.detail)
 
         try:
             answer = self._ask(call, self._credential)
@@ -1255,7 +1338,11 @@ class ProviderTool:
                 # defines `stale` as exactly this: the claim stands and its age
                 # is now part of what it is worth. The failure travels with it.
                 return self._served(
-                    key, stored, retrieved_at, failure=self._failure(call, failed)
+                    key,
+                    stored,
+                    retrieved_at,
+                    budget=budget,
+                    failure=self._failure(call, failed),
                 )
             return self._failed(call, failed, retrieved_at)
 
@@ -1338,6 +1425,7 @@ class ProviderTool:
         stored: CacheEntry,
         now: datetime,
         *,
+        budget: RunBudget,
         failure: QueryFailure | None = None,
     ) -> Lookup:
         """A stored answer, served without touching the network.
@@ -1352,7 +1440,15 @@ class ProviderTool:
         and the live query did not complete. It is a step of its own, so the
         outage stays countable and the served rows stay `stale` rather than
         either fact being quietly dropped.
+
+        The hit is counted on the ledger and **nothing is charged**: `concept/03`
+        puts "cache-hit versus live-query counts" on the assessment, and the count
+        is per call rather than per record, because the unit a provider quota is
+        spent in is the request. The stale fallback is the one call that appears
+        in both counters, and it appears in both because it did both -- it reached
+        the provider, which spent the quota, and then served stored rows.
         """
+        budget.record_cache_hit()
         evidence = stored.evidence(now)
         steps = [
             contract.RetrievalStep(

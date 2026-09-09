@@ -72,7 +72,7 @@ from dataclasses import dataclass
 from types import ModuleType
 from typing import Any
 
-from helena import agents, taxonomy
+from helena import agents, budgets, taxonomy
 from helena.contracts import ContractError
 from helena.contracts import v1 as contract
 
@@ -213,11 +213,18 @@ def run(
         )
 
     offered = classifications(request.versions.taxonomy_version)
+    # The ledger for this run, built here because for triage `run` **is** the
+    # whole run: one model exchange, no tool loop, nothing to charge but the
+    # tokens and the clock. The analyst's runner is where one ledger has to reach
+    # two places (`helena.budgets`), and it is a later increment; building one
+    # here would be the same object with a shorter life.
+    budget = budgets.RunBudget.of(request)
     outcome = agents.assess(
         request,
         client=client,
         messages=prompt.messages(request, classifications=offered),
         policy=policy,
+        budget=budget,
         propose=prompt.propose,
         vocabularies={CLASSIFICATION: offered},
     )
