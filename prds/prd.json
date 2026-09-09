@@ -485,7 +485,7 @@
         "Add a test that a cache hit records no new disclosure",
         "Add a test that a policy-forbidden field cannot reach a request body"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D5 Tools] First live provider tool — verify the query surface before building",
