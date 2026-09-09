@@ -416,7 +416,7 @@
         "Record the honest limitation as a first-class policy outcome: the scope test works on address entities and not on domain ones, so domain-only support is downgraded and the reason is recorded as a gap",
         "Write a table-driven test suite, one case per rule, and document where the rule is enforced relative to the prompt"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D4 Policy] Deterministic escalation evaluator independent of triage",
