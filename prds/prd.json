@@ -526,7 +526,7 @@
         "Assert for each case that the verdict, the tool calls made and the citations are unchanged relative to a benign control",
         "Record the test suite as the evidence for the isolation claim, since asserting it is explicitly not enough"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D5 Tools] Replay mode — read stored responses, never re-query",
