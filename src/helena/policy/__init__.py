@@ -67,11 +67,14 @@ that constrained an assessment* has to be reconstructible from the identifier a
 stored row holds — and a revision is `v2` beside `v1`, never an edit.
 
 - **Here**: `Support` — one claim with the per-entity traffic beside it — and the
-  two reads that assemble them, `supports_for` (a result's citations) and
-  `supports_in` (every claim in a projection). Plus `Thresholds` and the loader
-  that reads `config/policy.toml`, because *which sources need a number* moves
-  with the registry and the file is not frozen. That is all *how the input is
-  assembled*, and it moves when the store's shape moves.
+  two reads that assemble them, `supports_for` (a result's citations, from the
+  projection **and** from what an analyst run retrieved) and `supports_in` (every
+  claim in a projection). Plus `port_matched`, which is the analyst tier's copy of
+  a scope test the enriched-context view already makes for the enrichment tier.
+  Plus `Thresholds` and the loader that reads `config/policy.toml`, because
+  *which sources need a number* moves with the registry and the file is not
+  frozen. That is all *how the input is assembled*, and it moves when the store's
+  shape moves.
 - **In `vN.py`**: the rules themselves, their names, the severity ordering, the
   paths that assert something about the host rather than about a contacted
   indicator, what a threshold *does*, and the `Decision` and `Escalation` a run
@@ -113,6 +116,7 @@ it.
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -121,12 +125,19 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, NonNegativeInt
 
 from helena.contracts import v1 as contract
-from helena.enrichment import ENRICHMENT_STATUSES, ENTITY_TYPES, SOURCES, Tier
+from helena.enrichment import (
+    ENRICHMENT_STATUSES,
+    ENTITY_TYPES,
+    SOURCES,
+    EnrichmentEvidence,
+    Tier,
+)
 from helena.rendering import ContextProjection
 
 __all__ = [
     "BUDGET_KEYS",
     "DISCLOSURE_KEYS",
+    "PORT_SCOPE",
     "POLICY_FILE",
     "PolicyError",
     "PolicyVersion",
@@ -135,6 +146,7 @@ __all__ = [
     "THRESHOLD_TIER",
     "Thresholds",
     "UnknownVersion",
+    "port_matched",
     "supports_for",
     "supports_in",
     "thresholds",
@@ -175,6 +187,14 @@ DISCLOSURE_KEYS = frozenset({"send_policy", "send_policy_version"})
 #: *entries the file must carry*, and that moves with `helena.enrichment.SOURCES`
 #: — machinery, not rule. What a threshold **does** is `vN.escalate`'s.
 THRESHOLD_TIER = Tier.B
+
+#: The scope value of a port-qualified claim, as
+#: `sql/migrations/0014_feed_mapping_views.sql` writes it and
+#: `sql/migrations/0015_enriched_context.sql` tests it. Machinery rather than
+#: rule: it is what `port_matched` below has to recognise, and a version module's
+#: own copy is asserted equal to this one by `tests/test_policy.py` — two copies
+#: that can drift are worse than none (`concept/instruction.md` §2).
+PORT_SCOPE = "address:port"
 
 
 class PolicyError(Exception):
@@ -274,8 +294,52 @@ class Support(BaseModel):
             )
 
 
+def port_matched(
+    scope_type: str, scope_value: str, ports: Sequence[int]
+) -> bool | None:
+    """Whether the host reached the port a claim is scoped to. Three-valued.
+
+    The Python copy of `sql/migrations/0015_enriched_context.sql`'s `CASE`, and it
+    exists because that view joins **enrichment**-tier claims to the observed
+    ports and nothing joins an analyst-tier one: `helena_reference_evidence_analyst`
+    is deliberately not unioned into the enriched context (task 35), because a
+    report fetched during one investigation must not enter the precomputed context
+    of every later host that talked to the same address. So a claim this run
+    retrieved has to be scoped against the traffic here, in the run that retrieved
+    it.
+
+    Three-valued for the reason the view gives: `None` where the claim is not
+    port-scoped and the question does not arise, `False` where the host reached
+    that address on other ports only. Neither is "no": a `False` is `suspicious`
+    at most rather than nothing at all, and that is `helena.policy.vN`'s decision
+    to make and not this function's.
+
+    `tests/test_policy.py` executes the view's own expression against a real
+    engine over the same inputs and asserts the two agree, because two copies of a
+    rule that can drift are worse than none (`concept/instruction.md` §2).
+
+    Raises `PolicyError` for a port-scoped value with no readable port. A claim
+    that says it is about an address on a port and cannot say which port is a
+    mapping bug, and guessing `None` would silently convert it into an unscoped
+    claim — the strongest possible reading of the weakest evidence.
+    """
+    if scope_type != PORT_SCOPE:
+        return None
+    _, separator, port = scope_value.rpartition(":")
+    if not separator or not port.isdigit():
+        raise PolicyError(
+            f"a {PORT_SCOPE!r} claim is scoped to {scope_value!r}, which carries "
+            f"no port. The port is what the claim is *about*, so a claim that "
+            f"cannot name it cannot be scoped against the traffic."
+        )
+    return int(port) in set(ports)
+
+
 def supports_for(
-    result: contract.AgentResult, projection: ContextProjection
+    result: contract.AgentResult,
+    projection: ContextProjection,
+    *,
+    retrieved: Sequence[tuple[Any, Any]] = (),
 ) -> tuple[Support, ...]:
     """Resolve a result's citations against the context they were drawn from.
 
@@ -291,6 +355,28 @@ def supports_for(
     silently remove a support from the rule's input, and the rule's answer is a
     function of exactly that input.
 
+    **`retrieved` is the analyst's other half**, and it is empty for triage
+    because triage retrieves nothing. `concept/04` gives the analyst `enrichment`
+    **and** `analyst` tier evidence, and `check_exchange` lets an analyst result
+    cite an identifier "the rendering showed **or** its own retrieval trace
+    produced" — so a rule input built from the projection alone would refuse
+    exactly the citations the second tier exists for.
+
+    It is a sequence of **pairs**: the `helena.rendering.ContextEntity` the claim
+    is about, and the `helena.enrichment.EnrichmentEvidence` row itself. A pair
+    rather than a join here, because the two halves spell the indicator
+    differently and only the caller knows they are the same thing: a context
+    entity carries the value **as observed** (`sql/migrations/0007` takes a DNS
+    `query_name` verbatim) and a retrieved claim carries it **normalized**
+    (`helena.tools.normalize_indicator`, which lowercases a name and strips its
+    trailing root dot). Joining on the value here would silently drop exactly the
+    claims whose spelling the fold changed, and dropping a support is the one
+    thing this function refuses to do quietly.
+
+    The traffic is still the projection's, because the composition rule is about
+    what **this host did** with the indicator, which is not a property of the
+    claim and does not change with the tier it came from.
+
     `proposed_claims` are deliberately not read. A proposal is a claim about
     *infrastructure* that deterministic code validates and writes
     (`concept/07`); the composition rule is about what the **context verdict**
@@ -302,6 +388,16 @@ def supports_for(
         for record in entity.enrichment
         if record.evidence_id is not None
     }
+    for entity, record in retrieved:
+        if entity not in projection.entities:
+            raise PolicyError(
+                f"a claim about {record.entity_type} {record.entity_value!r} is "
+                f"paired with an entity that is not in context "
+                f"{projection.context_id!r}. The composition rule weighs a claim "
+                f"against what the host did with the indicator, and this pairs it "
+                f"with traffic from somewhere else."
+            )
+        claims[record.evidence_id] = (entity, record)
     unresolvable = sorted(
         citation.evidence_id
         for citation in result.citations
@@ -321,13 +417,23 @@ def supports_for(
 
 
 def _support(citation: contract.Citation, entity: Any, record: Any) -> Support:
-    """One citation, one entity row and one claim row, fused into the rule's input."""
+    """One citation, one entity row and one claim row, fused into the rule's input.
+
+    Two shapes of claim row arrive here and they differ in exactly two fields.
+    `helena.rendering.EntityEnrichment` is the enrichment tier as the enriched
+    context view produced it, with `port_matched` already computed in SQL and the
+    tier as a letter; `helena.enrichment.EnrichmentEvidence` is an analyst-tier row
+    this run retrieved, whose scope has never met the observed ports and whose
+    tier is the registry's enum. The two are bridged here rather than by giving
+    either shape a field it has no business carrying.
+    """
     if record.classification is None:  # pragma: no cover — the store cannot produce it
         raise PolicyError(
             f"{record.source_id} carries evidence id {record.evidence_id!r} for "
             f"{entity.entity_type} {entity.entity_value!r} and no classification. "
             f"An identifier exists exactly where a claim does."
         )
+    retrieved = isinstance(record, EnrichmentEvidence)
     return Support(
         evidence_id=citation.evidence_id,
         stance=citation.stance,
@@ -337,9 +443,13 @@ def _support(citation: contract.Citation, entity: Any, record: Any) -> Support:
         confidence=record.confidence,
         scope_type=record.scope_type,
         scope_value=record.scope_value,
-        port_matched=record.port_matched,
+        port_matched=(
+            port_matched(record.scope_type, record.scope_value, entity.ports)
+            if retrieved
+            else record.port_matched
+        ),
         source_id=record.source_id,
-        source_tier=record.source_tier,
+        source_tier=record.source_tier.value if retrieved else record.source_tier,
         status=record.status,
         observed_layers=tuple(entity.observed_layers),
         observed_flow_count=entity.observed_flow_count,

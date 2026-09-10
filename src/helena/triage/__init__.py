@@ -240,7 +240,7 @@ def run(
         propose=prompt.propose,
         vocabularies={CLASSIFICATION: offered},
     )
-    outcome = _with_truncation_gap(request, outcome)
+    outcome = agents.with_truncation_gap(request, outcome)
     try:
         contract.check_exchange(request, outcome)
     except ContractError as refused:
@@ -308,43 +308,6 @@ def _check_binds_no_tools(request: contract.AgentRequest, prompt: TriagePrompt) 
             f"Offering them would be offering the model a way to fail validation "
             f"and nothing else."
         )
-
-
-def _with_truncation_gap(
-    request: contract.AgentRequest,
-    outcome: contract.AgentResult | contract.AgentFailure,
-) -> contract.AgentResult | contract.AgentFailure:
-    """A rendering that dropped a record forces a `truncated` gap on the outcome.
-
-    `concept/instruction.md` §2 — *truncation is visible or it is a bug* — and
-    `contract.check_exchange` refuses an outcome without one. The gap is written
-    **here** rather than asked of the model, because what was dropped is a fact
-    the code measured and the model cannot see: a truncated section says how many
-    records went, and nothing in the rendering says what they were.
-
-    Rebuilt through `model_validate` rather than `model_copy(update=...)`:
-    `model_copy` skips validation, and a gap added to a result without re-running
-    the contract's own rules is exactly the silent edit this project keeps
-    writing down. The rebuild is a no-op for every field but one.
-    """
-    if not request.rendering.truncations:
-        return outcome
-    if any(gap.kind == contract.TRUNCATED for gap in outcome.gaps):
-        return outcome
-    dropped = sum(
-        record.total - record.kept for record in request.rendering.truncations
-    )
-    sections = ", ".join(record.section for record in request.rendering.truncations)
-    gap = contract.Gap(
-        kind=contract.TRUNCATED,
-        detail=_bounded(
-            f"the rendering dropped {dropped} record(s) to fit its size budget, "
-            f"in: {sections}. What was dropped was not shown to the model."
-        ),
-    )
-    return type(outcome).model_validate(
-        {**dict(outcome), "gaps": (*outcome.gaps, gap)}
-    )
 
 
 def _unheld_exchange(

@@ -51,3 +51,45 @@
 
 [retry]
 attempts = 3
+
+# --- The analyst's second-opinion arm ------------------------------------------
+#
+# Whether the Analyst Agent is shown what triage concluded. `concept/04-the-two-agents.md`,
+# "The analyst forms an independent second opinion":
+#
+#   **The analyst does not inherit the triage rationale by default.** It re-reads
+#   the enriched context and decides for itself — because the analyst's `normal`
+#   verdict is the direct measurement of triage precision, and that measurement is
+#   worthless if the analyst was anchored on triage's framing. The other arm stays
+#   measurable as a configuration switch rather than a contract change.
+#
+# So it is a switch here and **not** a field on `helena.contracts.v1.AgentRequest`:
+# adding one would make every request carry the other stage's answer, which is a
+# change to the agent contract (`concept/instruction.md` §3) and would put the
+# thing being measured inside the thing measuring it. The triage outcome reaches
+# `helena.analyst.run` as an argument, and this value decides whether
+# `helena.analyst.v1` is allowed to show it.
+#
+# ## What "inherit" shows, when it is on
+#
+# The typed fields of the triage outcome and nothing else — the verdict, the
+# confidence, the citations and the gaps, or for a typed failure the reason and
+# the detail. `helena.analyst.v1.INHERITED_RESULT_FIELDS` is the list, and it is in
+# the frozen prompt module because *what the model was shown* is part of the
+# question a recorded `prompt_version` pins.
+#
+# ## Where `false` came from
+#
+# It is `concept/04`'s own default and not a number anyone picked, which makes it
+# the one value in this repository's configuration that is a decision rather than
+# a candidate. Turning it on is turning off the measurement: with inheritance on,
+# an analyst `normal` no longer tells you what triage's precision was, because the
+# analyst was told what triage thought. Both arms are worth running — that is why
+# the switch exists — but they are two experiments and not one.
+#
+# There is no default in the code. `helena.analyst.inheritance()` fails at startup
+# naming this file if the table is absent, because an arm that was assumed is a
+# measurement reported as something it is not.
+
+[analyst]
+inherit_triage_rationale = false

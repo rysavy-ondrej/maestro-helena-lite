@@ -150,6 +150,15 @@ SUPPORT_MODULES = {
 # the machinery beside them. It is not in COMPONENT_MODULES for the reason the
 # comment at the head of this file gives: `concept/03-architecture.md` puts the
 # policy guard inside Orchestration rather than making it a stage.
+#
+# `analyst` is the seventh, and it is `triage`'s counterpart for the same sentence
+# of ADR-0008. An analyst assessment records a `prompt_version` too, and the
+# analyst's prompt carries more that a later reader would want pinned than
+# triage's does: the field set it was offered, the framing of the retrieved
+# provider text, and which fields of a triage outcome were shown when the
+# inheritance arm was on. All three are what the model was *asked*, so a reworded
+# instruction is a `v2` beside `v1` and never an edit. It is not in
+# COMPONENT_MODULES for the reason `triage` is not.
 VERSIONED_PACKAGES = {
     "taxonomy",
     "contracts",
@@ -157,6 +166,7 @@ VERSIONED_PACKAGES = {
     "rendering",
     "triage",
     "policy",
+    "analyst",
 }
 
 # What a file inside a versioned package may be called. Anything else -- a

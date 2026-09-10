@@ -76,6 +76,32 @@ model per assessment is what makes it detectable.*
 and the prompt is not a diagnostic; what the log carries is the host, the two
 model identities, the token counts and the attempt number.
 
+## Tool binding, and the one thing it may not be combined with
+
+`ModelClient.complete` takes **either** a `schema` or a list of `tools`, never
+both, and that is a measurement rather than a preference. Against the configured
+analyst endpoint on 2026-09-10, with one function tool bound and a user turn that
+says *"look it up"*:
+
+| Sent | What came back |
+| --- | --- |
+| `tools` alone | `finish_reason = "tool_calls"`, one `tool_calls` entry with the arguments the model chose |
+| `tools` **and** `response_format` `json_schema` `strict` | `finish_reason = "stop"`, the final JSON answer, **no tool call at all** |
+
+The grammar the schema compiles to wins: a model constrained to emit one object
+cannot emit a tool call, so binding both silently turns the tool loop off. That is
+the failure this project would never have seen in a test with a mocked endpoint —
+the loop would have "worked" and never retrieved anything. So the two are mutually
+exclusive by construction here, and `helena.analyst` runs the two phases as two
+different calls: bounded turns with tools and no schema, then one structured
+answer with the schema and no tools.
+
+The tool the model is offered is `helena.tools.ProviderTool.declaration()`, which
+is provider-agnostic — a name, a description and an `input_schema`. The
+OpenAI-compatible spelling of that (`{"type": "function", "function": {...,
+"parameters": ...}}`) is built here, because it is the wire protocol and the tool
+layer is not where a vendor's dialect belongs.
+
 ## Why `urllib` and not LangChain
 
 `concept/06-technology.md` puts LangChain in the technology table for exactly this
@@ -95,10 +121,15 @@ and what this module does is what the project already does for the feed loaders:
 one POST does not earn a dependency. The endpoint is an ordinary
 OpenAI-compatible HTTP API and `urllib` speaks it. Structured output is validated
 by Pydantic, which is approved and is the contract's own validator; **tool
-binding, which is the half of LangChain's justification this module does not
-supply, has no caller yet** — triage binds no tools at all, and the analyst's tool
-loop is a later increment. That increment is where the question has to be
-answered, and it will still be the operator's to answer.
+binding, which is the half of LangChain's justification this module did not
+supply, is now one `tools` key in a JSON body** — see the section above. Task 39
+was the increment that had to reopen the question, and reopening it produced the
+same answer for the same measured reason: `langchain-openai` still resolves
+`langsmith`, hosted tracing is still *rejected* rather than deferred, and a tool
+loop that amounts to a `tools` list on the way out and a `tool_calls` list on the
+way back does not earn 37 distributions.
+`docs/decisions/0029-the-analyst-runner.md` §2 records it, and it is still the
+operator's to overturn.
 
 ## Inference is hosted, so a model call is a disclosure
 
@@ -143,10 +174,12 @@ from helena.contracts import v1 as contract
 from helena.enrichment import ENTITY_TYPES, QUERY_FAILURE_REASONS
 
 __all__ = [
+    "AGENT_KEYS",
     "CLOSED_VOCABULARIES",
     "CODE_OWNED_FIELDS",
     "COMPLETIONS_PATH",
     "RETRY_FILE",
+    "RETRY_KEYS",
     "ROLES",
     "AgentError",
     "Completion",
@@ -155,16 +188,41 @@ __all__ = [
     "ModelTimedOut",
     "ModelUnavailable",
     "RetryPolicy",
+    "ToolInvocation",
     "assess",
     "proposable_fields",
+    "prompt_bytes",
     "proposal_schema",
     "retry_policy",
+    "with_truncation_gap",
 ]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 #: The retry bound. Policy, not a constant in this package — see `retry_policy`.
+#: The file is the **agents'** configuration and holds more than the retry table;
+#: the name is the historical one and the two key sets below are what says which
+#: loader reads which half.
 RETRY_FILE = PROJECT_ROOT / "config" / "agents.toml"
+
+#: The top-level tables of `config/agents.toml`: the shared bound this module
+#: reads, plus at most one table per agent, read by that agent's own runner.
+#:
+#: Both sets are named here, in the module that owns the path, for the reason
+#: `helena.policy` names all three of `config/policy.toml`'s: each loader refuses
+#: a key **nothing** reads, and none may refuse a key another one reads. A second
+#: copy beside the other loader is how the two drift into rejecting each other's
+#: table.
+#:
+#: `AGENT_KEYS` is derived from `helena.config.AGENTS` and is deliberately not a
+#: literal: this module never names an agent (`tests/test_agents.py` asserts that
+#: over its own AST), because agent choice is configuration and not a code path.
+#: The cost of deriving it is that a table for an agent whose runner reads no
+#: configuration would be accepted here and read by nothing — which is a looser
+#: check than the rest of this project makes, and is the price of the property
+#: above. Each runner refuses what it does not recognise **inside** its own table.
+RETRY_KEYS = frozenset({"retry"})
+AGENT_KEYS = frozenset(AGENTS)
 
 #: Appended to the configured endpoint. The OpenAI-compatible chat completions
 #: path; the configured URL carries the API root, including its version segment.
@@ -282,6 +340,33 @@ class RetryPolicy(BaseModel):
     attempts: PositiveInt
 
 
+class ToolInvocation(BaseModel):
+    """One tool call a model asked for. What it said, and nothing interpreted.
+
+    `arguments` is the **raw JSON text the model produced**, kept as text rather
+    than decoded here, for the reason `helena.tools.ToolCall`'s docstring gives of
+    its own fields: what a model said is validated by the layer that owns the
+    tool, and a decode in this module would be a second, earlier, unowned
+    validation of it. A string that is not a JSON object is therefore not this
+    module's error — it is a call the dispatch refuses, typed and countable, and
+    `helena.analyst` is where that happens.
+
+    `call_id` is the endpoint's own correlation id. It is carried because the wire
+    protocol pairs a result with a call by it; nothing here reads it, and nothing
+    stores it.
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    call_id: str
+    name: str
+    arguments: str
+
+    def model_post_init(self, _context: object) -> None:
+        if not self.name.strip():
+            raise ValueError("a tool call that names no tool addresses nothing")
+
+
 class Completion(BaseModel):
     """One answer from the endpoint, and what it cost.
 
@@ -289,6 +374,13 @@ class Completion(BaseModel):
     value `RequestVersions.completed_by` accepts. `docs/decisions/0008-version-registry.md`:
     the configured name "is the thing that stays stable while what answers to it
     changes".
+
+    `text` and `tool_calls` are both present because the wire protocol permits
+    both, and a turn that asked for a tool commonly carries whitespace or a
+    reasoning preamble in `text`. Neither is coerced into the other: an answer with
+    tool calls is a turn of a loop and an answer without them is a turn that
+    stopped, and collapsing the two would make "the model chose to stop" and "the
+    model said nothing" one fact.
     """
 
     model_config = ConfigDict(
@@ -296,6 +388,9 @@ class Completion(BaseModel):
     )
 
     text: str
+    #: The tools the model asked for, in the order it asked. Empty on every call
+    #: that bound none, which is every triage call.
+    tool_calls: tuple[ToolInvocation, ...] = ()
     model_reported: str
     prompt_tokens: NonNegativeInt
     completion_tokens: NonNegativeInt
@@ -331,12 +426,13 @@ def retry_policy(path: Path | str = RETRY_FILE) -> RetryPolicy:
         document = tomllib.loads(raw.decode())
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as malformed:
         raise AgentError(f"{path} is not readable TOML: {malformed}") from malformed
-    unexpected = sorted(set(document) - {"retry"})
+    unexpected = sorted(set(document) - RETRY_KEYS - AGENT_KEYS)
     if unexpected:
         raise AgentError(
-            f"{path} has top-level keys {unexpected}; the file is one [retry] "
-            f"table. A key nothing reads is a policy somebody set and nothing "
-            f"applies."
+            f"{path} has top-level keys {unexpected}; this loader reads "
+            f"{sorted(RETRY_KEYS)} and the rest of the file is one table per "
+            f"agent ({sorted(AGENT_KEYS)}), read by that agent's own runner. A "
+            f"key nothing reads is a policy somebody set and nothing applies."
         )
     table = document.get("retry")
     if not isinstance(table, dict):
@@ -553,12 +649,19 @@ class ModelClient:
         self,
         messages: Sequence[Message],
         *,
-        schema: dict[str, Any],
+        schema: dict[str, Any] | None = None,
+        tools: Sequence[dict[str, Any]] = (),
         max_tokens: int,
         timeout: float,
         attempt: int,
     ) -> Completion:
         """One call. Raises `ModelUnavailable` or `ModelTimedOut`, never returns a partial.
+
+        **Exactly one of `schema` and `tools`**, and the exclusivity is measured
+        rather than assumed — the module docstring has the numbers. A schema in
+        `response_format` compiles to a grammar that the model cannot leave, so a
+        call carrying both silently answers instead of retrieving, and a tool loop
+        built that way would look like it worked.
 
         The schema goes to the endpoint's `response_format` rather than into the
         prompt, and that is a cost decision with a measurement behind it: against
@@ -572,7 +675,16 @@ class ModelClient:
         classification the taxonomy does not have, a confidence outside 0..1 —
         are not expressible in JSON Schema and are exactly what fails.
         """
-        payload = {
+        if (schema is None) == (not tools):
+            raise AgentError(
+                "a call binds a response schema or a tool list and never both: a "
+                "schema in `response_format` compiles to a grammar the model "
+                "cannot leave, so a call carrying both answers instead of "
+                "retrieving (measured 2026-09-10, see the module docstring). This "
+                "one has "
+                + ("both" if schema is not None else "neither")
+            )
+        payload: dict[str, Any] = {
             "model": self._settings.model,
             "messages": [
                 {"role": message.role, "content": message.content}
@@ -580,15 +692,18 @@ class ModelClient:
             ],
             "max_tokens": max_tokens,
             "temperature": TEMPERATURE,
-            "response_format": {
+        }
+        if schema is not None:
+            payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
                     "name": "agent_result",
                     "strict": True,
                     "schema": schema,
                 },
-            },
-        }
+            }
+        else:
+            payload["tools"] = [_function(declaration) for declaration in tools]
         request = urllib.request.Request(
             self._url,
             data=json.dumps(payload).encode(),
@@ -612,6 +727,9 @@ class ModelClient:
             model_requested=self._settings.model,
             attempt=attempt,
             max_tokens=max_tokens,
+            # Which of the two shapes this call is, so a run's turns can be
+            # counted apart in the log without any message content in it.
+            tools_bound=len(payload.get("tools", ())),
         )
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -648,8 +766,38 @@ class ModelClient:
             attempt=attempt,
             prompt_tokens=completion.prompt_tokens,
             completion_tokens=completion.completion_tokens,
+            tool_calls=len(completion.tool_calls),
         )
         return completion
+
+
+def _function(declaration: dict[str, Any]) -> dict[str, Any]:
+    """One `helena.tools.ProviderTool.declaration()` in the OpenAI-compatible spelling.
+
+    The tool layer's declaration is provider-agnostic — a name, a description and
+    an `input_schema` — because `concept/03` offers the agent a capability rather
+    than a client, and a wire dialect written into that object would be this
+    project's tool boundary taking a side on a protocol. So the translation is
+    here, where the protocol already is.
+
+    Loud rather than lenient about a declaration it cannot translate: a tool sent
+    without its schema is a tool the model fills in by guessing, which is the
+    failure `CLOSED_VOCABULARIES` exists to prevent one level down.
+    """
+    missing = sorted({"name", "description", "input_schema"} - set(declaration))
+    if missing:
+        raise AgentError(
+            f"a tool declaration is missing {missing}; "
+            f"`helena.tools.ProviderTool.declaration()` is what builds one"
+        )
+    return {
+        "type": "function",
+        "function": {
+            "name": declaration["name"],
+            "description": declaration["description"],
+            "parameters": declaration["input_schema"],
+        },
+    }
 
 
 def _is_timeout(failure: BaseException) -> bool:
@@ -680,15 +828,20 @@ def _completion(raw: bytes) -> Completion:
             f"the endpoint's response is not JSON: {type(malformed).__name__}"
         ) from malformed
     try:
-        choice = body["choices"][0]["message"]["content"]
+        message = body["choices"][0]["message"]
         usage = body["usage"]
         return Completion(
-            text=choice,
+            # `null` where the turn is a tool call and nothing else, which is what
+            # the configured endpoint returns for some models and whitespace for
+            # others. Both are "the model said nothing in words", and the
+            # `tool_calls` list is what says whether that turn did anything.
+            text=message.get("content") or "",
+            tool_calls=_invocations(message.get("tool_calls") or ()),
             model_reported=body["model"],
             prompt_tokens=usage["prompt_tokens"],
             completion_tokens=usage["completion_tokens"],
         )
-    except (KeyError, IndexError, TypeError) as missing:
+    except (AttributeError, KeyError, IndexError, TypeError) as missing:
         raise ModelUnavailable(
             f"the endpoint's response is not an OpenAI-compatible chat completion: "
             f"{type(missing).__name__} {missing}"
@@ -697,6 +850,25 @@ def _completion(raw: bytes) -> Completion:
         raise ModelUnavailable(
             f"the endpoint's response has a field of the wrong type: {refused}"
         ) from refused
+
+
+def _invocations(raw: Any) -> tuple[ToolInvocation, ...]:
+    """The response's `tool_calls`, typed. Anything unreadable is the endpoint's fault.
+
+    Raises `KeyError` or `TypeError` into `_completion`'s handler, which becomes
+    `model_unavailable`: a `tool_calls` entry this cannot read is a service that is
+    not OpenAI-compatible, which is a deployment pointed at the wrong endpoint and
+    not a model that needs retrying. What the model *chose* is never judged here —
+    `arguments` is carried as the text it arrived as.
+    """
+    return tuple(
+        ToolInvocation(
+            call_id=str(entry["id"]),
+            name=entry["function"]["name"],
+            arguments=entry["function"].get("arguments") or "",
+        )
+        for entry in raw
+    )
 
 
 def _attempt_messages(
@@ -859,7 +1031,7 @@ def assess(
         disclosures.record_model_call(
             model=client.model_requested,
             disclosed_to=client.endpoint_host,
-            prompt=_prompt_bytes(attempted),
+            prompt=prompt_bytes(attempted),
             messages=len(attempted),
             at=datetime.now(timezone.utc),
         )
@@ -941,8 +1113,59 @@ def assess(
     )
 
 
-def _prompt_bytes(messages: Sequence[Message]) -> bytes:
+def with_truncation_gap(
+    request: contract.AgentRequest,
+    outcome: contract.AgentResult | contract.AgentFailure,
+) -> contract.AgentResult | contract.AgentFailure:
+    """A rendering that dropped a record forces a `truncated` gap on the outcome.
+
+    `concept/instruction.md` §2 — *truncation is visible or it is a bug* — and
+    `contract.check_exchange` refuses an outcome without one. The gap is written
+    **by code** rather than asked of the model, because what was dropped is a fact
+    the code measured and the model cannot see: a truncated section says how many
+    records went, and nothing in the rendering says what they were.
+
+    It is here rather than in each runner because both runners owe it and it is a
+    rule from `concept/instruction.md` §2 — two copies of that rule, one per
+    agent, is the drift the invariant exists to prevent, and the one that gets
+    forgotten is an assessment that reads as complete. It is deliberately **not**
+    called by `assess`: `assess` is the model path, and a module that wrote a gap
+    into a verdict it did not produce would be the one place a caller could not
+    tell what the model said from what the code added. A runner calls this
+    **before** `contract.check_exchange`, which is what refuses the gap's absence.
+
+    Rebuilt through `model_validate` rather than `model_copy(update=...)`:
+    `model_copy` skips validation, and a gap added to a result without re-running
+    the contract's own rules is exactly the silent edit this project keeps
+    writing down. The rebuild is a no-op for every field but one.
+    """
+    if not request.rendering.truncations:
+        return outcome
+    if any(gap.kind == contract.TRUNCATED for gap in outcome.gaps):
+        return outcome
+    dropped = sum(
+        record.total - record.kept for record in request.rendering.truncations
+    )
+    sections = ", ".join(record.section for record in request.rendering.truncations)
+    gap = contract.Gap(
+        kind=contract.TRUNCATED,
+        detail=_bound(
+            f"the rendering dropped {dropped} record(s) to fit its size budget, "
+            f"in: {sections}. What was dropped was not shown to the model."
+        ),
+    )
+    return type(outcome).model_validate(
+        {**dict(outcome), "gaps": (*outcome.gaps, gap)}
+    )
+
+
+def prompt_bytes(messages: Sequence[Message]) -> bytes:
     """Exactly what the rendered context amounts to on the wire, for a digest.
+
+    Public because a second caller exists: `helena.analyst`'s retrieval turns are
+    model calls that this module does not make, and they owe the same disclosure
+    row for the same reason. A second serializer beside this one would produce a
+    digest that could not be compared with the answer call's.
 
     The messages and nothing else: the schema, the model name and the sampling
     parameter also travel, and they are this project's own rather than anything

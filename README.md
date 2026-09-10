@@ -44,6 +44,8 @@ src/helena/          one package, one module per architecture component
   hosts/               triage's closed host attribute set, one frozen module per version
   rendering/           the five-part triage projection, one frozen module per version
   triage/              the triage runner, and its prompt, one frozen module per version
+  analyst/             the analyst runner — the budgeted tool loop — and its prompt,
+                       one frozen module per version
   tools.py             approved providers as tools: the credential-owning boundary,
                        and the cache-first lookup whose cache is the evidence store
   providers.py         the live adapters behind that boundary — the protocol half,
@@ -59,7 +61,8 @@ src/helena/          one package, one module per architecture component
 sql/migrations/      the engine's schema: NNNN_name.sql, applied in order
 config/hosts.toml    the fixed host attributes, and triage's only source of them
 config/rendering.toml the size budget the triage rendering is bounded by
-config/agents.toml   how many times one assessment may ask the model
+config/agents.toml   how many times one assessment may ask the model, and
+                     whether the analyst is shown what triage concluded
 config/policy.toml   the confidence thresholds, the budget values, and the send policy
 tests/               the one pytest suite, mirroring the package
 scripts/             dev-up / dev-down, the pin-and-endpoint check, migrate, replay,
