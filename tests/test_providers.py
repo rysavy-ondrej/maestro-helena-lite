@@ -801,6 +801,7 @@ def test_the_composed_tool_is_the_source_the_endpoint_and_the_derived_retention(
         credential=configured.providers.abusech_auth_key,
         cache=tools.EvidenceCache(migrated_engine),
         send_policy=POLICY,
+        replay=False,
         logger=logger(),
         redactor=observability.Redactor.from_settings(configured),
         timeout_seconds=10.0,
@@ -830,6 +831,7 @@ def test_one_real_response_becomes_analyst_evidence_in_the_store(migrated_engine
             cache=tools.EvidenceCache(migrated_engine),
             retention_seconds=enrichment.THREATFOX_MIN_FETCH_INTERVAL_SECONDS,
             send_policy=POLICY,
+            replay=False,
             logger=logger(),
             redactor=observability.Redactor.from_settings(configured),
         )

@@ -95,6 +95,17 @@ COMPONENT_MODULES = {
 # `docs/decisions/0030-untrusted-text-isolation.md` records the one thing that
 # costs -- a frozen `vN` prompt now imports a file that can be edited -- and the
 # pin that pays for it.
+# `network` is here for a reason that is machine-checked rather than aesthetic,
+# and it is the mirror image of `providers`'. The tool layer's replay mode has to
+# arm a guard that makes an outbound connection raise, and the guard has to
+# import `socket` -- which `helena.tools` may not, because the AST test in
+# `tests/test_tools.py` fails if it imports `urllib`, `http`, `socket` or `ssl`.
+# `helena.providers` owns the protocol and would be the obvious home, and it
+# cannot be one: it imports `helena.tools`. So the guard is a module holding one
+# context manager, no URL and no client -- the opposite of a component. It is not
+# named `replay`, because `concept/03-architecture.md` puts "replays from stored
+# results" inside Orchestration and that runner does not exist yet; this is the
+# guard, not the replay.
 SUPPORT_MODULES = {
     "config",
     "observability",
@@ -102,6 +113,7 @@ SUPPORT_MODULES = {
     "versions",
     "broker",
     "untrusted",
+    "network",
 }
 
 # Subpackages, and the only kind there is one of. A versioned package holds

@@ -353,6 +353,7 @@ def tool(
     ask=None,
     stream: io.StringIO | None = None,
     configured: Settings | None = None,
+    replay: bool = False,
 ) -> tools.ProviderTool:
     configured = configured or settings()
     return tools.ProviderTool(
@@ -363,6 +364,7 @@ def tool(
         cache=tools.EvidenceCache(_ENGINE[-1]),
         retention_seconds=RETENTION,
         send_policy=POLICY,
+        replay=replay,
         logger=observability.logger("tools", configured, stream=stream or io.StringIO()),
         redactor=observability.Redactor.from_settings(configured),
     )
@@ -785,6 +787,68 @@ def test_every_model_turn_is_a_disclosure_including_the_retrieval_turns():
         )
     assert len(ledger.to_channel(MODEL_INFERENCE)) == 3, "two retrieval turns and the answer"
     assert len(ledger.to_channel(PROVIDER_LOOKUP)) == 1
+
+
+def test_a_replayed_analysis_reaches_no_provider_and_reads_the_recorded_answer():
+    """The whole loop, replayed: same question, same answer, nothing sent.
+
+    `concept/07`: "the first pass spends the quota, and every re-run is free
+    because it replays." The second run's tool is built with an adapter that
+    fails on contact and with `replay=True`, so this is not a count that could be
+    wrong — there is no path through it in which a provider was reached and the
+    assertions still hold. The two runs are told apart by the trace and by the
+    cost, which is `concept/07`'s other half of the same requirement.
+    """
+
+    def unreachable(call: tools.ToolCall, credential: Secret) -> tools.ProviderAnswer:
+        raise AssertionError("a replayed analysis queried the provider")
+
+    script = [
+        called(TOOL_NAME, {"entity_type": "address", "entity_value": ADDRESS}),
+        stopped(),
+        answered(MALICIOUS),
+    ]
+    calls: list[tools.ToolCall] = []
+    with _Endpoint(list(script)) as endpoint:
+        first = analyse(endpoint, provider_tools=[tool(ask=adapter(calls=calls))])
+    with _Endpoint(list(script)) as endpoint:
+        second = analyse(endpoint, provider_tools=[tool(ask=unreachable, replay=True)])
+
+    assert len(calls) == 1, "the replay re-queried"
+    assert isinstance(first.outcome, AgentResult)
+    assert isinstance(second.outcome, AgentResult)
+    assert [step.outcome for step in first.outcome.retrieval_trace] == ["live_query"]
+    assert [step.outcome for step in second.outcome.retrieval_trace] == ["cache_hit"]
+    assert (first.outcome.cost.live_queries, first.outcome.cost.cache_hits) == (1, 0)
+    assert (second.outcome.cost.live_queries, second.outcome.cost.cache_hits) == (0, 1)
+    first_cited = [step.evidence_id for step in first.outcome.retrieval_trace]
+    assert [step.evidence_id for step in second.outcome.retrieval_trace] == first_cited
+
+
+def test_a_replay_of_a_question_the_recorded_run_never_asked_is_a_typed_refusal():
+    """The model may ask about anything the context observed, recorded run or not.
+
+    A replay does not re-query to answer it, and it does not pretend the provider
+    listed nothing either: `no_stored_response` is nobody having asked, which is
+    a fifth thing beside `stale`, `failed`, `missing` and `no_match`.
+    """
+
+    def unreachable(call: tools.ToolCall, credential: Secret) -> tools.ProviderAnswer:
+        raise AssertionError("a replayed analysis queried the provider")
+
+    with _Endpoint(
+        [
+            called(TOOL_NAME, {"entity_type": "address", "entity_value": ADDRESS}),
+            stopped(),
+            answered(MALICIOUS),
+        ]
+    ) as endpoint:
+        analysis = analyse(endpoint, provider_tools=[tool(ask=unreachable, replay=True)])
+
+    assert refusals(analysis) == [tools.NO_STORED_RESPONSE]
+    assert isinstance(analysis.outcome, AgentResult)
+    assert analysis.outcome.retrieval_trace == ()
+    assert analysis.outcome.cost.live_queries == 0
 
 
 # --- The three refusals only the runner can make --------------------------------
@@ -1629,6 +1693,7 @@ def test_the_configured_endpoint_still_answers_the_loop_this_runner_was_written_
         credential=configured.providers.abusech_auth_key,
         cache=tools.EvidenceCache(live),
         send_policy=POLICY,
+        replay=False,
         logger=observability.logger("providers", configured, stream=io.StringIO()),
         redactor=observability.Redactor.from_settings(configured),
         timeout_seconds=30.0,

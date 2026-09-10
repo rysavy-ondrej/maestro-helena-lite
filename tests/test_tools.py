@@ -26,6 +26,7 @@ from __future__ import annotations
 import ast
 import io
 import json
+import socket
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,7 @@ from helena.contracts.v1 import (
     SECTIONS,
 )
 from helena.enrichment import ANALYST_TIER, ENRICHMENT_TIER, NO_MATCH, QUERY_FAILURE_REASONS
+from helena.network import NetworkAttempted
 from helena.taxonomy import ANALYST
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -289,6 +291,7 @@ def tool(
     configured: Settings | None = None,
     retention_seconds: int = RETENTION,
     policy: SendPolicy | None = None,
+    replay: bool = False,
 ) -> tools.ProviderTool:
     configured = configured or settings()
     return tools.ProviderTool(
@@ -299,6 +302,11 @@ def tool(
         cache=cache(),
         retention_seconds=retention_seconds,
         send_policy=policy or POLICY,
+        # The builder's default is the live mode every test above the replay
+        # section is about. `ProviderTool` itself has no default -- the
+        # construction site says which run this is -- and one of the tests below
+        # is that omitting it does not compile.
+        replay=replay,
         logger=observability.logger("tools", configured, stream=stream or io.StringIO()),
         redactor=observability.Redactor.from_settings(configured),
     )
@@ -1213,6 +1221,319 @@ def test_an_endpoint_that_is_not_a_logical_name_is_refused(bad: str):
     """It reaches the declaration the model is shown, so it is not a path or a URL."""
     with pytest.raises(tools.ToolError):
         tool(endpoint=bad)
+
+
+# --- Replay: stored responses, and never a query ------------------------------
+#
+# `concept/07`: "a replay that calls the provider again is not a replay; it is a
+# new investigation with a different answer. Under a few-hundred-per-day quota
+# this stops being an efficiency property and becomes the enabling one: the first
+# pass spends the quota, and every re-run is free because it replays."
+#
+# The measurement is the one the cache-first tests use and it is not a counter
+# the layer keeps about itself: `helena.tools` imports no HTTP machinery at all
+# (asserted off its own AST above), so the injected adapter is the only thing in
+# the layer that can reach a provider. An adapter that was not called is an
+# indicator that was not sent -- and, because the adapter is also the only thing
+# the credential is handed to, a key that was never revealed.
+
+
+def unreachable(calls: list):
+    """An adapter that fails the test if a replay ever reaches it."""
+
+    def ask(call: tools.ToolCall, credential: Secret) -> tools.ProviderAnswer:
+        calls.append(call)
+        raise AssertionError(
+            f"a replay queried {SOURCE} about {call.entity_type}; that is a new "
+            f"investigation with a different answer, not a replay"
+        )
+
+    return ask
+
+
+def a_closed_port() -> int:
+    """A port nothing is listening on: bound, read back, released."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+class ProbingCache(tools.EvidenceCache):
+    """A cache whose read opens a connection.
+
+    A stand-in for *any* code path inside the dispatch that reached the network,
+    which is the thing the guard exists to catch: the adapter is unreachable in a
+    replay by construction, so a test that only asserted the adapter was not
+    called would be testing the branch and not the guard.
+    """
+
+    def read(self, key: tools.CacheKey):
+        socket.create_connection(("127.0.0.1", a_closed_port()), timeout=1).close()
+        return super().read(key)
+
+
+def test_the_mode_is_stated_at_construction_and_is_never_defaulted():
+    """A run that did not say whether it may spend the quota has not decided."""
+    with pytest.raises(TypeError):
+        tools.ProviderTool(
+            source_id=SOURCE,
+            endpoint=ENDPOINT,
+            credential=settings().providers.abusech_auth_key,
+            ask=adapter(),
+            cache=cache(),
+            retention_seconds=RETENTION,
+            send_policy=POLICY,
+            logger=observability.logger("tools", settings(), stream=io.StringIO()),
+            redactor=observability.Redactor.from_settings(settings()),
+        )
+
+
+@pytest.mark.parametrize("bad", ["false", "", 0, 1, None])
+def test_a_mode_that_is_not_a_bool_is_refused(bad):
+    """`"false"` is truthy, and a run that queried when it was told not to has
+    already spent the thing replay exists to preserve."""
+    with pytest.raises(tools.ToolError):
+        tool(replay=bad)
+    assert tool(replay=True).replay is True
+    assert tool().replay is False
+
+
+def test_a_replay_resolves_the_lookup_from_the_stored_response_and_sends_nothing():
+    """The whole of the mode, over one indicator: same rows, same bytes, no call.
+
+    The replaying tool is built with an adapter that fails on contact, so "it did
+    not re-query" is not a count that could be wrong -- there is no path through
+    this test in which a provider was reached and the assertions still hold.
+    """
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    recorded = tool().lookup(
+        arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW
+    )
+
+    reached: list = []
+    replayed = tool(ask=unreachable(reached), replay=True).lookup(
+        arguments,
+        scope=scope(),
+        budget=ledger(),
+        disclosures=disclosures(),
+        now=NOW + timedelta(minutes=1),
+    )
+
+    assert reached == []
+    assert replayed.answer.evidence == recorded.answer.evidence
+    assert replayed.native.body == recorded.native.body
+    assert replayed.native.response_version == recorded.native.response_version
+    assert {step.outcome for step in replayed.answer.steps} == {CACHE_HIT}
+
+
+def test_a_replay_with_nothing_stored_is_a_typed_refusal_and_never_a_live_call():
+    """The absence is where the call stops, and it is typed.
+
+    Not a `QueryFailure`: nothing was queried, so there is no provider to
+    attribute an outage to -- and `RETRIEVAL_OUTCOMES` has no value for "neither
+    a cache hit nor a live query" in any case, so a step could not record it
+    without widening a frozen contract.
+    """
+    reached: list = []
+    refused = tool(ask=unreachable(reached), replay=True).lookup(
+        {"entity_type": "domain", "entity_value": LISTED},
+        scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW,
+    )
+
+    assert reached == []
+    assert refused.answer is None
+    assert refused.refusal.reason == tools.NO_STORED_RESPONSE
+    assert refused.refusal.source_id == SOURCE
+    assert LISTED not in refused.refusal.detail, "the detail names no value"
+    assert refused.native is None
+
+
+def test_the_replay_refusal_is_none_of_the_four_other_absences():
+    """`stale` / `failed` / `missing` / `no_match` / a typed error, still five things.
+
+    A stored `no_match` replays as the answer it is -- the provider said it lists
+    nothing, and that survives a replay. An indicator the recorded run never
+    asked about is the fifth thing: nobody asked, which is not the same as
+    somebody having answered.
+    """
+    assert tools.NO_STORED_RESPONSE in tools.REFUSAL_REASONS
+    assert tools.NO_STORED_RESPONSE not in QUERY_FAILURE_REASONS
+    assert tools.NO_STORED_RESPONSE not in (NO_MATCH, enrichment.STALE)
+
+    tool().lookup(
+        {"entity_type": "domain", "entity_value": UNLISTED},
+        scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW,
+    )
+    replaying = tool(ask=unreachable([]), replay=True)
+    answered = replaying.lookup(
+        {"entity_type": "domain", "entity_value": UNLISTED},
+        scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW,
+    )
+    never_asked = replaying.lookup(
+        {"entity_type": "domain", "entity_value": LISTED},
+        scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW,
+    )
+
+    assert answered.answer.evidence[0].classification == NO_MATCH
+    assert answered.answer.steps[0].outcome == CACHE_HIT
+    assert never_asked.answer is None
+    assert never_asked.refusal.reason == tools.NO_STORED_RESPONSE
+
+
+def test_a_replay_serves_an_expired_record_explicitly_stale_rather_than_refusing_it():
+    """Nothing is ever evicted, so the record is still there and still citable.
+
+    Refusing anything past its retention would make a replay of a three-week-old
+    assessment return nothing at all, which is the opposite of what replay is
+    for. There is **no failure step** beside it: the live path's stale fallback
+    carries one because a provider was reached and did not answer, and a replay
+    that reported a timeout nobody experienced would be inventing an outage to
+    explain an age.
+    """
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    fresh = tool().lookup(
+        arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW
+    )
+
+    stream = io.StringIO()
+    served = tool(ask=unreachable([]), replay=True, stream=stream).lookup(
+        arguments, scope=scope(), budget=ledger(), disclosures=disclosures(), now=LATER
+    )
+
+    assert {record.status for record in served.answer.evidence} == {enrichment.STALE}
+    assert {record.status for record in fresh.answer.evidence} == {enrichment.OK}
+    assert [step.outcome for step in served.answer.steps] == [CACHE_HIT]
+    assert served.answer.failure is None
+    assert served.answer.evidence[0].evidence_id == fresh.answer.evidence[0].evidence_id
+    logged = json.loads(stream.getvalue().splitlines()[-1])
+    assert logged["fields"]["status"] == enrichment.STALE
+    assert logged["fields"]["disclosed"] is False
+
+
+def test_a_full_replay_makes_zero_outbound_requests():
+    """The required test, over a run of several lookups rather than one call.
+
+    Everything a replay of this run could spend is counted: the adapter was not
+    reached, no disclosure row was written, the live-query budget is untouched,
+    and the second run's answers are the first run's answers.
+    """
+    asked = [
+        {"entity_type": "domain", "entity_value": LISTED},
+        {"entity_type": "domain", "entity_value": UNLISTED},
+        {"entity_type": "address", "entity_value": "45.192.105.203"},
+    ]
+    live_calls: list = []
+    first = tool(ask=adapter(calls=live_calls))
+    live_budget, live_ledger = ledger(), disclosures()
+    recorded = [
+        first.lookup(one, scope=scope(), budget=live_budget, disclosures=live_ledger, now=NOW)
+        for one in asked
+    ]
+
+    reached: list = []
+    again = tool(ask=unreachable(reached), replay=True)
+    replay_budget, replay_ledger = ledger(), disclosures()
+    replayed = [
+        again.lookup(
+            one,
+            scope=scope(),
+            budget=replay_budget,
+            disclosures=replay_ledger,
+            now=NOW + timedelta(minutes=2),
+        )
+        for one in asked
+    ]
+
+    assert len(live_calls) == 3
+    assert reached == [], "a replay reached a provider"
+    assert replay_ledger.rows == (), "a replay disclosed an indicator"
+    assert replay_budget.live_queries_spent == 0
+    assert (replay_budget.steps_spent, replay_budget.cache_hits) == (3, 3)
+    assert [one.answer.evidence for one in replayed] == [
+        one.answer.evidence for one in recorded
+    ]
+    assert [one.native.response_version for one in replayed] == [
+        one.native.response_version for one in recorded
+    ]
+
+
+def test_a_replay_and_the_run_it_replays_are_distinguishable_afterwards():
+    """`concept/07`'s requirement, applied to the two runs it was written for.
+
+    The trace tells them apart -- outcome and the underlying record's retrieval
+    time -- and so does the cost, which is the number the quota is spent in. What
+    does **not** differ is the evidence, which is the point: telling the runs
+    apart is not a difference in what was concluded.
+    """
+    arguments = {"entity_type": "domain", "entity_value": LISTED}
+    live_budget = ledger()
+    live = tool().lookup(
+        arguments, scope=scope(), budget=live_budget, disclosures=disclosures(), now=NOW
+    )
+
+    later = NOW + timedelta(minutes=17)
+    replay_budget = ledger()
+    replayed = tool(ask=unreachable([]), replay=True).lookup(
+        arguments, scope=scope(), budget=replay_budget, disclosures=disclosures(), now=later
+    )
+
+    (live_step,), (replay_step,) = live.answer.steps, replayed.answer.steps
+    assert (live_step.outcome, replay_step.outcome) == (LIVE_QUERY, CACHE_HIT)
+    assert (live_step.retrieved_at, replay_step.retrieved_at) == (NOW, NOW)
+    assert replay_step.retrieved_at != later, "the step's time, not the record's"
+    spent = live_budget.cost(retries=0), replay_budget.cost(retries=0)
+    assert (spent[0].live_queries, spent[0].cache_hits) == (1, 0)
+    assert (spent[1].live_queries, spent[1].cache_hits) == (0, 1)
+    assert live.answer.evidence == replayed.answer.evidence
+
+
+def test_a_network_call_attempted_during_a_replay_raises_where_it_was_attempted():
+    """The hard guard, over a code path that is not the adapter.
+
+    `helena.network.no_network()` is armed around the whole dispatch, so replay
+    does not rest on an argument about which branches run: something that opened
+    a connection would raise rather than return an answer nobody could tell from
+    a replayed one.
+    """
+    probing = tools.ProviderTool(
+        source_id=SOURCE,
+        endpoint=ENDPOINT,
+        credential=settings().providers.abusech_auth_key,
+        ask=unreachable([]),
+        cache=ProbingCache(_ENGINE[-1]),
+        retention_seconds=RETENTION,
+        send_policy=POLICY,
+        replay=True,
+        logger=observability.logger("tools", settings(), stream=io.StringIO()),
+        redactor=observability.Redactor.from_settings(settings()),
+    )
+    with pytest.raises(NetworkAttempted):
+        probing.lookup(
+            {"entity_type": "domain", "entity_value": LISTED},
+            scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW,
+        )
+
+
+def test_the_same_probe_in_a_live_run_fails_as_itself():
+    """The control: the guard is armed by the mode, not by the test's arrangement."""
+    probing = tools.ProviderTool(
+        source_id=SOURCE,
+        endpoint=ENDPOINT,
+        credential=settings().providers.abusech_auth_key,
+        ask=adapter(),
+        cache=ProbingCache(_ENGINE[-1]),
+        retention_seconds=RETENTION,
+        send_policy=POLICY,
+        replay=False,
+        logger=observability.logger("tools", settings(), stream=io.StringIO()),
+        redactor=observability.Redactor.from_settings(settings()),
+    )
+    with pytest.raises(OSError) as refused:
+        probing.lookup(
+            {"entity_type": "domain", "entity_value": LISTED},
+            scope=scope(), budget=ledger(), disclosures=disclosures(), now=NOW,
+        )
+    assert not isinstance(refused.value, NetworkAttempted)
 
 
 # --- Cache-key normalization --------------------------------------------------

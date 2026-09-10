@@ -56,6 +56,7 @@ None of them is `no_match`, and none of them collapses into another
 | What happened | What the agent gets | Cost |
 | --- | --- | --- |
 | the tool layer would not send the call at all | `ToolRefusal`, with a typed reason | a step, no live query |
+| the run is a replay and nothing is stored | `ToolRefusal` carrying `no_stored_response` | a step, no live query |
 | the query ran and did not complete | `ToolAnswer` whose one step carries a `QueryFailure` | a step and a live query |
 | the query completed and the provider lists nothing | evidence classified `no_match` — an answer | a step and a live query |
 | the source is not registered | no tool exists; `ProviderTool` cannot be built | nothing |
@@ -95,6 +96,58 @@ Five things follow, and `docs/decisions/0025-the-lookup-cache.md` argues each:
 `retrieved_at` on the retrieval step is the **underlying record's** time on a
 cache hit, not the step's, which is what makes two runs differing only in cache
 state distinguishable afterwards.
+
+## Replay: stored responses, and never a query
+
+`concept/07`: *"a replay that calls the provider again is not a replay; it is a
+new investigation with a different answer. Under a few-hundred-per-day quota this
+stops being an efficiency property and becomes the enabling one."* `replay` is a
+constructor keyword with **no default**, so every construction says which of the
+two a run is, and it is not an argument of the call: a mode a caller could vary
+per lookup is a mode a loop could vary per turn.
+
+Replay is not a second lookup path. It is the same dispatch with the branches
+that would query removed, so a replayed answer is assembled by the same code that
+assembled the recorded one:
+
+| What is stored | Live | Replay |
+| --- | --- | --- |
+| a valid, unexpired record | served, `cache_hit` | **identical** — the same rows, the same bytes, the same `retrieved_at` |
+| nothing | queried and stored | `ToolRefusal` carrying `no_stored_response` |
+| an expired record | queried; the fresh answer replaces it | served, `cache_hit`, rows explicitly `stale`, **no failure step** |
+| an expired record and the provider is unreachable | served `stale` beside the typed failure | unreachable by construction — nothing is reached |
+
+Three things that follow, and each is a decision rather than a detail:
+
+- **A replay miss is a refusal, not a `QueryFailure`.** Nothing was queried, so
+  there is no provider to attribute an outage to — the same argument the other
+  four refusals rest on. It could not be a retrieval step in any case:
+  `helena.contracts.v1.RETRIEVAL_OUTCOMES` is `cache_hit` and `live_query`, a
+  replay miss is neither, and widening a frozen contract to record the absence of
+  a row is the change `concept/instruction.md` §3 requires a decision for. It is
+  also not a `no_match`: `no_match` is the provider saying it lists nothing, and
+  this is nobody having asked.
+- **An expired record is served, not refused.** Nothing is ever evicted here, so
+  the record is still there and still citable, and `concept/02` defines `stale`
+  as exactly that. The alternative — refusing anything past its retention —
+  would make a replay of a three-week-old assessment return nothing at all, which
+  is the opposite of what replay is for.
+- **The credential is never revealed in a replay**, because the adapter is never
+  called. A replay of a recorded run therefore needs the store and not the key.
+
+**The guard is `helena.network.no_network()` and `lookup` arms it around the
+whole dispatch.** It is a hard failure and not a typed result: a `NetworkAttempted`
+propagates. What it blocks, precisely, and the one thing it deliberately does not
+— reads and writes on the already-open connection the store is read over — are in
+that module's docstring, and the tool layer's own guarantee is separate and does
+not depend on it: in replay `self._ask` is not reached by any branch.
+
+`helena.orchestration` is where `concept/03-architecture.md` puts *"replays from
+stored results"*, and that runner does not exist yet. What is here is the half a
+replay of a provider lookup needs; replaying a whole assessment additionally
+needs the stored assessment, which no increment has written.
+`docs/decisions/0031-replay-at-the-tool-boundary.md` argues each of the choices
+above and states the bound on what the guard demonstrates.
 
 ## Budgets, at this boundary
 
@@ -141,8 +194,9 @@ provider adapter over the committed ThreatFox export shape, against a real
 migrated engine for the cache, and against the real credential from `.env` for
 the isolation properties. The live adapter is `helena.providers`, and
 `tests/test_providers.py` drives this layer over the real bytes of a real
-`search_ioc` answer -- what is still unmeasured is a whole agent run through it,
-because no analyst loop exists.
+`search_ioc` answer. `helena.analyst` drives a whole run through it, live and
+replayed, and `tests/test_analyst.py` is where that is measured. What is still
+unmeasured is a replay of a whole *assessment*, because none is stored.
 
 ## Deliberately not here, and named so a green suite does not read as a finished layer
 
@@ -212,6 +266,7 @@ from helena.enrichment import (
     evidence_id,
     source,
 )
+from helena.network import no_network
 from helena.observability import Redactor, StructuredLogger
 
 __all__ = [
@@ -224,6 +279,7 @@ __all__ = [
     "ENTITY_TYPE_NOT_COVERED",
     "MALFORMED_ARGUMENTS",
     "MAX_INDICATOR",
+    "NO_STORED_RESPONSE",
     "REFUSAL_REASONS",
     "SEND_POLICY_FORBIDS",
     "CacheEntry",
@@ -278,9 +334,15 @@ MAX_INDICATOR = 2048
 #:                            the deployment's permission, and a source that
 #:                            *could* answer and *may not be asked* is a different
 #:                            fact from one that cannot answer
+#:   no_stored_response       the run is a replay and nothing is stored for this
+#:                            source, endpoint and indicator. A replay never
+#:                            queries, so the absence is where the call stops --
+#:                            see "Replay" in the module docstring for why it is
+#:                            a refusal and not a `QueryFailure`
 MALFORMED_ARGUMENTS = "malformed_arguments"
 ENTITY_TYPE_NOT_COVERED = "entity_type_not_covered"
 SEND_POLICY_FORBIDS = "send_policy_forbids"
+NO_STORED_RESPONSE = "no_stored_response"
 #: The gap kind, reused rather than respelled: the refusal the model sees and the
 #: gap the assessment records are the same fact at two layers, and a second
 #: spelling of it is the drift `concept/instruction.md` §2 rejects for version
@@ -291,6 +353,7 @@ REFUSAL_REASONS = (
     ENTITY_TYPE_NOT_COVERED,
     BUDGET_EXHAUSTED,
     SEND_POLICY_FORBIDS,
+    NO_STORED_RESPONSE,
 )
 
 
@@ -1185,6 +1248,7 @@ class ProviderTool:
         "_cache",
         "_retention",
         "_permit",
+        "_replay",
         "_logger",
         "_redactor",
     )
@@ -1199,6 +1263,7 @@ class ProviderTool:
         cache: EvidenceCache,
         retention_seconds: int,
         send_policy: SendPolicy,
+        replay: bool,
         logger: StructuredLogger,
         redactor: Redactor,
     ) -> None:
@@ -1233,11 +1298,23 @@ class ProviderTool:
                 f"endpoint (`concept/07`) and a zero or absent one is a cache "
                 f"that never hits pretending to be one that does"
             )
+        if not isinstance(replay, bool):
+            # `isinstance` rather than truthiness, because the trap this catches
+            # is a configured `"false"`, which is a non-empty string and would
+            # arm a replay for a run that meant to query. There is no third
+            # value: a run either may spend the quota or may not.
+            raise ToolError(
+                f"replay for {source_id}/{endpoint} is {replay!r}; it is the "
+                f"run's mode and it is a bool, because a tool that queried a "
+                f"provider when it was asked not to has already spent what "
+                f"replay exists to preserve"
+            )
         self._endpoint = endpoint
         self._credential = credential
         self._ask = ask
         self._cache = cache
         self._retention = timedelta(seconds=retention_seconds)
+        self._replay = replay
         self._logger = logger
         self._redactor = redactor
 
@@ -1253,6 +1330,16 @@ class ProviderTool:
     def retention(self) -> timedelta:
         """How long a record from this source and endpoint stays valid."""
         return self._retention
+
+    @property
+    def replay(self) -> bool:
+        """Whether this tool reads stored responses and never queries.
+
+        Resolved at construction and read-only, so the mode a run was built in
+        cannot be changed by anything that happens during it -- least of all by
+        an argument a model wrote.
+        """
+        return self._replay
 
     @property
     def descriptor(self) -> SourceDescriptor:
@@ -1393,6 +1480,45 @@ class ProviderTool:
         | stored, expired, and the query did not complete | the expired record served explicitly `stale`, **beside** the typed failure |
         | nothing stored and the query did not complete | the typed failure alone |
         | expired, or nothing stored, and no live query left | refused. See the note in the body: the stale fallback is not reused here |
+
+        **In replay every one of those rows that queries is refused instead**,
+        and the guard around this call is what makes that a property rather than
+        a claim about the branches below: the whole dispatch runs inside
+        `helena.network.no_network()`, so a code path that reached a provider
+        would raise where it tried rather than return an answer nobody could tell
+        from a replayed one. See "Replay" in the module docstring.
+        """
+        if not self._replay:
+            return self._dispatch(
+                arguments,
+                scope=scope,
+                budget=budget,
+                disclosures=disclosures,
+                now=now,
+            )
+        with no_network():
+            return self._dispatch(
+                arguments,
+                scope=scope,
+                budget=budget,
+                disclosures=disclosures,
+                now=now,
+            )
+
+    def _dispatch(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        scope: RunScope,
+        budget: RunBudget,
+        disclosures: Disclosures,
+        now: datetime | None = None,
+    ) -> Lookup:
+        """`lookup`'s body, so that `lookup` is the guard and nothing else.
+
+        Split for one reason: a mode that promises to send nothing has to have
+        exactly one entry point, and a second public method would be a second
+        way in that the guard does not cover.
         """
         retrieved_at = now or datetime.now(timezone.utc)
         if disclosures.policy.version != self._permit.send_policy_version:
@@ -1433,6 +1559,31 @@ class ProviderTool:
         key = CacheKey.of(self._descriptor, self._endpoint, call, scope)
         stored = self._cache.read(key)
         if stored is not None and not stored.expired(retrieved_at):
+            return self._served(key, stored, retrieved_at, budget=budget)
+
+        if self._replay:
+            if stored is None:
+                # The end of the call, and deliberately not a live one.
+                # `concept/07`: "a replay that calls the provider again is not a
+                # replay; it is a new investigation with a different answer."
+                # The detail names the source, the endpoint and the entity type
+                # and never the value, for the reason `_forbidden`'s does.
+                return self._refuse(
+                    NO_STORED_RESPONSE,
+                    f"this run is a replay and nothing is stored for "
+                    f"{self._descriptor.source_id}/{self._endpoint} about a "
+                    f"{call.entity_type}. A replay reads stored responses and "
+                    f"never re-queries, so an indicator the recorded run did "
+                    f"not ask about has no answer here",
+                )
+            # Stored and expired, in a replay. Served, and served explicitly
+            # `stale` -- `CacheEntry.evidence` dates it against this run's clock,
+            # so the age of what was recorded is visible rather than hidden by
+            # the fact that it was replayed. **No `failure` step**: the stale
+            # fallback on the live path carries one because a provider was
+            # reached and did not answer, and nothing was reached here. A replay
+            # that reported a `timeout` nobody experienced would be inventing an
+            # outage to explain an age.
             return self._served(key, stored, retrieved_at, budget=budget)
 
         try:
@@ -1573,7 +1724,10 @@ class ProviderTool:
         `failure` is present only in the stale fallback -- the record had expired
         and the live query did not complete. It is a step of its own, so the
         outage stays countable and the served rows stay `stale` rather than
-        either fact being quietly dropped.
+        either fact being quietly dropped. **A replay serving an expired record
+        passes none**, and that is the difference between an age and an outage:
+        the rows are `stale` either way, and only one of the two runs reached a
+        provider.
 
         The hit is counted on the ledger and **nothing is charged**: `concept/03`
         puts "cache-hit versus live-query counts" on the assessment, and the count
@@ -1618,7 +1772,12 @@ class ProviderTool:
             # is the exception and says so -- it reached the provider and the
             # provider did not answer, which is a disclosure either way.
             disclosed=failure is not None,
-            status=STALE if failure is not None else OK,
+            # From the same expiry the evidence rows were dated against, and not
+            # from `failure`. The two were the same value until a replay could
+            # serve an expired record with no outage beside it; deriving it here
+            # from anything but the clock would make the log line disagree with
+            # the rows it is describing.
+            status=STALE if stored.expired(now) else OK,
             records=len(evidence),
             response_version=stored.response_version,
         )

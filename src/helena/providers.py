@@ -591,6 +591,7 @@ def threatfox_tool(
     credential: Secret,
     cache: EvidenceCache,
     send_policy: SendPolicy,
+    replay: bool,
     logger: StructuredLogger,
     redactor: Redactor,
     timeout_seconds: float,
@@ -604,6 +605,13 @@ def threatfox_tool(
     | the host | `send_policy.permit('threatfox').disclosed_to`, and the adapter refuses any other |
     | the endpoint | `search_ioc`, the provider's own operation name |
     | the retention | `SourceDescriptor.refresh_interval_seconds` — the publisher's own fetch floor, 3 600 s |
+
+    `replay` is **not** derived and has no default: it is the caller's statement
+    about which run this is, and a factory that guessed it would be a factory
+    that decided whether the day's quota gets spent. It is passed straight
+    through — see `helena.tools`, "Replay". In a replay the adapter below is
+    built and never called, so the `timeout_seconds` and the URL it is wired with
+    bound nothing, and the credential is never revealed.
 
     **The retention is derived and it is a candidate.** An answer stays valid for
     as long as this deployment would be willing to ask the source again, which is
@@ -633,6 +641,7 @@ def threatfox_tool(
         cache=cache,
         retention_seconds=retention,
         send_policy=send_policy,
+        replay=replay,
         logger=logger,
         redactor=redactor,
     )
