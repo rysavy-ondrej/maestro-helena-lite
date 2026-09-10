@@ -539,7 +539,7 @@
         "Add a test that two runs differing only in cache state are distinguishable afterwards",
         "Add a test that a full replay makes zero outbound requests"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D6 Orchestration] Deterministic routing and the escalation branch",
