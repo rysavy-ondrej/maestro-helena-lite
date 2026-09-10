@@ -63,6 +63,48 @@ the failure and no verdict. Nothing an agent produced reaches a column that the
 frozen contract did not validate, and `store` re-runs
 `helena.contracts.v1.check_exchange` before it writes.
 
+## Working memory is the call, and a re-run is the whole of the recovery
+
+`concept/03`: *"An assessment is one function call over one versioned context
+snapshot. No checkpointing, no durable in-flight state anywhere outside the
+engine; an interrupted run is simply re-run, because the versioned context
+already makes that correct rather than a fallback."*
+
+So `assess` is a function and everything it accumulates — the two disclosure
+ledgers, the budget guard, the tool-loop transcript inside
+`helena.analyst.run` — is constructed inside the call and unreachable after it
+returns. This module holds no module-level mutable object at all, and nothing in
+the package writes a file: there is no scratchpad, no transcript on disk, no
+planning state and no framework virtual filesystem, because there is no framework
+and no second place for state to live. `tests/test_orchestration.py` asserts both
+by execution rather than by comment.
+
+What that buys is that **re-run recovery needs no recovery machinery**. There is
+no `resume`, no run id to look up and no checkpoint to reconcile: a run that was
+interrupted is re-run by calling `assess` again over the same projection, and
+`AssessmentStore.store` makes the result of doing so well-defined. Two things
+make it so, and the second is this module's:
+
+1. `assessment_id` is a digest over `(tenant, sensor, context reference, context
+   version, emitter, trigger)`, so a re-run mints the identifier the first run
+   did and rewrites its own row rather than adding a second copy.
+2. **A pass supersedes every other run over its own context snapshot**
+   (`RUNS_OF_A_PASS`). The identifier is the only thing that changes between a
+   pass that escalated on the evidence, one that escalated on triage, and one
+   that finished — so without this, a re-run that routed differently from the run
+   it replaced would leave the earlier analyst row standing beside it as a second
+   live opinion over one context version, and an interrupted run's orphaned child
+   rows would never be collected at all.
+
+A framework convenience is checked against those rules before it is switched on,
+not after: `concept/03` says the ephemeral-state rule *"binds harder if a
+framework is adopted, because such libraries make file-backed agent memory the
+convenient default"*, and a checkpointer, a persistent scratchpad or a virtual
+filesystem is a second store of uncited free text — which is a single-store
+violation and a memory-poisoning channel at once.
+`docs/decisions/0034-ephemeral-state-and-re-run.md` is the long form and the
+three questions to ask of the next such flag.
+
 ## What is deliberately not here
 
 - **The escalation record.** `Assessment.escalation` is computed on every pass and
@@ -137,6 +179,7 @@ __all__ = [
     "PATTERN_TABLE",
     "RETRIEVAL_TABLE",
     "ROUTED",
+    "RUNS_OF_A_PASS",
     "Assessment",
     "AssessmentError",
     "AssessmentStore",
@@ -502,6 +545,24 @@ CHILD_TABLES = (
     DISCLOSURE_TABLE,
 )
 
+#: Every `(emitter, trigger)` a pass over one context snapshot can produce a run
+#: for — the three pairings `helena.contracts.v1.AgentRequest` accepts, and
+#: `tests/test_orchestration.py` asserts these are exactly those rather than
+#: leaving two copies to drift.
+#:
+#: The set is enumerable, and that is what makes a re-run's cleanup possible
+#: without a read path: `assessment_id` is a pure function of the snapshot and
+#: one of these pairs, so the **three identifiers one context version could ever
+#: hold** are derivable from the request alone. A pass writes one or two of them
+#: and supersedes the rest, which collects both the row a differently-routed
+#: earlier run left standing and the child rows an interrupted one wrote before
+#: it died — neither of which a query keyed on what is *present* would find.
+RUNS_OF_A_PASS = (
+    (triage.EMITTER, contract.SCHEDULED_TRIAGE),
+    (analyst.EMITTER, contract.TRIAGE_SUSPICIOUS),
+    (analyst.EMITTER, contract.DETERMINISTIC_SIGNAL),
+)
+
 
 class AssessmentError(Exception):
     """A row could not be written, and nothing was written for that run.
@@ -598,6 +659,13 @@ class AssessmentStore:
         Raises `AssessmentError` for anything the store cannot represent
         honestly, **before** it writes anything for that run. Everything a model
         did is already a typed outcome by the time it arrives here.
+
+        **This is also the re-run path**, and it is the only one: `concept/03`
+        has no resume, so storing a second pass over the same versioned snapshot
+        is what recovering an interrupted one means. The rows this pass wrote
+        stand, and every other run over that snapshot is superseded — after the
+        writes rather than before them, so there is no instant at which the
+        context has no assessment at all.
         """
         written = [self._one(assessment.request, assessment.triage,
                              assessment.triage_disclosures, at=at)]
@@ -610,8 +678,46 @@ class AssessmentStore:
                     at=at,
                 )
             )
+        self._supersede(assessment.request, keep=written)
         self._connection.execute("FLUSH")
         return tuple(written)
+
+    def _supersede(self, request: contract.AgentRequest, *, keep: list[str]) -> None:
+        """Remove every run over this context snapshot that this pass did not write.
+
+        The three identifiers a snapshot could hold are derivable from the request
+        (`RUNS_OF_A_PASS`), so this addresses them by key and never reads the
+        store: a `DELETE` on a key nothing wrote is a no-op, which is why the
+        child tables are emptied for a superseded identifier whether or not an
+        assessment row was ever written under it. That case is not hypothetical —
+        `_one` writes the children first, so a run killed between them and the
+        assessment row leaves exactly that.
+
+        `concept/03` allows the residue to exist at all only because it is *in the
+        engine*: "no durable in-flight state anywhere outside the engine". What
+        this method adds is that the re-run collects it, so what the store holds
+        for one context version is what the last completed pass over it produced,
+        and nothing else.
+        """
+        for emitter, trigger in RUNS_OF_A_PASS:
+            identifier = assessment_id(
+                tenant=request.tenant,
+                sensor=request.sensor,
+                context_id=request.context_id,
+                context_version=request.context_version,
+                emitter=emitter,
+                trigger=trigger,
+            )
+            if identifier in keep:
+                continue
+            for table in CHILD_TABLES:
+                self._connection.execute(
+                    f"DELETE FROM {table} WHERE assessment_id = %s", (identifier,)
+                )
+            self._connection.execute(
+                f"DELETE FROM {ASSESSMENT_TABLE} WHERE assessment_id = %s",
+                (identifier,),
+            )
 
     def _one(
         self,

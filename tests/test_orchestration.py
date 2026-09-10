@@ -32,12 +32,18 @@ import ast
 import importlib.util
 import io
 import json
+import os
 import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 import tomllib
 from datetime import datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +72,7 @@ from helena.contracts.v1 import (
     SECTIONS,
     SUPPORTING,
     TRIAGE_SUSPICIOUS,
+    TRIGGERS,
     AgentFailure,
     AgentRequest,
     AgentResult,
@@ -323,10 +330,29 @@ class _Endpoint:
         return f"http://127.0.0.1:{self.server.server_port}/v1/"
 
     def client(self, agent: str, stream: io.StringIO) -> ModelClient:
-        return ModelClient(
-            model_settings(self.url, agent=agent),
-            logger=logger(stream, component=f"agents.{agent}"),
-        )
+        return model_client(self.url, agent, stream)
+
+
+def model_client(url: str, agent: str, stream: io.StringIO) -> ModelClient:
+    return ModelClient(
+        model_settings(url, agent=agent),
+        logger=logger(stream, component=f"agents.{agent}"),
+    )
+
+
+class _Elsewhere:
+    """`_Endpoint`'s client half with no server: an address in another process.
+
+    What `assess_at` points at. The killed-run test keeps the endpoint in the
+    parent, because a child process that has to be killed mid-call cannot also be
+    the thing that decides when the call hangs.
+    """
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+    def client(self, agent: str, stream: io.StringIO) -> ModelClient:
+        return model_client(self.url, agent, stream)
 
 
 def answered(content: str, *, prompt: int = 40, completion: int = 20):
@@ -393,6 +419,15 @@ def assess(
         inherit=OFF,
         logger=logger(stream, component="orchestration"),
     )
+
+
+def assess_at(url: str) -> orchestration.Assessment:
+    """One assessment against an endpoint in another process.
+
+    The entry point `test_a_killed_run_leaves_nothing_on_disk`'s child process
+    calls, module-level so the child can reach it with one import.
+    """
+    return assess(_Elsewhere(url))
 
 
 def escalation_of(projection: ContextProjection):
@@ -1024,6 +1059,268 @@ def test_the_router_holds_no_state_between_assessments():
                 f"{name} is a mutable or constructed module-level object: "
                 f"{ast.unparse(value)}"
             )
+
+
+# --- Ephemeral state: the working memory is the call --------------------------
+#
+# `concept/03`: *"An assessment is one function call over one versioned context
+# snapshot. No checkpointing, no durable in-flight state anywhere outside the
+# engine ... **Framework and in-process state is ephemeral.** Scratchpads,
+# tool-loop transcripts, planning state and any framework's virtual files are
+# working memory for one assessment."*
+#
+# The tests above assert the absence of the frameworks that would bring a durable
+# backend. These assert the property that absence is for: what a run accumulates
+# is reachable only from the call, and a run that is killed leaves nothing.
+
+#: The standard library's ways of writing a file, and the two modules whose whole
+#: job is producing one. A scratchpad, a tool-loop transcript or a framework's
+#: virtual filesystem arrives as one of these, so the package calling none of them
+#: is what makes "working memory for one assessment" a property rather than an
+#: intention. `helena.observability` writes to a **stream** its caller opened,
+#: which is why `.write` is not among them.
+FILE_WRITING_METHODS = (
+    "write_text",
+    "write_bytes",
+    "touch",
+    "mkdir",
+    "makedirs",
+    "unlink",
+    "symlink_to",
+    "hardlink_to",
+)
+FILE_WRITING_OS_CALLS = (
+    "open",
+    "remove",
+    "unlink",
+    "mkdir",
+    "makedirs",
+    "rename",
+    "replace",
+    "rmdir",
+    "write",
+)
+FILE_PRODUCING_MODULES = ("tempfile", "shutil")
+
+
+def test_the_package_writes_no_file_anywhere():
+    """No scratchpad, no transcript on disk, no virtual filesystem.
+
+    There is no framework here to disable the feature on, so what is asserted is
+    the property directly: nothing in `helena` opens a file for writing, creates a
+    directory or reaches for `tempfile`. The single store is the engine, and a run's
+    working memory is the objects the call holds.
+    """
+    offenders: list[str] = []
+    for module in sorted(PACKAGE_ROOT.rglob("*.py")):
+        where = module.relative_to(PACKAGE_ROOT)
+        for node in ast.walk(ast.parse(module.read_text(), filename=str(module))):
+            if isinstance(node, ast.Import):
+                offenders += [
+                    f"{where}: import {alias.name}"
+                    for alias in node.names
+                    if alias.name.split(".")[0] in FILE_PRODUCING_MODULES
+                ]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                if node.module.split(".")[0] in FILE_PRODUCING_MODULES:
+                    offenders.append(f"{where}: from {node.module} import …")
+            elif isinstance(node, ast.Call):
+                called = node.func
+                if isinstance(called, ast.Name) and called.id == "open":
+                    offenders.append(f"{where}:{node.lineno}: open(…)")
+                elif isinstance(called, ast.Attribute):
+                    on_os = (
+                        isinstance(called.value, ast.Name) and called.value.id == "os"
+                    )
+                    if called.attr in FILE_WRITING_METHODS or (
+                        on_os and called.attr in FILE_WRITING_OS_CALLS
+                    ):
+                        offenders.append(f"{where}:{node.lineno}: .{called.attr}(…)")
+    assert not offenders, (
+        f"the package writes to the filesystem: {offenders}. Durable state is "
+        f"typed rows in the engine (`concept/instruction.md` §2); a file is a "
+        f"second store, and an agent's notes in one are a second store of "
+        f"uncited free text."
+    )
+
+
+def test_the_runs_of_a_pass_are_exactly_the_pairings_the_contract_accepts():
+    """Two copies of the enumeration, asserted equal by construction.
+
+    `orchestration.RUNS_OF_A_PASS` is what a re-run addresses to supersede the
+    runs it replaced, so a fourth pairing the contract began to accept and this
+    list did not would be a row nothing ever collects.
+    """
+    accepted = set()
+    for emitter in (TRIAGE, ANALYST):
+        for trigger in TRIGGERS:
+            try:
+                request(
+                    emitter=emitter,
+                    trigger=trigger,
+                    budgets=BUDGET_POLICY.for_emitter(emitter),
+                )
+            except ValueError:
+                continue  # pydantic's ValidationError is one
+            accepted.add((emitter, trigger))
+    assert set(orchestration.RUNS_OF_A_PASS) == accepted
+    assert len(orchestration.RUNS_OF_A_PASS) == len(set(orchestration.RUNS_OF_A_PASS))
+
+
+def _helena_modules() -> dict[str, dict[str, Any]]:
+    return {
+        name: dict(vars(module))
+        for name, module in sorted(sys.modules.items())
+        if name == "helena" or name.startswith("helena.")
+    }
+
+
+def test_a_run_leaves_nothing_behind_in_any_helena_module():
+    """Asserted by execution, not off the source: run one, then compare.
+
+    `test_the_router_holds_no_state_between_assessments` reads `orchestration.py`
+    for a module-level container. This runs a whole assessment — both agents, both
+    disclosure ledgers, the budget guard, the analyst's tool loop — and asserts
+    that no module in the package gained, lost or rebound a single name while it
+    happened. The first run is the warm-up: `helena.policy.version` and its four
+    siblings import their frozen version module on first use, and an import is
+    exactly the once-per-process event this must not confuse for state.
+    """
+    with _Endpoint([answered(TRIAGE_NORMAL), answered(ANALYST_ANSWER)]) as endpoint:
+        first = assess(endpoint)
+    before = _helena_modules()
+
+    with _Endpoint([answered(TRIAGE_NORMAL), answered(ANALYST_ANSWER)]) as endpoint:
+        second = assess(endpoint)
+    after = _helena_modules()
+
+    assert set(after) == set(before), "a helena module was imported by the run"
+    for name in before:
+        assert set(after[name]) == set(before[name]), f"{name} gained or lost a name"
+        for attribute, value in before[name].items():
+            assert after[name][attribute] is value, f"{name}.{attribute} was rebound"
+
+    # And the two runs share no working memory: each ledger is the record of one
+    # run, and the first one is exactly what it was when its run returned.
+    assert first.triage_disclosures is not second.triage_disclosures
+    assert first.analyst_disclosures is not second.analyst_disclosures
+    assert len(first.triage_disclosures.rows) == len(second.triage_disclosures.rows)
+
+
+def test_a_killed_run_leaves_nothing_on_disk():
+    """`SIGKILL` mid-assessment, and the process's whole writable world is empty.
+
+    A child process runs one assessment against an endpoint here that accepts the
+    prompt and never answers, so it is killed inside the first model call — with
+    no cleanup, no `finally` and no `atexit`, which is the point: what is being
+    asserted is that there was nothing to clean up. Its home, its temporary
+    directory and its working directory are three empty directories under
+    `tmp_path`, and after the kill they still are.
+
+    Bytecode caching is turned off in the child rather than tolerated: a `.pyc`
+    the interpreter wrote is not this system's state, and a test that allowed one
+    exception would have to allow the next.
+    """
+    hangs = _Hangs()
+    work = Path(tempfile.mkdtemp(prefix="killed-run-"))
+    try:
+        home, temporary, working = (work / "home", work / "tmp", work / "cwd")
+        for directory in (home, temporary, working):
+            directory.mkdir()
+        child = working / "run.py"
+        child.write_text(
+            "import sys\n"
+            f"sys.path.insert(0, {str(PROJECT_ROOT / 'tests')!r})\n"
+            "import test_orchestration\n"
+            "test_orchestration.assess_at(sys.argv[1])\n"
+        )
+        before = set(work.rglob("*"))
+
+        with hangs:
+            running = subprocess.Popen(
+                [sys.executable, str(child), hangs.url],
+                cwd=working,
+                env={
+                    "PATH": os.environ["PATH"],
+                    "HOME": str(home),
+                    "TMPDIR": str(temporary),
+                    "XDG_CACHE_HOME": str(home / "cache"),
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONPATH": str(PROJECT_ROOT / "src"),
+                },
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                assert hangs.called.wait(timeout=120), (
+                    f"the child never reached the endpoint: "
+                    f"{running.communicate(timeout=30)[1].decode()}"
+                )
+                running.kill()
+                running.communicate(timeout=60)
+            finally:
+                if running.poll() is None:  # pragma: no cover — the kill worked
+                    running.kill()
+                    running.communicate(timeout=60)
+
+        assert running.returncode == -signal.SIGKILL, (
+            f"the child exited {running.returncode} rather than being killed, so "
+            f"it had the chance to tidy up and this proves nothing"
+        )
+        assert set(work.rglob("*")) - before == set(), (
+            "a killed run left a file behind. `concept/03` allows no durable "
+            "in-flight state anywhere outside the engine."
+        )
+    finally:
+        hangs.close()
+        shutil.rmtree(work, ignore_errors=True)
+
+
+class _Hangs:
+    """An endpoint that accepts a prompt and never answers.
+
+    What holds the child inside its first model call while it is killed, so what
+    the test observes is an assessment that was interrupted rather than one that
+    finished and tidied up. Threading, because the parent has to keep serving
+    while it kills the caller.
+    """
+
+    def __init__(self) -> None:
+        self.called = threading.Event()
+        self.release = threading.Event()
+        endpoint = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self) -> None:  # noqa: N802 — the stdlib's name
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                endpoint.called.set()
+                endpoint.release.wait(timeout=120)
+
+            def log_message(self, *args: object) -> None:
+                """The stdlib handler logs to stderr; the suite has its own channel."""
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self) -> _Hangs:
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.release.set()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_port}/v1/"
+
+    def close(self) -> None:
+        self.release.set()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
 
 
 # --- Against a real engine ----------------------------------------------------

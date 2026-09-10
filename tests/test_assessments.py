@@ -68,6 +68,7 @@ from helena.contracts.v1 import (
     SCHEMA_INVALID,
     SECTIONS,
     SUPPORTING,
+    TRIAGE_SUSPICIOUS,
     AgentFailure,
     AgentRequest,
     AgentResult,
@@ -629,6 +630,146 @@ def test_a_re_run_rewrites_its_own_rows_rather_than_doubling_them(
     assert one(migrated_engine, orchestration.ASSESSMENT_TABLE, assessment_id=identifier)[
         "classification"
     ] == "normal"
+
+
+# --- Re-running an interrupted assessment -------------------------------------
+#
+# `concept/03`: *"An assessment is one function call over one versioned context
+# snapshot. No checkpointing, no durable in-flight state anywhere outside the
+# engine; an interrupted run is simply re-run, because the versioned context
+# already makes that correct rather than a fallback."*
+#
+# There is no resume to test, then. What "well-defined" has to mean is that after
+# the re-run, what the store holds for that context version is what the last
+# completed pass produced and nothing else — including when the re-run routed
+# differently from the run it replaced, and including the child rows an
+# interrupted run wrote before it died.
+
+
+class _Killed(Exception):
+    """What a run that stopped mid-write raises. Never caught by the writer."""
+
+
+class _CutAt:
+    """A connection that stops at the nth statement matching `stop_before`.
+
+    The way a killed process stops: no rollback, no cleanup, and whatever was
+    already executed stays executed. Used to leave the exact residue `_one`'s
+    write order can leave — the child rows of a run whose assessment row was
+    never written — so the re-run's cleanup is tested against real rows rather
+    than against a description of them.
+    """
+
+    def __init__(self, connection: psycopg.Connection, *, prefix: str, nth: int):
+        self._connection = connection
+        self._prefix = prefix
+        self._remaining = nth
+
+    def execute(self, statement: str, params: tuple | None = None):
+        if statement.startswith(self._prefix):
+            self._remaining -= 1
+            if self._remaining == 0:
+                raise _Killed(statement[: len(self._prefix)])
+        return self._connection.execute(statement, params)
+
+
+def a_pass(*, trigger: str) -> orchestration.Assessment:
+    """An escalated pass, under the trigger that named the branch it took."""
+    return an_assessment(
+        analysis=a_result(
+            ANALYST,
+            classification="malicious.c2",
+            citations=(Citation(evidence_id=SHOWN, stance=SUPPORTING),),
+            gaps=(Gap(kind="stale", detail="the snapshot was 4 days old"),),
+        ),
+        escalated=analyst_request(trigger=trigger),
+    )
+
+
+def child_rows(connection: psycopg.Connection, identifier: str) -> dict[str, int]:
+    """How many rows each child table holds for one run."""
+    return {
+        table: len(rows(connection, table, assessment_id=identifier))
+        for table in orchestration.CHILD_TABLES
+    }
+
+
+def test_a_re_run_that_routed_differently_supersedes_the_run_it_replaced(
+    store: orchestration.AssessmentStore, migrated_engine: psycopg.Connection
+):
+    """One context version holds one assessment, not one per way it was reached.
+
+    The identifier carries the trigger, so a re-run that escalated on the evidence
+    where the first escalated on triage would otherwise mint a second analyst row
+    and leave the first standing beside it — two live verdicts over one snapshot,
+    which is the thing `assessment_id` keeping the outcome out of the digest
+    exists to prevent, one level up.
+    """
+    first = store.store(a_pass(trigger=TRIAGE_SUSPICIOUS), at=RECORDED_AT)
+    assert len(first) == 2
+    again = store.store(
+        a_pass(trigger="deterministic_signal"),
+        at=RECORDED_AT + timedelta(hours=1),
+    )
+
+    assert again[0] == first[0], "the triage run is the same run, re-run"
+    assert again[1] != first[1], "the analyst run was reached another way"
+    stored = rows(migrated_engine, orchestration.ASSESSMENT_TABLE)
+    assert sorted(row["assessment_id"] for row in stored) == sorted(again)
+    assert [row["triggered_by"] for row in stored if row["emitter"] == ANALYST] == [
+        "deterministic_signal"
+    ]
+    # And the superseded run took its citations, gaps and disclosures with it.
+    assert child_rows(migrated_engine, first[1]) == dict.fromkeys(
+        orchestration.CHILD_TABLES, 0
+    )
+
+
+def test_a_re_run_collects_the_child_rows_an_interrupted_run_left(
+    store: orchestration.AssessmentStore, migrated_engine: psycopg.Connection
+):
+    """`_one` writes the children first, so a killed run can leave them orphaned.
+
+    They are in the engine rather than outside it, which is what `concept/03`
+    permits at all — but nothing keyed on what is *present* would ever find them,
+    because their assessment row does not exist. The re-run addresses all three
+    identifiers a snapshot could hold by key, so it collects them.
+    """
+    cut = orchestration.AssessmentStore(
+        _CutAt(
+            migrated_engine,
+            prefix=f"INSERT INTO {orchestration.ASSESSMENT_TABLE} ",
+            nth=2,
+        ),
+        prices=NO_PRICES,
+    )
+    with pytest.raises(_Killed):
+        cut.store(a_pass(trigger=TRIAGE_SUSPICIOUS), at=RECORDED_AT)
+    migrated_engine.execute("FLUSH")
+
+    orphaned = orchestration.assessment_id(
+        tenant=TENANT,
+        sensor=SENSOR,
+        context_id="ctx-1",
+        context_version="ctx-1/3",
+        emitter=ANALYST,
+        trigger=TRIAGE_SUSPICIOUS,
+    )
+    # The residue is real: the analyst's children are there and its row is not.
+    assert child_rows(migrated_engine, orphaned)[orchestration.CITATION_TABLE] == 1
+    assert rows(
+        migrated_engine, orchestration.ASSESSMENT_TABLE, assessment_id=orphaned
+    ) == []
+
+    # The re-run finished rather than escalating, so it never addresses the
+    # orphan's identifier as one of its own — and collects it anyway.
+    triage_only, = store.store(an_assessment(), at=RECORDED_AT)
+    assert child_rows(migrated_engine, orphaned) == dict.fromkeys(
+        orchestration.CHILD_TABLES, 0
+    )
+    assert [row["assessment_id"] for row in rows(
+        migrated_engine, orchestration.ASSESSMENT_TABLE
+    )] == [triage_only]
 
 
 # --- Citations are join rows --------------------------------------------------
