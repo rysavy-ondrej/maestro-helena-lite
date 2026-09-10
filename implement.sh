@@ -78,7 +78,9 @@ OPTIONS
 
 EXIT CODES
     0  all requested tasks completed
-    2  a task ended blocked, partial or failed (loop stopped)
+    2  a task ended blocked, partial, failed or unlanded (loop stopped). Unlanded
+       means the report said completed and the work was never committed: the task
+       is NOT marked done, and the tree is left exactly as the session left it
     3  budget below the threshold — nothing was started; message says when to retry
     4  no unfinished tasks left
     5  the previous task is not landed — uncommitted work, an unmerged task
@@ -521,12 +523,83 @@ using the schema in prds/CONTEXT.md §7. Set "status" honestly — completed,
 partial, blocked or failed. A task with working code and no report is incomplete;
 a "completed" with a failing test poisons every session after yours.
 
+THEN COMMIT. The report is part of that commit, not a thing left beside it, and
+the commit is named \`task-$nn: <what changed>\` after the zero-based index above.
+A report that says "completed" over work still sitting in the working tree is not
+a completed task: this runner checks, records the result as \`unlanded\`, does NOT
+mark the task done, and stops the loop. prds/CONTEXT.md §4 has the rule and the
+four rules around it.
+
 Do not edit prd.json, session.json, progress.txt or session-memory.json. This
 runner owns them and reads your report.
 PROMPT
 }
 
 # --- state updates ----------------------------------------------------------
+
+# What landing_gate found, for the loop to print once the status is settled.
+LANDING_DETAIL=""
+
+# 0 = the session landed its work, 1 = it left the work in the tree.
+#
+# The report is this runner's source of truth for status, and a session can write
+# "completed" into it while its work is still sitting uncommitted. Task 40 did
+# exactly that: the report was written, record_result marked prd.json done and
+# moved session.json on, land_bookkeeping committed the tracking files, and the
+# increment itself -- fifteen files including its own report and its ADR -- stayed
+# in the working tree. Nothing here noticed. The next run stopped at git_gate
+# naming fifteen uncommitted paths, one task too late to say which task they
+# belonged to or that a missing commit was the whole of the problem.
+#
+# So the same thing is checked at the moment it happens, by two signals a
+# completed task has to satisfy both of:
+#
+#   * HEAD moved. A finished increment always commits at least its own report --
+#     prds/CONTEXT.md §4, "the report is part of the commit" -- so a completed
+#     task whose HEAD did not move committed nothing. A task branch that was
+#     never merged reads the same way here, and that is correct rather than a
+#     false positive: `main` is the whole of what is done, so a completed task is
+#     on it.
+#   * Nothing of the session's is left uncommitted. The runner's own tracking
+#     files are excluded because record_result has not written them yet and the
+#     session log was just written by the caller. `prds/reports/` is deliberately
+#     NOT excluded: the report is the session's to commit, not this runner's.
+#
+# This does not fire for a report that says blocked, partial or failed. Those are
+# told to commit what exists and leave the branch unmerged for the operator, and
+# git_gate is already the thing that stops the queue on them.
+landing_gate() {
+  local head_before="$1" head_after left branches moved=1
+  LANDING_DETAIL=""
+
+  [ "$SKIP_GIT" -eq 1 ] && return 0
+  git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  [ -n "$head_before" ] || return 0
+
+  head_after="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+  [ "$head_after" = "$head_before" ] && moved=0
+  left="$(git -C "$ROOT" status --porcelain \
+          | grep -vE ' (prds/prd\.json|prds/progress\.txt|prds/session\.json|prds/session-memory\.json|prds/logs/)' \
+          || true)"
+
+  if [ "$moved" -eq 1 ] && [ -z "$left" ]; then
+    return 0
+  fi
+
+  if [ "$moved" -eq 0 ]; then
+    LANDING_DETAIL="HEAD is still at ${head_before:0:7} — nothing was committed here."
+    branches="$(git -C "$ROOT" for-each-ref --format='%(refname:short)' 'refs/heads/task-*')"
+    if [ -n "$branches" ]; then
+      LANDING_DETAIL="$LANDING_DETAIL"$'\n'"a task branch exists and was never merged: $(printf '%s' "$branches" | tr '\n' ' ')"
+    fi
+  else
+    LANDING_DETAIL="HEAD moved to $(git -C "$ROOT" rev-parse --short HEAD), but work was left behind."
+  fi
+  if [ -n "$left" ]; then
+    LANDING_DETAIL="$LANDING_DETAIL"$'\n'"uncommitted:"$'\n'"$(printf '%s\n' "$left" | head -15 | sed 's/^/  /')"
+  fi
+  return 1
+}
 
 # The runner updates its tracking files AFTER the session has committed, so
 # without this the tree is never clean once a task ends and git_gate blocks the
@@ -555,13 +628,13 @@ gate means what it says." 2>/dev/null; then
 }
 
 record_result() {
-  local idx="$1" status="$2" exitcode="$3" started="$4" ended="$5" sid="$6"
+  local idx="$1" status="$2" exitcode="$3" started="$4" ended="$5" sid="$6" landed="$7"
   python3 - "$PRD_JSON" "$SESSION" "$MEMORY" "$PROGRESS" "$REPORTS" \
-            "$idx" "$status" "$exitcode" "$started" "$ended" "$sid" <<'PY'
+            "$idx" "$status" "$exitcode" "$started" "$ended" "$sid" "$landed" <<'PY'
 import json, os, sys, datetime
 
-prd, sess, mem, prog, reports, idx, status, code, started, ended, sid = sys.argv[1:12]
-idx, code = int(idx), int(code)
+prd, sess, mem, prog, reports, idx, status, code, started, ended, sid, landed = sys.argv[1:13]
+idx, code, landed = int(idx), int(code), int(landed)
 started, ended = float(started), float(ended)
 dur_ms = int((ended - started) * 1000)
 
@@ -581,6 +654,12 @@ if status == "completed" and report.get("status") not in (None, "completed"):
     status = report["status"]
 if code != 0 and status == "completed":
     status = "failed"
+# And landing vetoes too: a report that says "completed" over work still sitting
+# in the working tree is describing an increment nobody can build on. See
+# landing_gate for what is checked and why it is checked here rather than
+# discovered at the next run's git_gate.
+if not landed and status == "completed":
+    status = "unlanded"
 
 if status == "completed":
     task["done"] = True
@@ -804,6 +883,9 @@ for ((run = 1; run <= ITERATIONS; run++)); do
   # A stale report from an earlier attempt must not be read as this one's result.
   rm -f "$REPORTS/task-$nn.json"
 
+  # Where the tree was before the session touched it, for landing_gate.
+  head_before="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+
   started="$(date +%s.%N)"
   set +e
   if [ "$TIMEOUT_SECONDS" -gt 0 ]; then
@@ -844,12 +926,25 @@ json.dump({"task_index": idx, "title": title, "status": "failed",
 PY
   fi
 
-  status="$(record_result "$idx" completed "$code" "$started" "$ended" "$sid")"
+  landed=1
+  landing_gate "$head_before" || landed=0
+
+  status="$(record_result "$idx" completed "$code" "$started" "$ended" "$sid" "$landed")"
 
   case "$status" in
     completed) say "  ${grn}completed${rst} — prd.json marked done" ;;
     partial)   say "  ${ylw}partial${rst} — remainder is in the report" ;;
     blocked)   say "  ${ylw}blocked${rst} — needs a decision; see the report's escalations" ;;
+    unlanded)
+      say "  ${red}unlanded${rst} — the report says completed, the work is not committed"
+      printf '%s\n' "$LANDING_DETAIL" | sed 's/^/    /'
+      say "    ${dim}prd.json was NOT marked done. The code may be perfectly good --${rst}"
+      say "    ${dim}the runner will not commit a session's work for it, because a${rst}"
+      say "    ${dim}bookkeeping commit that swept up an increment would hide it.${rst}"
+      say "    ${dim}Either review it, commit it as 'task-$nn: ...' with its report, and${rst}"
+      say "    ${dim}finish the bookkeeping by hand -- prds/CONTEXT.md §4, 'Landing${rst}"
+      say "    ${dim}without the runner' -- or discard it and re-run the task.${rst}"
+      ;;
     *)         say "  ${red}$status${rst} — see prds/reports/task-$nn.json and $log" ;;
   esac
 
@@ -859,7 +954,12 @@ PY
     overall=2
     say ""
     warn "stopping the loop: task $idx ended '$status'."
-    warn "read prds/reports/task-$nn.json, then re-run with --task $idx --retry-failed."
+    if [ "$status" = "unlanded" ]; then
+      warn "the report is prds/reports/task-$nn.json and it is uncommitted along with"
+      warn "everything else the session wrote. Land it or discard it before re-running."
+    else
+      warn "read prds/reports/task-$nn.json, then re-run with --task $idx --retry-failed."
+    fi
     exit 2
   fi
 done

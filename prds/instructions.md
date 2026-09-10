@@ -234,3 +234,7 @@ An increment is finished when **all** of these hold:
       no runner launched the session, writing the report is not enough — see
       `prds/CONTEXT.md` §4, *Landing without the runner*, for the four other
       files nothing else will write.
+- [ ] The work is **committed**, in a commit named `task-NN: …` by the zero-based
+      index, with the report inside it. Writing the report is not landing it:
+      `implement.sh` records a `completed` report over an uncommitted tree as
+      `unlanded`, leaves the task not done and stops the loop. Task 40 is why.

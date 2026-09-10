@@ -394,6 +394,26 @@ Four rules around it:
   ports), so a worktree does not get its own RisingWave. Run the suite in one
   workspace at a time.
 
+**A report that says `completed` over uncommitted work is checked, and it is
+checked now rather than next run.** When the session ends, `implement.sh`'s
+`landing_gate()` asks two things of a task about to be recorded `completed`: that
+`HEAD` moved, and that nothing of the session's is left in the working tree. A
+task that fails either is recorded **`unlanded`** — `prd.json` is *not* marked
+done, `progress.txt` and `session-memory.json` say so, and the loop stops.
+
+This exists because task 40 did exactly that. Its report was written and honest,
+the runner marked the task done and moved `session.json` on, and the increment —
+fifteen files including its own report and its ADR — stayed in the working tree.
+The next run stopped at the linear-history gate naming fifteen uncommitted paths,
+by which point nothing said which task they belonged to or that one missing
+commit was the whole of the problem.
+
+Two things follow for you. The commit is **named by the zero-based index**,
+`task-NN: …`, and **the report is inside it**. And the runner will not commit
+your work for you: `land_bookkeeping()` stages only the five paths it owns and
+never `git add -A`, because a bookkeeping commit that swept up an increment would
+bury it in a commit claiming to be bookkeeping.
+
 ### Landing without the runner
 
 **Everything in `prds/` except your report is written by `implement.sh`. If it
