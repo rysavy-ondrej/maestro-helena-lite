@@ -552,7 +552,7 @@
         "Add a test that model output cannot change which agent runs next",
         "Document what would reverse the orchestration choice — a measured need for resumability, human-in-the-loop interrupts, or a third agent whose routing is not a branch"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D6 Orchestration] Assessment persistence as typed rows with citation joins",
