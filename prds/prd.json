@@ -513,7 +513,7 @@
         "Apply the composition rule policy to the returned verdict and downgrade with a recorded reason when the evidence does not support it",
         "Add a test that the analyst can see both `enrichment` and `analyst` tier evidence while triage sees only `enrichment`"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D5 Security] Untrusted-text isolation, implemented and tested",
