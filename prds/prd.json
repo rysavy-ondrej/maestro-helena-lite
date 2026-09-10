@@ -579,7 +579,7 @@
         "Add a test that re-running an interrupted assessment over the same versioned snapshot is well-defined",
         "Document that framework conveniences must be checked against the single-store, agents-propose and ephemeral-state rules rather than enabled because they are one flag away"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D6 Replay] Assessment replay from stored versioned inputs",
