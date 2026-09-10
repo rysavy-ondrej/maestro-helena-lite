@@ -58,6 +58,7 @@ from helena import (
     rendering,
     taxonomy,
     tools,
+    untrusted,
 )
 from helena.agents import Message, ModelClient, RetryPolicy
 from helena.analyst import v1 as prompt_v1
@@ -1470,7 +1471,7 @@ def test_a_rendered_value_cannot_forge_the_data_frame():
         ),
     )
     with _Endpoint([]) as endpoint:
-        with pytest.raises(analyst.AnalystError, match="frame"):
+        with pytest.raises(untrusted.IsolationError, match="frame"):
             analyse(endpoint, asked=request(rendering=forged))
 
 

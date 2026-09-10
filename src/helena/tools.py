@@ -173,7 +173,6 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
-import json
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -184,7 +183,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from helena import taxonomy
+from helena import taxonomy, untrusted
 from helena.budgets import BudgetExhausted, RunBudget
 from helena.config import Secret
 from helena.contracts import v1 as contract
@@ -667,16 +666,16 @@ def content(lookup: Lookup) -> str:
       supplied sits in a declared field of a frozen model; `extra="forbid"` means
       a response cannot add a field, and the classification is drawn from the
       declared subset rather than from anything the provider wrote.
-    * **The serialization escapes the frame.** `json.dumps` renders a newline as
-      `\\n`, so no provider string can start a line of its own -- the property
-      `helena.rendering.v1.token` gives the triage rendering, obtained here from
-      the serializer rather than from a second escaper.
+    * **The serialization escapes the frame.** `helena.untrusted.line` renders a
+      newline as `\\n`, so no provider string can start a line of its own -- the
+      property `helena.untrusted.token` gives the triage rendering, obtained here
+      from the serializer rather than from a second escaper. It is the same
+      function `helena.analyst.v1` builds the retrieved block with, so what is
+      stored here and what the model is shown cannot drift.
     * **The native payload is not in it.** `Lookup.native` has no route to this
       function.
     """
-    return json.dumps(
-        lookup.for_agent.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-    )
+    return untrusted.line(lookup.for_agent.model_dump(mode="json"))
 
 
 # --- The cache, which is the evidence store -----------------------------------

@@ -86,6 +86,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import urllib.error
 import urllib.request
 from collections.abc import Iterator, Mapping, Sequence
@@ -688,6 +689,16 @@ class UndeclaredClaim(SourceError):
     """
 
 
+#: What a source id may look like. The same alphabet `helena.tools.ENDPOINT`
+#: allows plus the hyphen `sslbl-ja3` already uses, and for the same reason: both
+#: reach `ProviderTool.name`, which is the identifier a model addresses a tool by,
+#: and both reach the tool description it is shown. `concept/07` names
+#: registration records as a surface an adversary writes in the malicious case, so
+#: the id is checked to be one bare token here rather than escaped at each of the
+#: places it is rendered.
+SOURCE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
 @dataclass(frozen=True)
 class SourceDescriptor:
     """One source: its tier, what it is about, and the subset it may emit.
@@ -730,8 +741,16 @@ class SourceDescriptor:
     caveat: str = ""
 
     def __post_init__(self) -> None:
-        if not self.source_id or self.source_id != self.source_id.strip():
-            raise SourceError(f"{self.source_id!r} is not a source id")
+        if not SOURCE_ID.match(self.source_id):
+            raise SourceError(
+                f"{self.source_id!r} is not a source id; it has to match "
+                f"{SOURCE_ID.pattern}. A registration record is model-visible "
+                f"text -- the id reaches `helena.tools.ProviderTool.name` and the "
+                f"tool description a model is offered -- and `concept/07` puts "
+                f"registration records among the surfaces that in a malicious "
+                f"case are written by the adversary, so it is one bare token and "
+                f"not free text."
+            )
         outside = self.entity_types - ENTITY_TYPES
         if outside:
             raise SourceError(

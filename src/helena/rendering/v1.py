@@ -115,7 +115,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from helena import hosts
+from helena import hosts, untrusted
 from helena.contracts import v1 as contract
 from helena.enrichment import ENTITY_TYPES
 from helena.rendering import (
@@ -197,10 +197,6 @@ EMPTY = "none observed in this window"
 #: its entity type, and the types are a closed vocabulary.
 TRUNCATED = "truncated"
 
-# The characters a rendered token may carry unescaped: printable ASCII, no space
-# and no `%`, which is the escape character itself. See the module docstring.
-_SAFE = frozenset(chr(code) for code in range(0x21, 0x7F)) - {"%"}
-
 
 def token(value: str) -> str:
     """One rendered value, with anything that could forge structure escaped.
@@ -209,13 +205,16 @@ def token(value: str) -> str:
     silently changed into another. Real domain names and addresses are already
     inside the safe set, so this fires on the values that would otherwise be a
     problem and on nothing else.
+
+    `helena.untrusted.token` is the escaper, and this is the name the frozen
+    rendering version calls it by. One escaper rather than two: the frame this
+    rendering ends up inside is checked by `helena.untrusted.block` against the
+    property this function provides, and a second implementation of it is one that
+    can stop agreeing with the checker. What `v1` emits is unchanged, and
+    `tests/test_untrusted.py::test_one_escaper_serves_the_rendering_and_the_frame`
+    is what says so.
     """
-    return "".join(
-        character
-        if character in _SAFE
-        else "".join(f"%{byte:02X}" for byte in character.encode())
-        for character in value
-    )
+    return untrusted.token(value)
 
 
 def _moment(when: datetime) -> str:

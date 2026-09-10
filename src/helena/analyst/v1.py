@@ -20,12 +20,21 @@ front of the model and each sits between a pair of whole lines:
 | `TRIAGE_OPEN` / `TRIAGE_CLOSE` | the triage verdict, as JSON | this project's own earlier stage, and only when the switch is on |
 
 The frame is whole lines for the reason `helena.triage.v1` gives, and the
-property that makes it hold is one layer down in each case: the renderer
-percent-encodes every character outside printable ASCII, **newline included**, and
-the retrieved and inherited blocks are `json.dumps` output, which renders a
-newline as `\\n`. So no value any of the three carries can start a line of its
-own, so none can produce a line equal to a marker. `messages` refuses a rendering
-that carries one anyway rather than trusting the property it depends on.
+property that makes it hold is one layer down in each case:
+`helena.untrusted.token` percent-encodes every character outside printable ASCII,
+**newline included**, and the retrieved and inherited blocks are
+`helena.untrusted.line` output, which renders a newline as `\\n`. So no value any
+of the three carries can start a line of its own, so none can produce a line
+equal to a marker. `helena.untrusted.block` refuses a body that carries one
+anyway — against **every** frame in the project and not only against the three
+here — rather than trusting the property it depends on.
+
+**The frames themselves are not this module's.** `helena.untrusted` owns the
+marker lines and the wrapper, and this version names which three it shows; that
+is what makes "no externally sourced field reaches a prompt outside the wrapper"
+a property one test can read off the package. What the version records is
+unchanged and is pinned by
+`tests/test_untrusted.py::test_the_frozen_prompt_bytes_are_what_they_were`.
 
 **The retrieved block is model-visible provider text and it is data too.** It is
 the same rule and it is worth saying twice, because retrieved text is the one that
@@ -61,16 +70,17 @@ this wording compares with another.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from typing import Any
 
+from helena import untrusted
 from helena.agents import Message
 from helena.analyst import AnalystError, AnalystPrompt, Retrieval
 from helena.contracts import v1 as contract
 
 __all__ = [
     "CLOSE",
+    "CONTEXT_FRAME",
     "INHERITED_FAILURE_FIELDS",
     "INHERITED_RESULT_FIELDS",
     "INSTRUCTIONS",
@@ -80,9 +90,11 @@ __all__ = [
     "PROMPT_VERSION",
     "PROPOSE",
     "RETRIEVED_CLOSE",
+    "RETRIEVED_FRAME",
     "RETRIEVED_OPEN",
     "SECTION_MARK",
     "TRIAGE_CLOSE",
+    "TRIAGE_FRAME",
     "TRIAGE_OPEN",
     "messages",
 ]
@@ -108,13 +120,17 @@ PROPOSE = (
     "proposed_claims",
 )
 
-#: The three pairs of whole lines the untrusted blocks sit between.
-OPEN = "<<<BEGIN UNTRUSTED CONTEXT DATA>>>"
-CLOSE = "<<<END UNTRUSTED CONTEXT DATA>>>"
-RETRIEVED_OPEN = "<<<BEGIN UNTRUSTED RETRIEVED DATA>>>"
-RETRIEVED_CLOSE = "<<<END UNTRUSTED RETRIEVED DATA>>>"
-TRIAGE_OPEN = "<<<BEGIN TRIAGE RESULT>>>"
-TRIAGE_CLOSE = "<<<END TRIAGE RESULT>>>"
+#: The three frames this version shows, and their six lines under the names this
+#: module has always exported them by. `helena.untrusted` holds the text.
+CONTEXT_FRAME = untrusted.CONTEXT
+RETRIEVED_FRAME = untrusted.RETRIEVED
+TRIAGE_FRAME = untrusted.TRIAGE
+OPEN = CONTEXT_FRAME.open
+CLOSE = CONTEXT_FRAME.close
+RETRIEVED_OPEN = RETRIEVED_FRAME.open
+RETRIEVED_CLOSE = RETRIEVED_FRAME.close
+TRIAGE_OPEN = TRIAGE_FRAME.open
+TRIAGE_CLOSE = TRIAGE_FRAME.close
 MARKERS = (OPEN, CLOSE, RETRIEVED_OPEN, RETRIEVED_CLOSE, TRIAGE_OPEN, TRIAGE_CLOSE)
 
 #: What each of the rendering's five sections is announced with. A line of its
@@ -253,44 +269,37 @@ def messages(
     """
     if not classifications:
         raise AnalystError("a prompt that offers no verdict asks for nothing")
-    document = _document(request.rendering)
-    forged = sorted(set(MARKERS) & set(document.splitlines()))
-    if forged:
-        raise AnalystError(
-            f"the rendering carries {forged} as a line of its own, which is a "
-            f"frame that says where untrusted data ends. `helena.rendering.v1` "
-            f"escapes the newline that would be needed to produce one, so this is "
-            f"a renderer that stopped doing that rather than a host that got "
-            f"lucky."
-        )
     turns = [
         Message(
             role="system",
             content=INSTRUCTIONS.format(
-                verdicts=", ".join(classifications),
+                verdicts=untrusted.vocabulary(classifications),
                 open=OPEN,
                 close=CLOSE,
                 retrieved_open=RETRIEVED_OPEN,
                 retrieved_close=RETRIEVED_CLOSE,
             ),
         ),
-        Message(role="user", content=f"{OPEN}\n{document}\n{CLOSE}"),
+        Message(
+            role="user",
+            content=untrusted.block(CONTEXT_FRAME, _document(request.rendering)),
+        ),
     ]
     if inherited is not None:
         turns.append(
             Message(
                 role="user",
-                content=(
-                    f"{TRIAGE_OPEN}\n{_inherited(inherited)}\n{TRIAGE_CLOSE}"
-                ),
+                content=untrusted.block(TRIAGE_FRAME, _inherited(inherited)),
             )
         )
     if retrievals:
-        body = "\n".join(_line(retrieval) for retrieval in retrievals)
         turns.append(
             Message(
                 role="user",
-                content=f"{RETRIEVED_OPEN}\n{body}\n{RETRIEVED_CLOSE}",
+                content=untrusted.block(
+                    RETRIEVED_FRAME,
+                    "\n".join(_line(retrieval) for retrieval in retrievals),
+                ),
             )
         )
     return tuple(turns)
@@ -314,14 +323,13 @@ def _line(retrieval: Retrieval) -> str:
     """One tool call and its answer, as one line of JSON.
 
     `Retrieval.for_agent` is what decides what may be in it — the native provider
-    payload has no route to this function — and `json.dumps` is what makes it one
-    line: a newline in any provider string is rendered `\\n`, so no answer can
-    produce a line of its own and none can forge the frame this block sits in.
-    Sorted keys and no spaces, so two identical answers are identical bytes.
+    payload has no route to this function — and `helena.untrusted.line` is what
+    makes it one line: a newline in any provider string is rendered `\\n`, so no
+    answer can produce a line of its own and none can forge the frame this block
+    sits in. Sorted keys and no spaces, so two identical answers are identical
+    bytes.
     """
-    return json.dumps(
-        retrieval.for_agent, sort_keys=True, separators=(",", ":")
-    )
+    return untrusted.line(retrieval.for_agent)
 
 
 def _inherited(outcome: Any) -> str:
@@ -343,10 +351,8 @@ def _inherited(outcome: Any) -> str:
         else INHERITED_RESULT_FIELDS
     )
     shown = outcome.model_dump(mode="json")
-    return json.dumps(
-        {"stage": "triage", **{name: shown[name] for name in fields}},
-        sort_keys=True,
-        separators=(",", ":"),
+    return untrusted.line(
+        {"stage": "triage", **{name: shown[name] for name in fields}}
     )
 
 

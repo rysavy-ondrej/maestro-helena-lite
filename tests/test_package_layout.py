@@ -83,12 +83,25 @@ COMPONENT_MODULES = {
 # rather than one for the Normalizer and another for the Sink. A Kafka client in
 # each of those modules would be two places the rule can be broken;
 # `tests/test_broker.py` asserts there is exactly one.
+# `untrusted` is here on the same terms and for a reason `concept/07` states
+# directly: *Untrusted input* is a section of the principles rather than a stage
+# of the pipeline, and every surface that shows a model a string uses it -- the
+# two prompt versions, the rendering's escaper, the tool layer's serializer and
+# the model client's retry feedback. Putting the frame in any one of them would
+# make the other three import that one, and putting a copy in each is the second
+# spelling of a delimiter that `helena.untrusted`'s docstring refuses. It is not a
+# component because it is not a stage, and it is not a versioned package because
+# what it holds is a mechanism rather than something an assessment records:
+# `docs/decisions/0030-untrusted-text-isolation.md` records the one thing that
+# costs -- a frozen `vN` prompt now imports a file that can be edited -- and the
+# pin that pays for it.
 SUPPORT_MODULES = {
     "config",
     "observability",
     "migrations",
     "versions",
     "broker",
+    "untrusted",
 }
 
 # Subpackages, and the only kind there is one of. A versioned package holds
