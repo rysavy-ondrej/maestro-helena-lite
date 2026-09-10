@@ -131,11 +131,46 @@ a **header**, not a credential in the path.
 > a documentation page or a guessed convention, then propagated before anyone
 > fetched the thing it described.
 
+> **Correction, 2026-09-10 — recorded rather than overwritten.** The paragraph
+> above is **false**, and it was checked the way it asked to be checked. The
+> public documentation at `threatfox.abuse.ch/api/` documents `search_ioc` with a
+> request table, a `curl` example and a sample response, and the live service
+> answers it: `POST threatfox-api.abuse.ch/api/v1/`, body
+> `{"query": "search_ioc", "search_term": "…", "exact_match": true}`, `Auth-Key`
+> header. **The per-indicator lookup exists and the tool is built on it.**
+> Whether the sentence was wrong when written or the publisher's documentation
+> changed since is not knowable from here and is not guessed.
+>
+> Three measured facts it is worth carrying at this level, because each is a
+> defect if assumed:
+> **HTTP 200 answers every application error** — the status code says nothing and
+> `query_status` does, and `data` is a list on `ok` and a *string* on `no_result`.
+> **`exact_match` cannot be used for an address**, because ThreatFox has no
+> bare-`ip` indicator type at all — only `ip:port` — so an address lookup uses the
+> wildcard. And **the wildcard is not a substring search and it crosses entity
+> types**: it returned a `url` record for an address query and 1 386 records for
+> `workers.dev`, so a wildcard result is a set of *candidates* and every one must
+> be checked against the asked indicator before it is a claim.
+> [ADR-0028](../docs/decisions/0028-the-threatfox-hunting-api.md) is the source
+> record and carries the whole surface, the typed-error mapping and the probes.
+
 Its **false-positive list is more interesting than it looks**: a
 publisher-maintained FP list is *evidence about evidence*. It should enter by the
 same door as analyst feedback — a claim is never deleted, suppression is explicit
 policy, and a suppressed match is still recorded as having matched — **not by
 quietly filtering matches before anything sees them**.
+
+> **Measured 2026-09-10: there is no such list to enter.** ThreatFox publishes no
+> false-positive feed on either surface this project can reach — the documented
+> operation set has none, three plausible operation names each answered
+> `unknown_operation`, and the export offers JSON, CSV, MISP, RPZ, host-file and
+> Suricata and no FP file. What the publisher does instead is **expire** IOCs
+> older than six months, and an expired IOC is simply *absent* from both the API
+> and the export — which is a deletion, and is precisely the mechanism the
+> paragraph above says a suppression must not be. The design stands and stays
+> written down;
+> [ADR-0028 §8](../docs/decisions/0028-the-threatfox-hunting-api.md) records it in
+> full, and it is `deferred` for absence of the artifact rather than for effort.
 
 ### One organisation in both tiers, and the cost of that
 
@@ -145,6 +180,19 @@ new information**: for any indicator already in the tables, the analyst mostly
 re-confirms what triage saw. What it genuinely adds is freshness between snapshot
 loads, indicators added since the last load, and per-indicator context the bulk
 export omits.
+
+> **Measured 2026-09-10, and it is now stronger than "mostly".** Three indicators
+> present in the loaded snapshot — one `domain`, one `ip:port`, one `url` — were
+> asked of the hunting API. For all three, **every field the two surfaces share
+> was identical**: same record id, threat type, malware, confidence, first-seen,
+> compromised flag and reporter. The live lookup returned the row the bulk loader
+> had already stored. The one field the API carries that the export does not is
+> `sightings`; expiry cuts the other way, since an IOC older than six months is
+> exposed on neither surface while a stale snapshot still holds it. **A ThreatFox
+> analyst claim corroborating a ThreatFox enrichment claim is one source agreeing
+> with itself** — `source_diversity` counts by `source_id` and both tiers carry
+> `threatfox`, which is why that arithmetic has to stay as it is.
+> [ADR-0028 §7](../docs/decisions/0028-the-threatfox-hunting-api.md).
 
 **Concentration risk, recorded so it is not discovered later:** one provider
 supplies most of the prototype's threat intelligence, so if its terms, availability
@@ -200,6 +248,14 @@ by whoever registered the domain, which in a malicious case is the adversary.
   page. Do not build the loader around a key it does not need, and **re-measure
   before trusting either endpoint**: abuse.ch changes its auth on its own
   schedule, and a bulk export that is open today may not be tomorrow.
+- **Re-measured 2026-09-10, and both records are now true of different
+  endpoints.** `GET threatfox.abuse.ch/export/json/recent/` — the one the loader
+  uses — still answers **200 with no credential**, 3 774 281 bytes. But the export
+  index now documents a *newer* surface,
+  `threatfox-api.abuse.ch/v2/files/exports/<AUTH-KEY>/full.csv.zip`, which puts
+  **the key in the URL path**. Nothing here uses it. Nobody should read that as
+  grounds to undo the 2026-09-03 correction above: the correction was about the
+  endpoint the loader fetches, and it is still right about it.
 - **The redaction rule stands on its own and is not weakened by this.** It is not
   hypothetical — a live key reached a project conversation inside a pasted link —
   and it is not specific to this provider: an exception carrying a request URL

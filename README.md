@@ -46,6 +46,8 @@ src/helena/          one package, one module per architecture component
   triage/              the triage runner, and its prompt, one frozen module per version
   tools.py             approved providers as tools: the credential-owning boundary,
                        and the cache-first lookup whose cache is the evidence store
+  providers.py         the live adapters behind that boundary — the protocol half,
+                       apart so the boundary can be asserted to hold no HTTP client
   disclosure.py        what may be sent to which source, and the record of what was
   orchestration.py     deterministic routing, budgets, persistence, replay
   sink.py              egress of every assessed context to the output topic
@@ -1227,6 +1229,55 @@ internal addresses somewhere nothing else governs.
 
 **What is not demonstrated:** nothing stores a disclosure row, because nothing
 stores an assessment — the ledger is in-process, which is the standing `Cost` has
-and until the same increment; the policy does not ask where an indicator *came
-from*, so one the model invented is still sent as readily as one the context
-observed; and no live provider has been queried through the layer at all.
+and until the same increment; and the policy does not ask where an indicator
+*came from*, so one the model invented is still sent as readily as one the
+context observed.
+
+## The first live provider
+
+[`helena.providers`](src/helena/providers.py) is the adapter behind the boundary,
+and [`docs/decisions/0028-the-threatfox-hunting-api.md`](docs/decisions/0028-the-threatfox-hunting-api.md)
+is the **source record** it was written from — every shape in it measured against
+`POST threatfox-api.abuse.ch/api/v1/` on 2026-09-10, eighteen probes, before a
+line of the adapter existed. `concept/05` asks for exactly that and says why: the
+last three source records in this project were each wrong because they were
+written from a documentation page.
+
+**The surface it confirmed, and the one thing `concept/05` had wrong.** The note
+said no per-indicator lookup endpoint appeared in the public documentation.
+`search_ioc` is documented and answers; the note now carries a dated correction
+rather than an overwrite. Four measurements shape the adapter:
+
+| | |
+| --- | --- |
+| **HTTP 200 answers every application error** | the status carries nothing; `query_status` does — and `data` is a list on `ok` and a **string** on `no_result` |
+| **`exact_match` cannot be used for an address** | ThreatFox has no bare-`ip` indicator type, only `ip:port`, so an exact match on an address is always `no_result` |
+| **the wildcard is not a substring search and it crosses entity types** | it returned a `url` record for an address query and 1 386 records for `workers.dev`. A wildcard result is a set of **candidates** |
+| **exact match is case-insensitive but rejects a trailing root dot** | so what is sent is the *normalized* indicator, or the layer caches a `no_match` that is wrong |
+
+**A candidate that is about something else is counted, not dropped.** Every claim
+carries `records_returned` and `records_out_of_scope`, and a response whose every
+record was out of scope answers `no_match` with the counts saying the provider was
+not silent. Reporting a URL listing as an address claim would be
+scope-before-severity failing in the direction that over-alerts.
+
+**One mapping, not two.** An API record is translated into the bulk export's own
+entry shape and pushed through the loader's `split_indicator` and
+`classify_threat_type`, so an `ip:port` record is scoped `address:port` by
+whichever tier read it. The suite asserts that over every committed export entry.
+
+**The host is policy's and the adapter checks it.** `threatfox_url(permit)` builds
+the URL from `[send_policy.threatfox] disclosed_to`, and an adapter pointed
+anywhere else refuses to be constructed — which closes what ADR-0027 §6 deferred
+until a live adapter existed.
+
+**What is demonstrated:** the surface, the mapping, five typed failure reasons
+over a real socket, and one live call in the suite. **What is not:** the
+publisher's false-positive list, because *measured 2026-09-10 there is not one* —
+neither surface publishes one, and what the publisher does instead is expire IOCs,
+which is a deletion. The design for how one would enter is ADR-0028 §8 and stays
+`deferred` for absence of the artifact. Nothing paces calls to the configured
+rate; no agent has driven a tool loop through this; and the **retrieval confound
+is now measured** — for three indicators present in both tiers, every field the
+two surfaces share was identical, so a ThreatFox analyst claim corroborating a
+ThreatFox enrichment claim is one source agreeing with itself.

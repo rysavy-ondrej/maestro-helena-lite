@@ -139,9 +139,10 @@ subset), `config/policy.toml` through the injected `SendPolicy`, and
 Maturity: experimental — the layer is exercised end to end against a stand-in
 provider adapter over the committed ThreatFox export shape, against a real
 migrated engine for the cache, and against the real credential from `.env` for
-the isolation properties. **No live provider has been queried through it**: the
-query surface of the hunting API is confirmed, and the adapter written against
-it, in the first-live-provider increment.
+the isolation properties. The live adapter is `helena.providers`, and
+`tests/test_providers.py` drives this layer over the real bytes of a real
+`search_ioc` answer -- what is still unmeasured is a whole agent run through it,
+because no analyst loop exists.
 
 ## Deliberately not here, and named so a green suite does not read as a finished layer
 
@@ -745,9 +746,20 @@ def normalize_indicator(entity_type: str, entity_value: str) -> str:
     URL string it was given, so two URLs differing only in a fragment are two
     questions until a provider says otherwise.
 
-    Normalization never changes **what is sent**: the adapter is handed the
+    **This layer never changes what is sent**: the adapter is handed the
     `ToolCall` with the caller's own spelling, and this value is the key the
-    store is searched by and the subject the claim is recorded against.
+    store is searched by and the subject the claim is recorded against. Whether
+    the adapter then sends the caller's spelling or this one is the adapter's,
+    and it is a measurement rather than a preference -- an earlier revision of
+    this paragraph said normalization never changes what is sent at all, which
+    stopped being true the moment a live adapter existed.
+    `helena.providers.ThreatFoxHuntingAPI` sends this value, because the
+    provider's exact match is case-insensitive but rejects a trailing root dot:
+    sending `example.com.` verbatim answers `no_result`, and the layer would
+    then cache a `no_match` under the folded key -- one indicator's absence
+    recorded as another's, which is the asymmetry three paragraphs up.
+    `docs/decisions/0028-the-threatfox-hunting-api.md` §6 has the measurement and
+    what it costs.
 
     Raises `ToolError` for an entity type with no rule, rather than returning the
     value unfolded -- a fifth entity type added to `ENTITY_TYPES` would otherwise

@@ -38,6 +38,16 @@ PACKAGE_ROOT = PROJECT_ROOT / "src" / "helena"
 # needs a versioned package); `docs/decisions/0026-the-budget-guard.md` records
 # both. `orchestration` keeps the rest of the row: routing, validation,
 # persistence and replay.
+#
+# `providers` is the other half of the same row and is split out of `tools` for a
+# reason that is machine-checked rather than aesthetic: `tests/test_tools.py`
+# reads `tools.py`'s own AST and fails if it imports HTTP machinery or holds a
+# `://` literal, which is what makes "the agent sees a tool, never an HTTP client
+# and never a key" a property of the code. The adapter that speaks a provider's
+# protocol has to hold both, so it cannot live there without deleting the
+# property. `helena.tools.ProviderTool` takes it as one injected callable --
+# `ask(call, credential) -> ProviderAnswer` --  and
+# `docs/decisions/0028-the-threatfox-hunting-api.md` §10 records the decision.
 COMPONENT_MODULES = {
     "normalizer",
     "context",
@@ -46,6 +56,7 @@ COMPONENT_MODULES = {
     "budgets",
     "disclosure",
     "tools",
+    "providers",
     "orchestration",
     "sink",
 }

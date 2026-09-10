@@ -1,0 +1,28 @@
+{
+    "query_status": "ok",
+    "data": [
+        {
+            "id": "1892954",
+            "ioc": "45.192.105.203:8000",
+            "threat_type": "botnet_cc",
+            "threat_type_desc": "Indicator that identifies a botnet command&control server (C&C)",
+            "ioc_type": "ip:port",
+            "ioc_type_desc": "ip:port combination that is used for botnet Command&control (C&C)",
+            "malware": "win.dcrat",
+            "malware_printable": "DCRat",
+            "malware_alias": "DarkCrystal RAT",
+            "malware_malpedia": "https:\/\/malpedia.caad.fkie.fraunhofer.de\/details\/win.dcrat",
+            "confidence_level": 100,
+            "is_compromised": true,
+            "first_seen": "2026-09-02 06:05:06 UTC",
+            "last_seen": null,
+            "reference": null,
+            "reporter": "anonymous",
+            "sightings": 1,
+            "tags": [
+                "dcrat"
+            ],
+            "malware_samples": []
+        }
+    ]
+}

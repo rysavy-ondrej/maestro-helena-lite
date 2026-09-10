@@ -1,0 +1,30 @@
+{
+    "query_status": "ok",
+    "data": [
+        {
+            "id": "1892731",
+            "ioc": "http:\/\/72.255.59.61:50866\/Mozi.7",
+            "threat_type": "payload_delivery",
+            "threat_type_desc": "Indicator that identifies a malware distribution server (payload delivery)",
+            "ioc_type": "url",
+            "ioc_type_desc": "URL that delivers a malware payload",
+            "malware": "elf.mozi",
+            "malware_printable": "Mozi",
+            "malware_alias": null,
+            "malware_malpedia": "https:\/\/malpedia.caad.fkie.fraunhofer.de\/details\/elf.mozi",
+            "confidence_level": 75,
+            "is_compromised": false,
+            "first_seen": "2026-09-02 05:50:29 UTC",
+            "last_seen": null,
+            "reference": "https:\/\/honeylabs.net\/lookup\/72.255.59.61",
+            "reporter": "HoneyLabs",
+            "sightings": 1,
+            "tags": [
+                "elf",
+                "IoT",
+                "Mozi"
+            ],
+            "malware_samples": []
+        }
+    ]
+}
