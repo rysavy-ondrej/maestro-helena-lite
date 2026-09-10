@@ -668,3 +668,78 @@ def test_both_loaders_read_the_same_file_and_neither_rejects_the_others_keys():
     assert policy.BUDGET_KEYS.isdisjoint(policy.THRESHOLD_KEYS)
     assert budgets.load(policy.POLICY_FILE).by_emitter
     assert policy.thresholds(budgets.POLICY_FILE).by_source
+
+
+# --- The price table ----------------------------------------------------------
+#
+# `concept/06-technology.md`: "monetary model cost is **derived** and recorded per
+# assessment, not separately capped". `helena.orchestration.AssessmentStore` is
+# what multiplies these numbers by a run's tokens; what is asserted here is that
+# the table is loaded from the policy file and that an unpriced model is a `None`
+# rather than a guess.
+
+PRICED = """
+model_prices_version = "2026-09-10"
+
+[model_prices."vendor/some-model"]
+prompt_per_million = 3.0
+completion_per_million = 15.0
+currency = "USD"
+"""
+
+
+def test_the_committed_policy_file_prices_nothing_and_that_is_the_correct_state():
+    """An empty price table, and it is empty because the price is an external fact.
+
+    `config/policy.toml` argues it: this repository does not know what the
+    endpoint in `.env` charges, and `concept/instruction.md` §0's *check the
+    artifact, not the page* makes an invented rate worse than an absent one. So
+    the version is there — every derived figure records one — and the table is
+    not, and an unpriced model derives `None`.
+    """
+    table = budgets.model_prices()
+    assert table.version
+    assert table.prices == {}
+    assert table.for_model("model-under-test") is None
+
+
+def test_a_configured_price_derives_the_cost_from_the_two_token_counts(tmp_path):
+    """Per million, in the currency the entry states."""
+    table = budgets.model_prices(write(tmp_path, PRICED))
+    price = table.for_model("vendor/some-model")
+    assert price is not None
+    assert price.currency == "USD"
+    spent = Cost(
+        prompt_tokens=1_000_000,
+        completion_tokens=2_000_000,
+        steps=0,
+        live_queries=0,
+        cache_hits=0,
+        retries=0,
+        wall_clock_seconds=1.0,
+    )
+    assert price.of(spent) == pytest.approx(3.0 + 30.0)
+
+
+def test_a_price_table_that_cannot_say_which_revision_it_is_is_refused(tmp_path):
+    """A stored cost records the revision that derived it, or it cannot be checked."""
+    without = PRICED.replace('model_prices_version = "2026-09-10"\n', "")
+    with pytest.raises(budgets.BudgetError) as refused:
+        budgets.model_prices(write(tmp_path, without))
+    assert "model_prices_version" in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    "dropped",
+    ["prompt_per_million = 3.0\n", "completion_per_million = 15.0\n", 'currency = "USD"\n'],
+)
+def test_half_a_price_is_refused_rather_than_defaulted(tmp_path, dropped):
+    """There is no default for a rate and none for a currency.
+
+    Unlike a *missing model*, which is a `None` — the asymmetry is the point.
+    A model the table is silent about is a price nobody knows; an entry stating
+    two of three keys is a price somebody wrote down wrong.
+    """
+    with pytest.raises(budgets.BudgetError) as refused:
+        budgets.model_prices(write(tmp_path, PRICED.replace(dropped, "")))
+    assert "price entry states" in str(refused.value)

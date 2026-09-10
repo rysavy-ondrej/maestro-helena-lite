@@ -77,22 +77,32 @@ from pydantic import BaseModel, ConfigDict
 
 from helena import taxonomy
 from helena.contracts import v1 as contract
-from helena.policy import BUDGET_KEYS, DISCLOSURE_KEYS, POLICY_FILE, THRESHOLD_KEYS
+from helena.policy import (
+    BUDGET_KEYS,
+    DISCLOSURE_KEYS,
+    POLICY_FILE,
+    PRICE_KEYS,
+    THRESHOLD_KEYS,
+)
 
 __all__ = [
     "BUDGET_KEYS",
     "DIMENSIONS",
     "LIVE_QUERIES",
     "POLICY_FILE",
+    "PRICE_KEYS",
     "STEPS",
     "TOKENS",
     "WALL_CLOCK",
     "BudgetError",
     "BudgetExhausted",
     "BudgetPolicy",
+    "ModelPrice",
+    "PriceTable",
     "RunBudget",
     "degraded",
     "load",
+    "model_prices",
 ]
 
 # The four dimensions, spelled exactly as `helena.contracts.v1.Budgets` spells
@@ -636,14 +646,16 @@ def load(path: Path | str = POLICY_FILE) -> BudgetPolicy:
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as malformed:
         raise BudgetError(f"{path} is not readable TOML: {malformed}") from malformed
 
-    unexpected = sorted(set(document) - BUDGET_KEYS - THRESHOLD_KEYS - DISCLOSURE_KEYS)
+    unexpected = sorted(
+        set(document) - BUDGET_KEYS - THRESHOLD_KEYS - DISCLOSURE_KEYS - PRICE_KEYS
+    )
     if unexpected:
         raise BudgetError(
             f"{path} has top-level keys {unexpected}; the budget tables are "
-            f"{sorted(BUDGET_KEYS)}, the threshold half of the file is "
-            f"{sorted(THRESHOLD_KEYS)} and the send policy is "
-            f"{sorted(DISCLOSURE_KEYS)}. A key nothing reads is a policy somebody "
-            f"set and nothing applies."
+            f"{sorted(BUDGET_KEYS)}, the price table is {sorted(PRICE_KEYS)}, the "
+            f"threshold half of the file is {sorted(THRESHOLD_KEYS)} and the send "
+            f"policy is {sorted(DISCLOSURE_KEYS)}. A key nothing reads is a policy "
+            f"somebody set and nothing applies."
         )
 
     rates = _rate_limits(path, document)
@@ -754,6 +766,157 @@ def load(path: Path | str = POLICY_FILE) -> BudgetPolicy:
     return BudgetPolicy(
         by_emitter=by_emitter, rate_limits=rates, retrieval_seconds=retrieval
     )
+
+
+# --- The price table ----------------------------------------------------------
+
+
+class ModelPrice(BaseModel):
+    """What one model costs per million tokens, in one currency. Frozen.
+
+    `concept/06-technology.md`: *"monetary model cost is **derived** and recorded
+    per assessment, not separately capped — capping it would double-count the
+    enforced budget dimensions."* This is the other half of the derivation; the
+    token counts are `helena.contracts.v1.Cost`'s.
+
+    Per **million** tokens because that is the unit every published price list
+    this project would be filled in from uses, and converting at the point of
+    entry is where a factor of a thousand goes wrong silently.
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    prompt_per_million: float
+    completion_per_million: float
+    #: The currency the two numbers are in. Required, because a number with no
+    #: currency is not a cost, and a defaulted one would be a guess about somebody
+    #: else's price list.
+    currency: str
+
+    def model_post_init(self, _context: object) -> None:
+        for name in ("prompt_per_million", "completion_per_million"):
+            value = getattr(self, name)
+            if value < 0:
+                raise ValueError(f"{name} is {value}; a price is not negative")
+        if not self.currency.strip():
+            raise ValueError(
+                "a price with no currency is a number, not a cost"
+            )
+
+    def of(self, cost: contract.Cost) -> float:
+        """What this run's tokens cost, at this price."""
+        return (
+            cost.prompt_tokens * self.prompt_per_million
+            + cost.completion_tokens * self.completion_per_million
+        ) / 1_000_000
+
+
+class PriceTable(BaseModel):
+    """The prices one deployment configured, and the revision they are. Frozen.
+
+    **Empty is the normal state here and is not a failure.** The price of a model
+    is an external fact, this repository does not know the price of the endpoint
+    it is configured against, and `concept/instruction.md` §0 — *check the
+    artifact, not the page* — makes an invented figure worse than an absent one.
+    So an unpriced model derives `None` and the assessment row stores NULL in the
+    three money columns, which says *not priced* and does not say *free*.
+
+    That is the one place this table differs from every other value in
+    `config/policy.toml`, where an absent entry is a startup error. A threshold
+    nobody chose is a silent default that changes a decision; a price nobody knows
+    changes nothing except whether a column can be filled in.
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    #: The revision of `config/policy.toml`'s price table. Recorded beside every
+    #: derived figure, because the file is not frozen and a stored cost whose
+    #: price nobody can recover is a number nobody can check.
+    version: str
+    #: Model identifier -> price. Keyed by what a deployment **asked for**, which
+    #: is what it is billed for — not by the identity the response reported, which
+    #: can move under a stable name between one call and the next.
+    prices: dict[str, ModelPrice]
+
+    def for_model(self, model: str) -> ModelPrice | None:
+        """This model's price, or `None` where the table is silent about it."""
+        return self.prices.get(model)
+
+
+#: What one `[model_prices.<model>]` entry states. All three, or none of it.
+_PRICE_KEYS = {"prompt_per_million", "completion_per_million", "currency"}
+
+
+def model_prices(path: Path | str = POLICY_FILE) -> PriceTable:
+    """Read `[model_prices]`, or fail naming what is wrong with the file.
+
+        model_prices_version = "2026-09-10"
+
+        [model_prices."some-vendor/some-model"]
+        prompt_per_million = 3.0
+        completion_per_million = 15.0
+        currency = "USD"
+
+    An absent `[model_prices]` table is an empty one — see `PriceTable`. An absent
+    `model_prices_version` is not: every derived figure records which revision
+    derived it, and a table that could not say which one it was would produce
+    costs nothing could be replayed against.
+    """
+    path = Path(path)
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError as absent:
+        raise BudgetError(
+            f"no policy file at {path}. The price table is policy like the "
+            f"budgets beside it, so an absent file is a startup failure and never "
+            f"an assumed price."
+        ) from absent
+    try:
+        document = tomllib.loads(raw.decode())
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as malformed:
+        raise BudgetError(f"{path} is not readable TOML: {malformed}") from malformed
+
+    version = document.get("model_prices_version")
+    if not isinstance(version, str) or not version.strip():
+        raise BudgetError(
+            f"{path} declares no model_prices_version. A derived cost records "
+            f"which revision of the table derived it, and one that did not could "
+            f"not be checked against the prices that applied."
+        )
+
+    table = document.get("model_prices", {})
+    if not isinstance(table, dict):
+        raise BudgetError(
+            f"{path}: [model_prices] is {type(table).__name__}, and a price table "
+            f"is a table of model -> price"
+        )
+    prices: dict[str, ModelPrice] = {}
+    for model, entry in table.items():
+        if not isinstance(entry, dict):
+            raise BudgetError(
+                f"{path}: [model_prices.{model!r}] is {type(entry).__name__}; an "
+                f"entry states prompt_per_million, completion_per_million and "
+                f"currency"
+            )
+        stated = set(entry)
+        if stated != _PRICE_KEYS:
+            raise BudgetError(
+                f"{path}: [model_prices.{model!r}] states {sorted(stated)} and a "
+                f"price entry states {sorted(_PRICE_KEYS)}. There is no default "
+                f"for half a price — a rate with no currency, or a currency with "
+                f"one of the two rates, is a figure nobody can check."
+            )
+        try:
+            prices[model] = ModelPrice(
+                prompt_per_million=float(entry["prompt_per_million"]),
+                completion_per_million=float(entry["completion_per_million"]),
+                currency=entry["currency"],
+            )
+        except (TypeError, ValueError) as wrong:
+            raise BudgetError(
+                f"{path}: [model_prices.{model!r}] is not a price: {wrong}"
+            ) from wrong
+    return PriceTable(version=version, prices=prices)
 
 
 def _rate_limits(path: Path, document: dict[str, object]) -> dict[str, int]:

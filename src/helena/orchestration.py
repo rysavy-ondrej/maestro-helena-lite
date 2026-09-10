@@ -49,13 +49,45 @@ already refuses the pairings that would describe another pipeline. This module i
 what sets it: `analyst_request` derives the escalated run's request from the
 triage request it escalated, changing the emitter, the trigger, the prompt
 version and the budgets and **nothing else**. Same context, same version, same
-rendering, so the row task 43 stores says why analysis ran and over what.
+rendering, so the stored row says why analysis ran and over what.
+
+## Agents propose; code writes
+
+`AssessmentStore` is the second half of this module and it is here rather than in
+a module of its own because `concept/03` puts persistence in this component's row:
+*"validates output, persists assessments including typed failures, and replays
+from stored results."* It turns one `Assessment` into the typed rows of
+`sql/migrations/0018_assessments.sql` — one row per **agent run**, citations as
+`(assessment, evidence, role)` join rows, and a typed failure as a row carrying
+the failure and no verdict. Nothing an agent produced reaches a column that the
+frozen contract did not validate, and `store` re-runs
+`helena.contracts.v1.check_exchange` before it writes.
 
 ## What is deliberately not here
 
-- **Persistence.** Nothing durable is written; `Assessment` is the in-process
-  shape task 43 stores. `concept/07` allows working memory to be ephemeral and
-  requires the record to be a typed row, and there is no assessment table yet.
+- **The escalation record.** `Assessment.escalation` is computed on every pass and
+  is not stored. It is recomputable from the projection under the recorded
+  `policy_version`, but its `thresholds_version` is not on the request and is
+  therefore not on any row yet — so a replay can reproduce the routing only for a
+  deployment whose thresholds have not moved. **No remaining task lists it**;
+  task 45 (assessment replay) is the first thing that cannot proceed without it,
+  and what it needs is a typed row per pass with the candidates as join rows,
+  which is a table this increment's step list does not name.
+- **Proposed claims.** `AgentResult.proposed_claims` is written nowhere.
+  `concept/07` makes a claim about infrastructure a proposal that deterministic
+  code validates and writes, and where it is written is the findings table, which
+  does not exist. Its citations are deliberately **not** folded into the
+  assessment's citation rows — see `AssessmentStore._citations`.
+- **The composition rule's decision.** `Analysis.decision` — what the cited
+  evidence permits the verdict to be read as — is not stored either. It is a
+  second record beside the verdict (`concept/07` keeps inference append-only) and
+  it has its own findings list, which is the same shape and the same missing table
+  as the proposals above.
+- **Refused retrievals.** `Analysis.retrievals` holds the turns the tool layer
+  refused, and `helena.contracts.v1.RETRIEVAL_OUTCOMES` has no value for one: a
+  refusal is not a cache hit and not a live query. Turning it into a `Gap` is a
+  decision somebody should make deliberately rather than discover, so the trace
+  table holds `AgentResult.retrieval_trace` and nothing else.
 - **Rendering the request.** `concept/03` puts *"renders agent input"* in this
   component and `helena.rendering` is the versioned half of it, but nothing in
   the tree yet reads a context's feed-snapshot, normalization and aggregation
@@ -69,33 +101,49 @@ rendering, so the row task 43 stores says why analysis ran and over what.
 
 Reads: `helena.policy` (the escalation evaluator and its thresholds),
 `helena.triage` and `helena.analyst` (the two runners), `helena.budgets` (the
-configured budgets), `helena.disclosure` (a ledger per run). Writes: nothing
-durable — the structured log record is this module's, the rest is returned.
+configured budgets and the price table), `helena.disclosure` (a ledger per run).
+Writes: `sql/migrations/0018_assessments.sql`'s six tables, through
+`AssessmentStore`, plus the structured log record.
 
 Maturity: experimental — the routing is exercised by the suite over a real
 capture, a real feed extract and a scripted endpoint, and against the two
-runners. No assessment has been stored, no verdict has been evaluated against a
-label, and nothing consumes what this returns yet.
+runners; the persistence by `tests/test_assessments.py` against a real engine,
+including a run driven end to end through a scripted endpoint. No verdict has
+been evaluated against a label, nothing has been replayed from a stored
+assessment, and nothing consumes what these tables hold yet.
 """
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from helena import agents, analyst, budgets, disclosure, observability, policy, tools, triage
+from helena.contracts import ContractError
 from helena.contracts import v1 as contract
 from helena.rendering import ContextProjection
 
 __all__ = [
+    "ASSESSMENT_TABLE",
+    "CHILD_TABLES",
+    "CITATION_TABLE",
+    "DISCLOSURE_TABLE",
     "ESCALATION_EVALUATED",
     "FINISHED",
+    "GAP_TABLE",
+    "PATTERN_TABLE",
+    "RETRIEVAL_TABLE",
     "ROUTED",
     "Assessment",
+    "AssessmentError",
+    "AssessmentStore",
     "OrchestrationError",
     "analyst_request",
     "assess",
+    "assessment_id",
     "route",
 ]
 
@@ -132,7 +180,7 @@ class Assessment:
     """One context, routed: what escalated, what triage said, and where it went.
 
     The in-process record of one pass through `concept/03`'s pipeline, and the
-    shape task 43 turns into typed rows. Six things, none derivable from another:
+    shape `AssessmentStore` turns into typed rows. Six things, none derivable from another:
 
     | | |
     | --- | --- |
@@ -420,3 +468,409 @@ def _outcome_of(outcome: contract.AgentResult | contract.AgentFailure) -> str:
     if isinstance(outcome, contract.AgentResult):
         return outcome.root
     return outcome.reason
+
+
+# --- Persistence --------------------------------------------------------------
+#
+# `concept/03-architecture.md`: *"Agent output is stored as typed, queryable rows
+# with citation joins, never as an opaque document."* The tables are
+# `sql/migrations/0018_assessments.sql` and its head carries the shape argument;
+# what is here is the code that writes them, because `concept/07-principles.md`
+# makes that a rule rather than a convenience: *"an agent's claim about
+# infrastructure is a **proposal**, validated against a schema and written by
+# deterministic code."* Nothing below takes a value from an agent that the frozen
+# contract did not already validate, and `store` re-runs the request/outcome
+# rules before it writes a row.
+
+#: The six tables one assessment is written into. Named here so the writer, the
+#: delete-before-insert and `tests/test_assessments.py` agree on one spelling.
+ASSESSMENT_TABLE = "helena_analytical_assessment"
+CITATION_TABLE = "helena_analytical_assessment_citation"
+GAP_TABLE = "helena_analytical_assessment_gap"
+PATTERN_TABLE = "helena_analytical_assessment_pattern"
+RETRIEVAL_TABLE = "helena_analytical_assessment_retrieval"
+DISCLOSURE_TABLE = "helena_analytical_assessment_disclosure"
+
+#: The five keyed by `assessment_id` alone, in the order they are emptied. The
+#: assessment row is not among them: it is upserted rather than deleted, so a
+#: re-run never leaves a window in which the context has no assessment at all.
+CHILD_TABLES = (
+    CITATION_TABLE,
+    GAP_TABLE,
+    PATTERN_TABLE,
+    RETRIEVAL_TABLE,
+    DISCLOSURE_TABLE,
+)
+
+
+class AssessmentError(Exception):
+    """A row could not be written, and nothing was written for that run.
+
+    Separate from `OrchestrationError` because the two are different failures at
+    different times: that one refuses a request before any model is called, this
+    one refuses an outcome the store cannot represent honestly — a verdict and a
+    failure on one row, two endpoint hosts in one ledger, a citation to evidence
+    the run was never given.
+    """
+
+
+def assessment_id(
+    *,
+    tenant: str,
+    sensor: str,
+    context_id: str,
+    context_version: str,
+    emitter: str,
+    trigger: str,
+) -> str:
+    """The stable identifier for one agent run over one versioned context.
+
+    A digest over what makes it that run, the same construction
+    `helena.enrichment.evidence_id` uses and for the same reason: `concept/03`
+    says *"an interrupted run is simply re-run, because the versioned context
+    already makes that correct rather than a fallback"*, so a re-run has to mint
+    the identifier the first run did and rewrite its own row. A RisingWave INSERT
+    onto an existing primary key is a silent upsert, so idempotence comes from the
+    key or it does not exist.
+
+    **The outcome is not in it.** Two runs over one context version are the same
+    assessment made twice; a verdict in the digest would leave the first run's row
+    standing beside the second as a second live opinion.
+
+    **Tenant and sensor are in it** for the reason the event id and the evidence
+    id have them: two deployments assessing the same context reference would
+    otherwise mint the same identifier in one store, and the upsert would be a
+    cross-tenant overwrite that looks like it is working.
+    """
+    material = b"".join(
+        _length_prefixed(part)
+        for part in (tenant, sensor, context_id, context_version, emitter, trigger)
+    )
+    return hashlib.sha256(material).hexdigest()
+
+
+def _length_prefixed(value: str) -> bytes:
+    """`value` as its UTF-8 length, a colon, then its UTF-8 bytes.
+
+    A third copy of `helena.normalizer`'s and `helena.enrichment`'s, kept private
+    to each module the way those two are: a digest over concatenated fields with
+    no lengths in it collides whenever two fields can borrow a character from each
+    other, and the three identifiers are three contracts rather than one function.
+    """
+    encoded = value.encode("utf-8")
+    return f"{len(encoded)}:".encode() + encoded
+
+
+class AssessmentStore:
+    """The write side of `concept/03`'s stored assessment. Deterministic code, one store.
+
+    Holds a `psycopg.Connection` and the price table, and nothing else — no
+    buffer, no in-process index, no queue. Every statement addresses
+    `sql/migrations/0018_assessments.sql`'s tables in the same engine the rest of
+    the system uses, which is what "one store" means here.
+
+    `prices` is passed in rather than loaded, for the reason `assess` gives of the
+    thresholds and the budgets: a row whose cost was derived from a price table
+    the deployment did not run under is a figure nobody can check.
+    """
+
+    __slots__ = ("_connection", "_prices")
+
+    def __init__(self, connection: Any, prices: budgets.PriceTable) -> None:
+        if not isinstance(prices, budgets.PriceTable):
+            raise AssessmentError(
+                f"prices is a {type(prices).__name__}; the derived cost and the "
+                f"`model_prices_version` beside it come from one table, so that "
+                f"the figure and the revision that produced it cannot disagree"
+            )
+        self._connection = connection
+        self._prices = prices
+
+    def store(self, assessment: Assessment, *, at: datetime) -> tuple[str, ...]:
+        """Write one routed pass: one row for triage, and one for the analyst if it ran.
+
+        Returns the identifiers written, triage first. `at` is the wall time the
+        assessment is recorded at — passed in rather than read from a clock here,
+        so a test can assert it and so both rows of one pass carry the same value:
+        they are one pass, and two timestamps a fraction apart would invite a
+        reader to order them.
+
+        Raises `AssessmentError` for anything the store cannot represent
+        honestly, **before** it writes anything for that run. Everything a model
+        did is already a typed outcome by the time it arrives here.
+        """
+        written = [self._one(assessment.request, assessment.triage,
+                             assessment.triage_disclosures, at=at)]
+        if assessment.analysis is not None:
+            written.append(
+                self._one(
+                    assessment.analyst_request,
+                    assessment.analysis.outcome,
+                    assessment.analyst_disclosures,
+                    at=at,
+                )
+            )
+        self._connection.execute("FLUSH")
+        return tuple(written)
+
+    def _one(
+        self,
+        request: contract.AgentRequest,
+        outcome: contract.AgentResult | contract.AgentFailure,
+        disclosures: disclosure.Disclosures,
+        *,
+        at: datetime,
+    ) -> str:
+        """One agent run, as one assessment row and its children.
+
+        The children go in first and the assessment row last, so a row that is
+        visible is a row whose citations, gaps and trace are already there. The
+        other order would make a reader's join silently short for as long as the
+        writer took.
+        """
+        # The proposal is validated against the schema before anything is
+        # written, which is `concept/07`'s "agents propose; code validates and
+        # writes" at the point the writing happens. The two objects each
+        # validated themselves at construction; what only this pair can check is
+        # that the outcome answers *this* request — the emitter, the echoed
+        # versions, and every citation resolving to evidence the run was given.
+        try:
+            contract.check_exchange(request, outcome)
+        except ContractError as invalid:
+            raise AssessmentError(
+                f"the outcome does not answer the request it is stored against: "
+                f"{invalid}. A row written anyway would be an assessment citing "
+                f"evidence nobody showed it."
+            ) from invalid
+
+        # Read before anything is written, for the reason `store`'s docstring
+        # gives: a refusal has to leave the store exactly as it was, and this one
+        # is a refusal — two endpoints in one ledger is this project's own bug.
+        endpoint_host = _endpoint_host(disclosures)
+        identifier = assessment_id(
+            tenant=request.tenant,
+            sensor=request.sensor,
+            context_id=request.context_id,
+            context_version=request.context_version,
+            emitter=request.emitter,
+            trigger=request.trigger,
+        )
+        result = outcome if isinstance(outcome, contract.AgentResult) else None
+        failure = outcome if isinstance(outcome, contract.AgentFailure) else None
+        package = None if result is None else result.evidence_package
+
+        for table in CHILD_TABLES:
+            self._connection.execute(
+                f"DELETE FROM {table} WHERE assessment_id = %s", (identifier,)
+            )
+        if result is not None:
+            self._citations(identifier, result)
+            self._retrievals(identifier, result)
+            if package is not None:
+                self._patterns(identifier, package)
+        self._gaps(identifier, outcome)
+        self._disclosures(identifier, disclosures)
+
+        # The nine dimensions under `helena.versions.VersionSet`'s own field
+        # names. A result carries the completed set; a failure carries the eight
+        # known before the call plus an optional reported identity, and
+        # `model_version` stays NULL exactly where nothing answered.
+        recorded = {
+            dimension: getattr(outcome.versions, dimension)
+            for dimension in contract.REQUEST_VERSION_DIMENSIONS
+        }
+        model_version = (
+            result.versions.model_version if result is not None else failure.model_version
+        )
+        price = self._prices.for_model(request.versions.model_requested)
+        cost = outcome.cost
+        self._connection.execute(
+            f"INSERT INTO {ASSESSMENT_TABLE} (assessment_id, tenant, sensor, host, "
+            f"context_id, context_version, window_start, window_end, emitter, "
+            f"triggered_by, assessed_at, classification, confidence, narrative, "
+            f"failure_reason, failure_detail, model_version, model_requested, "
+            f"prompt_version, schema_version, rendering_version, taxonomy_version, "
+            f"enrichment_snapshot_version, normalization_snapshot_version, "
+            f"policy_version, aggregation_version, budget_steps, budget_tokens, "
+            f"budget_wall_clock_seconds, budget_live_queries, prompt_tokens, "
+            f"completion_tokens, steps, live_queries, cache_hits, retries, "
+            f"wall_clock_seconds, model_cost, model_cost_currency, "
+            f"model_prices_version, endpoint_host) "
+            f"VALUES ({', '.join(['%s'] * 41)})",
+            (
+                identifier,
+                request.tenant,
+                request.sensor,
+                request.host,
+                request.context_id,
+                request.context_version,
+                request.window_start,
+                request.window_end,
+                request.emitter,
+                request.trigger,
+                at,
+                None if result is None else result.classification,
+                None if result is None else result.confidence,
+                None if package is None or not package.narrative else package.narrative,
+                None if failure is None else failure.reason,
+                None if failure is None else failure.detail,
+                model_version,
+                request.versions.model_requested,
+                recorded["prompt_version"],
+                recorded["schema_version"],
+                recorded["rendering_version"],
+                recorded["taxonomy_version"],
+                recorded["enrichment_snapshot_version"],
+                recorded["normalization_snapshot_version"],
+                recorded["policy_version"],
+                recorded["aggregation_version"],
+                request.budgets.steps,
+                request.budgets.tokens,
+                request.budgets.wall_clock_seconds,
+                request.budgets.live_queries,
+                cost.prompt_tokens,
+                cost.completion_tokens,
+                cost.steps,
+                cost.live_queries,
+                cost.cache_hits,
+                cost.retries,
+                cost.wall_clock_seconds,
+                None if price is None else price.of(cost),
+                None if price is None else price.currency,
+                None if price is None else self._prices.version,
+                endpoint_host,
+            ),
+        )
+        return identifier
+
+    def _citations(self, identifier: str, result: contract.AgentResult) -> None:
+        """`concept/03`'s join rows: `(assessment, evidence, role)`.
+
+        `result.citations` and not `result.evidence_ids` — the latter includes the
+        citations a `ProposedClaim` carries, and those are a proposal's evidence
+        rather than the assessment's. A proposal is written by the increment that
+        writes findings; folding its citations in here would make the verdict look
+        as though it cited them.
+        """
+        for citation in result.citations:
+            self._connection.execute(
+                f"INSERT INTO {CITATION_TABLE} (assessment_id, evidence_id, role) "
+                f"VALUES (%s, %s, %s)",
+                (identifier, citation.evidence_id, citation.stance),
+            )
+
+    def _gaps(
+        self,
+        identifier: str,
+        outcome: contract.AgentResult | contract.AgentFailure,
+    ) -> None:
+        """The seven kinds, one row each, in the order the outcome recorded them.
+
+        Both outcome kinds carry gaps: `concept/04` makes the gaps list the audit
+        trail that keeps `unknown` falsifiable, and a typed failure may have found
+        one before it fell over.
+        """
+        for ordinal, gap in enumerate(outcome.gaps):
+            self._connection.execute(
+                f"INSERT INTO {GAP_TABLE} (assessment_id, ordinal, kind, detail) "
+                f"VALUES (%s, %s, %s, %s)",
+                (identifier, ordinal, gap.kind, gap.detail),
+            )
+
+    def _patterns(self, identifier: str, package: contract.EvidencePackage) -> None:
+        """The evidence package's patterns, as rows rather than as an array."""
+        for ordinal, pattern in enumerate(package.patterns):
+            self._connection.execute(
+                f"INSERT INTO {PATTERN_TABLE} (assessment_id, ordinal, pattern) "
+                f"VALUES (%s, %s, %s)",
+                (identifier, ordinal, pattern),
+            )
+
+    def _retrievals(self, identifier: str, result: contract.AgentResult) -> None:
+        """The retrieval trace: per result, cache hit or live query, and when.
+
+        The step's `evidence_id` and its typed failure are exclusive on the row
+        because they are exclusive on the step: a query that completed produced an
+        evidence row and one that did not produced a typed error and no taxonomy
+        object.
+        """
+        for ordinal, step in enumerate(result.retrieval_trace):
+            self._connection.execute(
+                f"INSERT INTO {RETRIEVAL_TABLE} (assessment_id, ordinal, source_id, "
+                f"entity_type, entity_value, outcome, retrieved_at, evidence_id, "
+                f"failure_reason, failure_detail) "
+                f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    identifier,
+                    ordinal,
+                    step.source_id,
+                    step.entity_type,
+                    step.entity_value,
+                    step.outcome,
+                    step.retrieved_at,
+                    step.evidence_id,
+                    None if step.failure is None else step.failure.reason,
+                    None if step.failure is None else step.failure.detail,
+                ),
+            )
+
+    def _disclosures(
+        self, identifier: str, disclosures: disclosure.Disclosures
+    ) -> None:
+        """What left this network during the run, in the order it left.
+
+        `concept/07`: *"what was disclosed is recorded on the assessment — source,
+        query, cache hit or live, disclosed-to, and when."* The cache-hit half is
+        the retrieval trace on the same assessment: a row exists here only where
+        something was **sent**, which is what makes the two counts reconcile.
+        """
+        for ordinal, row in enumerate(disclosures.rows):
+            self._connection.execute(
+                f"INSERT INTO {DISCLOSURE_TABLE} (assessment_id, ordinal, channel, "
+                f"source, disclosed_to, query, query_digest, disclosed_at, "
+                f"send_policy_version) "
+                f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    identifier,
+                    ordinal,
+                    row.channel,
+                    row.source,
+                    row.disclosed_to,
+                    row.query,
+                    row.query_digest,
+                    row.disclosed_at,
+                    row.send_policy_version,
+                ),
+            )
+
+
+def _endpoint_host(disclosures: disclosure.Disclosures) -> str | None:
+    """The endpoint the prompt actually went to, off the run's own ledger.
+
+    `concept/07`: *"because endpoints are configurable per agent, cross-wiring is
+    possible, and recording endpoint and model per assessment is what makes it
+    detectable."* Read from the disclosure record rather than from configuration
+    for exactly that reason — configuration is what would be wrong in the case
+    this column exists to catch, and the ledger is the record of where bytes went.
+
+    `None` where no prompt ever left the process, which is a run that ended on the
+    clock or the token budget before its first call. That is a different fact from
+    a run that reached an endpoint and failed, and a configured host written in
+    its place would erase the difference.
+
+    Two hosts in one ledger is this project's own bug — one run has one client —
+    and it is loud, because a row naming one of two endpoints is worse than none.
+    """
+    hosts = {
+        row.disclosed_to
+        for row in disclosures.rows
+        if row.channel == disclosure.MODEL_INFERENCE
+    }
+    if not hosts:
+        return None
+    if len(hosts) > 1:
+        raise AssessmentError(
+            f"the run disclosed prompts to {sorted(hosts)}; one agent run has one "
+            f"endpoint, and a column naming one of two is worse than an empty one"
+        )
+    return hosts.pop()

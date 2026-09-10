@@ -138,6 +138,7 @@ __all__ = [
     "BUDGET_KEYS",
     "DISCLOSURE_KEYS",
     "PORT_SCOPE",
+    "PRICE_KEYS",
     "POLICY_FILE",
     "PolicyError",
     "PolicyVersion",
@@ -176,6 +177,12 @@ POLICY_FILE = PROJECT_ROOT / "config" / "policy.toml"
 THRESHOLD_KEYS = frozenset({"policy_version", "thresholds_version", "thresholds"})
 BUDGET_KEYS = frozenset({"budgets", "rate_limits"})
 DISCLOSURE_KEYS = frozenset({"send_policy", "send_policy_version"})
+#: The fourth table, read by `helena.budgets.model_prices`. It is separate from
+#: `BUDGET_KEYS` because it is not a budget: `concept/06-technology.md` makes
+#: monetary cost **derived and recorded per assessment, not separately capped**,
+#: so nothing enforces these numbers and the only thing that reads them is the
+#: column on a stored assessment.
+PRICE_KEYS = frozenset({"model_prices", "model_prices_version"})
 
 #: The one tier whose independent escalation is conditional on a number.
 #: `concept/02`: Tier A "may establish `malicious` by itself if scope and
@@ -570,14 +577,16 @@ def thresholds(path: Path | str = POLICY_FILE) -> Thresholds:
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as malformed:
         raise PolicyError(f"{path} is not readable TOML: {malformed}") from malformed
 
-    unexpected = sorted(set(document) - THRESHOLD_KEYS - BUDGET_KEYS - DISCLOSURE_KEYS)
+    unexpected = sorted(
+        set(document) - THRESHOLD_KEYS - BUDGET_KEYS - DISCLOSURE_KEYS - PRICE_KEYS
+    )
     if unexpected:
         raise PolicyError(
             f"{path} has top-level keys {unexpected}; this loader reads "
             f"{sorted(THRESHOLD_KEYS)}, `helena.budgets.load` reads "
-            f"{sorted(BUDGET_KEYS)} and `helena.disclosure.send_policy` reads "
-            f"{sorted(DISCLOSURE_KEYS)}. A key nothing reads is a policy somebody "
-            f"set and nothing applies."
+            f"{sorted(BUDGET_KEYS)} and {sorted(PRICE_KEYS)}, and "
+            f"`helena.disclosure.send_policy` reads {sorted(DISCLOSURE_KEYS)}. A "
+            f"key nothing reads is a policy somebody set and nothing applies."
         )
     declared = {
         key: document.get(key) for key in ("policy_version", "thresholds_version")

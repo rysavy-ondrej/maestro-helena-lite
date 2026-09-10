@@ -992,7 +992,7 @@ def test_the_router_holds_no_state_between_assessments():
     """
     module = ast.parse((PACKAGE_ROOT / "orchestration.py").read_text())
     assigned = {
-        target.id: ast.unparse(node.value)
+        target.id: node.value
         for node in module.body
         if isinstance(node, ast.Assign)
         for target in node.targets
@@ -1003,10 +1003,27 @@ def test_the_router_holds_no_state_between_assessments():
         name: value for name, value in assigned.items() if not name.startswith("__")
     }
     assert held, "the module-level constants were not found; has the file moved?"
+    # Checked off the shape of the expression rather than by evaluating it:
+    # `CHILD_TABLES` is a tuple of the table-name constants above it, which is
+    # immutable and is not a literal. What makes something state is that it is a
+    # container that can be mutated or an object that was constructed — a dict, a
+    # list, a set, a comprehension or a call.
+    STATEFUL = (
+        ast.Dict,
+        ast.List,
+        ast.Set,
+        ast.DictComp,
+        ast.ListComp,
+        ast.SetComp,
+        ast.GeneratorExp,
+        ast.Call,
+    )
     for name, value in held.items():
-        assert isinstance(
-            ast.literal_eval(value), (str, int, float, bool, tuple, type(None))
-        ), f"{name} is a mutable module-level object: {value}"
+        for node in ast.walk(value):
+            assert not isinstance(node, STATEFUL), (
+                f"{name} is a mutable or constructed module-level object: "
+                f"{ast.unparse(value)}"
+            )
 
 
 # --- Against a real engine ----------------------------------------------------

@@ -67,6 +67,10 @@ thresholds_version = "2026-09-09"
 # recorded on every disclosure; the section at the foot of this file is what it
 # versions.
 send_policy_version = "2026-09-09"
+# The price table's own version, recorded beside every derived cost. Up here for
+# the same reason `send_policy_version` is: TOML puts a bare key in the last table
+# that was opened.
+model_prices_version = "2026-09-10"
 
 [thresholds]
 # ThreatFox. Tier B in `concept/05-threat-intelligence.md`'s catalogue: "explicit
@@ -143,6 +147,47 @@ wall_clock_seconds = 300.0
 # How much of that wall clock may be spent waiting on providers. Half the run
 # would leave inference on the same footing as retrieval; this is 40 %.
 retrieval_seconds = 120.0
+
+# --- The model price table ----------------------------------------------------
+#
+# What a model costs, per million tokens, so that the monetary cost of a run can
+# be **derived**. `concept/06-technology.md`: "monetary model cost is derived and
+# recorded per assessment, not separately capped — capping it would double-count
+# the enforced budget dimensions." So nothing here is enforced against: the only
+# thing that reads these numbers is `helena.orchestration.AssessmentStore`, which
+# multiplies them by the token counts the run actually spent and writes the
+# result, the currency and `model_prices_version` onto the assessment row.
+#
+# ## It is empty, and an empty table is the correct state for this repository
+#
+# A model's price is an external fact and `concept/instruction.md` §0 is explicit
+# about those: check the artifact, not the page. This project does not know what
+# the endpoint in `.env` charges — `LLM_MODEL` is a deployment's choice and the
+# rate for it is on somebody's price list, not in this tree — so there is no
+# entry, every assessment stores NULL in the three money columns, and NULL means
+# **not priced**. It does not mean free, and reading it as free is the same
+# collapse `concept/instruction.md` §2 forbids between `missing` and `no_match`.
+#
+# This is the one table in this file whose absent entry is not a startup error.
+# The asymmetry is deliberate: a threshold or a budget nobody chose is a silent
+# default that changes what the system DOES, and `helena.policy.thresholds` and
+# `helena.budgets.load` fail loudly rather than supply one. A price nobody knows
+# changes nothing except whether a column can be filled in, and inventing one to
+# fill it would put a fabricated figure in the audit record.
+#
+# An entry states all three keys or none of them:
+#
+#   [model_prices."some-vendor/some-model"]
+#   prompt_per_million = 3.0
+#   completion_per_million = 15.0
+#   currency = "USD"
+#
+# The key is the model **this deployment asked for** — `LLM_MODEL`,
+# `LLM_MODEL_TRIAGE` or `LLM_MODEL_ANALYST` — and not the identity the response
+# reported, because what is billed is what was asked for and the reported identity
+# moves under a stable name. Move `model_prices_version` whenever an entry moves.
+
+[model_prices]
 
 # The rate the **tool layer holds itself to**, per source, in queries per minute.
 #

@@ -110,7 +110,13 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict
 
 from helena.contracts import v1 as contract
-from helena.policy import BUDGET_KEYS, DISCLOSURE_KEYS, POLICY_FILE, THRESHOLD_KEYS
+from helena.policy import (
+    BUDGET_KEYS,
+    DISCLOSURE_KEYS,
+    POLICY_FILE,
+    PRICE_KEYS,
+    THRESHOLD_KEYS,
+)
 
 __all__ = [
     "CHANNELS",
@@ -279,13 +285,16 @@ def send_policy(path: Path | str = POLICY_FILE) -> SendPolicy:
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as malformed:
         raise DisclosureError(f"{path} is not readable TOML: {malformed}") from malformed
 
-    unexpected = sorted(set(document) - DISCLOSURE_KEYS - THRESHOLD_KEYS - BUDGET_KEYS)
+    unexpected = sorted(
+        set(document) - DISCLOSURE_KEYS - THRESHOLD_KEYS - BUDGET_KEYS - PRICE_KEYS
+    )
     if unexpected:
         raise DisclosureError(
             f"{path} has top-level keys {unexpected}; this loader reads "
             f"{sorted(DISCLOSURE_KEYS)}, `helena.policy.thresholds` reads "
             f"{sorted(THRESHOLD_KEYS)} and `helena.budgets.load` reads "
-            f"{sorted(BUDGET_KEYS)}. A key nothing reads is a policy somebody set "
+            f"{sorted(BUDGET_KEYS | PRICE_KEYS)}. A key nothing reads is a policy "
+            f"somebody set "
             f"and nothing applies."
         )
     version = document.get("send_policy_version")

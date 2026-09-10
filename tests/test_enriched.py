@@ -136,7 +136,14 @@ def test_the_enriched_context_is_the_first_analytical_object():
 
     declared = migrations.declarations()
     analytical = [k for k, v in declared.items() if v.layer == "analytical"]
-    assert analytical == [VIEW]
+    assert VIEW in analytical
+    # It is still the only analytical object that reads anything, so the layer
+    # boundary has exactly one crossing to check.
+    # `sql/migrations/0018_assessments.sql` put six more objects in this layer and
+    # every one of them reads nothing: deterministic code writes an assessment,
+    # and the layer is `analytical` because the views that will join those rows to
+    # the context and to the evidence need to read `signal` and `reference` both.
+    assert [name for name in analytical if declared[name].reads] == [VIEW]
     allowed = {k for k, v in declared.items() if v.layer in ("signal", "reference")}
     assert declared[VIEW].reads <= allowed
 
