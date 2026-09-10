@@ -499,7 +499,7 @@
         "Design how the publisher's false-positive list enters — as evidence about evidence, where a claim is never deleted, suppression is explicit policy and a suppressed match is still recorded as having matched",
         "Record the retrieval confound in the source record: for indicators already in the tables the analyst mostly re-confirms what triage saw"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D5 Analyst] Analyst Agent runner with budgeted tool loop and citations",
