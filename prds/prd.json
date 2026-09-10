@@ -566,7 +566,7 @@
         "Write every row from deterministic code, validating agent proposals against the schema first",
         "Add a test that no free-text agent note is persisted as a record anywhere"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D6 Orchestration] Ephemeral in-process state and re-run recovery",
