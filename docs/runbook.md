@@ -561,6 +561,44 @@ The procedure:
    the only line that says so; anything else is a short run, and §7 says which
    number is short.
 
+### Replaying a stored *assessment* is a different command
+
+    uv run scripts/replay_assessment.py <assessment_id>
+    uv run scripts/replay_assessment.py <assessment_id> --rerun
+
+The capture replay above puts records back through ingestion. This one puts one
+**stored assessment** back through the two agents: it reads the row and its child
+rows, validates them against the contract version the row recorded, rebuilds the
+request by re-rendering the recorded context version under the recorded rendering
+version, and — with `--rerun` — asks the recorded prompt again and prints a diff
+across verdict, path, confidence and citations.
+
+| | |
+| --- | --- |
+| without `--rerun` | **calls nothing.** Reads, validates, reconstructs. This is the check that a stored assessment's inputs still rebuild |
+| with `--rerun` | calls the configured **model** endpoint and spends that quota. No provider is queried either way: every lookup resolves from the stored response, and a tool that is not a replay is refused before the model is called |
+
+Three things it will refuse, and each of them is the point rather than a fault:
+
+- the context version the assessment recorded is no longer in the store — there is
+  nothing to render, and rendering the current version would assess a different
+  snapshot;
+- the row records a `schema_version` this tree does not hold — historical schema
+  classes are retained frozen and old rows are never migrated forward;
+- the evidence the assessment cited is not in the rebuilt rendering, so the inputs
+  have moved.
+
+**A difference in the diff is not a failure.** The model is not deterministic; a
+re-run is idempotent in its record, not in its verdict. What would be a failure is
+a reconstruction that could not be validated, and that stops the command before
+anything is called. `docs/decisions/0035-assessment-replay.md` is the long form,
+including the four things a replay does not reconstruct.
+
+The identifier is the one `AssessmentStore.store` returns, and it is also
+
+    SELECT assessment_id FROM helena_analytical_assessment
+     WHERE context_id = %s AND emitter = %s;
+
 ---
 
 ## 9. Reference data: the Public Suffix List
@@ -632,6 +670,9 @@ bug in the derivation.
 | `scripts/migrate.py` refuses with "has changed since it was applied" | an applied migration was edited. §5 — write the next one instead |
 | A view exists but is empty and the data is old | the records never reached the store, or they are not this capture's. §8 |
 | `FAILED: ... a capture file is named <sha256>.jsonl` | `--captures` is not a capture directory. §8 |
+| `FAILED: ... holds no assessment <id>` | that identifier is not in this store, or a later pass superseded the run. §8 |
+| `FAILED: ... does not hold context ... outside the retention boundary` | the context the assessment scored has left the horizon, so its rendering cannot be rebuilt. §8 |
+| `FAILED: no contract version 'vN'` | the assessment records a schema version this tree does not hold. It is not migrated forward; §8 |
 | `FAILED: ... holds no capture <sha256>` | that digest is not in that directory — the file was renamed, or its bytes changed |
 | `FAILED: ... consumed more than once` | the capture was published to the topic twice and drained once. §8 |
 | `INCOMPLETE: N record(s) never came off the topic` | records were lost between the producer and the store. §7, then replay again |
