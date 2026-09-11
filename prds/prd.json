@@ -606,7 +606,7 @@
         "Version the message shape and treat a change as an interface change with a recorded decision",
         "Document the redaction inheritance: the payload contains internal addresses, hostnames and retrieved external text, and any consumer forwarding it off-site inherits the redaction, minimization and disclosure obligations"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D7 Emit] At-least-once emission of every terminal outcome, counted engine-side",

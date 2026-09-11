@@ -1,12 +1,12 @@
 {
-  "currentIteration": 42,
-  "currentTaskIndex": 45,
-  "elapsedTimeSeconds": 671449,
-  "lastUpdateTime": 1789104419834,
+  "currentIteration": 43,
+  "currentTaskIndex": 46,
+  "elapsedTimeSeconds": 676056,
+  "lastUpdateTime": 1789109027269,
   "startTime": 1788432970645,
   "statistics": {
-    "averageDurationMs": 1676440,
-    "completedIterations": 38,
+    "averageDurationMs": 1719381,
+    "completedIterations": 39,
     "failedIterations": 3,
     "iterationTimings": [
       {
@@ -342,12 +342,20 @@
         "startTime": 1789101956856,
         "status": "completed",
         "task": 45
+      },
+      {
+        "durationMs": 3522935,
+        "endTime": 1789109027269,
+        "iteration": 43,
+        "startTime": 1789105504333,
+        "status": "completed",
+        "task": 46
       }
     ],
-    "successRate": 0.9048,
-    "successfulIterations": 38,
-    "totalDurationMs": 70410486,
-    "totalIterations": 42
+    "successRate": 0.907,
+    "successfulIterations": 39,
+    "totalDurationMs": 73933421,
+    "totalIterations": 43
   },
   "status": "running",
   "tasksLandedOutsideRunner": {
@@ -363,5 +371,5 @@
     ],
     "note": "Implemented, verified and merged by sessions launched outside implement.sh, so no runner iteration recorded them. The statistics block counts the runner's own iterations only and deliberately excludes these eight. Their reports were rebuilt from the commit record on 2026-09-06 -- see prds/progress.txt and each report's `reconstructed` field."
   },
-  "totalIterations": 42
+  "totalIterations": 43
 }
