@@ -619,7 +619,7 @@
         "Document the deduplication contract for consumers",
         "Record the output-volume hazard: emitting `normal` means the topic carries the full context volume, intended at prototype scale and needing revisiting at real rates"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D7 Observability] Metrics and reconciliation over the whole pipeline",
