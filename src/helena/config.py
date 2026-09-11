@@ -31,11 +31,12 @@ from pathlib import Path
 from typing import Annotated
 
 from dotenv import dotenv_values
-from pydantic import BaseModel, ConfigDict, PlainSerializer
+from pydantic import BaseModel, ConfigDict, PlainSerializer, model_validator
 
 __all__ = [
     "AGENTS",
     "HELENA_INGEST_TOPIC",
+    "HELENA_OUTPUT_TOPIC",
     "REDACTED",
     "VARIABLES",
     "ConfigurationError",
@@ -94,11 +95,19 @@ KAFKA_BOOTSTRAP_SERVERS = "KAFKA_BOOTSTRAP_SERVERS"
 # one: a deployment reading an empty or misspelled topic waits forever on a
 # topic nobody produces to, which looks identical to a producer that has
 # stopped.
-#
-# The **output** topic is deliberately absent. It enters with the sink that
-# writes to it; a configuration key nothing reads is a key with one value and no
-# way to be wrong (`concept/instruction.md` §1).
 HELENA_INGEST_TOPIC = "HELENA_INGEST_TOPIC"
+
+# The topic assessed contexts leave on. Here now rather than deferred, because
+# `helena.sink.emit` reads it and a key nothing reads is a key with one value and
+# no way to be wrong (`concept/instruction.md` §1).
+#
+# Required and separate from the ingest topic, and both halves of that matter. A
+# default would be a deployment emitting to a topic nobody named; **the same**
+# name as the ingest topic would be worse than either — the pipeline would
+# consume its own output as flow records, quarantine every one of them as
+# unparseable, and look like a sensor sending malformed traffic. `Infrastructure`
+# refuses that at startup, where both names are in hand.
+HELENA_OUTPUT_TOPIC = "HELENA_OUTPUT_TOPIC"
 
 # Every one of these must be present and non-blank, or startup fails naming it.
 REQUIRED_VARIABLES = (
@@ -111,6 +120,7 @@ REQUIRED_VARIABLES = (
     RISINGWAVE_DSN,
     KAFKA_BOOTSTRAP_SERVERS,
     HELENA_INGEST_TOPIC,
+    HELENA_OUTPUT_TOPIC,
 )
 
 # Optional by design: absent means "use the general value". That is the whole of
@@ -209,11 +219,14 @@ class ProviderCredentials(BaseModel):
 
 
 class Infrastructure(BaseModel):
-    """Where the engine and the broker are, and which topic ingress reads.
+    """Where the engine and the broker are, and which topics this deployment uses.
 
-    Addresses and a topic name, no credentials. The topic is here rather than in
-    a section of its own because it is the same kind of fact as the bootstrap
-    address: what this deployment was pointed at.
+    Addresses and two topic names, no credentials. The topics are here rather
+    than in a section of their own because they are the same kind of fact as the
+    bootstrap address: what this deployment was pointed at. Ingress and egress
+    are named separately because they are two different decisions — replacing the
+    broker is one configuration change, and moving the output somewhere else is
+    another.
     """
 
     model_config = _SETTINGS_MODEL_CONFIG
@@ -221,6 +234,30 @@ class Infrastructure(BaseModel):
     risingwave_dsn: str
     kafka_bootstrap_servers: str
     ingest_topic: str
+    output_topic: str
+
+    @model_validator(mode="after")
+    def _ingress_and_egress_are_two_topics(self) -> Infrastructure:
+        """One name for both ends is a deployment consuming its own output.
+
+        Not a style rule: the pipeline would read each emitted message back as a
+        flow record, refuse it as unparseable, and file it in quarantine. Every
+        counter would reconcile and the symptom would read as a sensor sending
+        malformed traffic. It is cheap to make impossible and expensive to
+        diagnose, so it fails here, naming both variables.
+        """
+        if self.ingest_topic == self.output_topic:
+            # `ConfigurationError` rather than a `ValueError` Pydantic would wrap:
+            # this is the same kind of startup failure as a missing variable and
+            # a caller catching one should catch this too. Pydantic propagates an
+            # exception that is not a ValueError unchanged.
+            raise ConfigurationError(
+                f"{HELENA_INGEST_TOPIC} and {HELENA_OUTPUT_TOPIC} are both "
+                f"{self.ingest_topic!r}. A deployment that emits onto its own "
+                f"input consumes every message back as a flow record and "
+                f"quarantines it; give egress a topic of its own."
+            )
+        return self
 
 
 class Settings(BaseModel):
@@ -278,6 +315,7 @@ class Settings(BaseModel):
             "risingwave_dsn": required(RISINGWAVE_DSN),
             "kafka_bootstrap_servers": required(KAFKA_BOOTSTRAP_SERVERS),
             "ingest_topic": required(HELENA_INGEST_TOPIC),
+            "output_topic": required(HELENA_OUTPUT_TOPIC),
         }
         agents = {
             agent: _resolve_agent(agent, values, missing) for agent in AGENTS

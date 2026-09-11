@@ -148,6 +148,7 @@ ENVIRONMENT = {
     "RISINGWAVE_DSN": "postgresql://root@localhost:4566/dev",
     "KAFKA_BOOTSTRAP_SERVERS": "localhost:9092",
     "HELENA_INGEST_TOPIC": "helena.ingest",
+    "HELENA_OUTPUT_TOPIC": "helena.output",
 }
 
 PROJECT_ROOT = __import__("pathlib").Path(__file__).resolve().parent.parent
@@ -405,11 +406,18 @@ def test_the_column_list_is_the_one_the_engine_holds(
     it is one copy in Python — but it is a second copy of the migration, and
     `concept/instruction.md` §2 makes two copies that can drift worse than none.
     """
+    # Scoped to this connection's own schema. `information_schema` is engine-wide
+    # and only one engine runs per machine (docs/runbook.md §2), so a `public`
+    # schema left behind by a dev store or a scratch session holds a second
+    # `helena_analytical_assessment` -- and without the filter this test compares
+    # `ASSESSMENT_COLUMNS` against both of them concatenated and fails for a
+    # reason that has nothing to do with the code under test.
     held = [
         name
         for (name,) in migrated_engine.execute(
             "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name = %s ORDER BY ordinal_position",
+            "WHERE table_schema = current_schema() AND table_name = %s "
+            "ORDER BY ordinal_position",
             (orchestration.ASSESSMENT_TABLE,),
         ).fetchall()
     ]

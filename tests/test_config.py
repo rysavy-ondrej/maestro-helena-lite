@@ -43,6 +43,7 @@ COMPLETE_ENVIRONMENT = {
     "RISINGWAVE_DSN": "postgresql://root@localhost:4566/dev",
     "KAFKA_BOOTSTRAP_SERVERS": "localhost:9092",
     "HELENA_INGEST_TOPIC": "helena.ingest",
+    "HELENA_OUTPUT_TOPIC": "helena.output",
 }
 
 BLANK = ("", " ", "\t", "\n", "  \t\n ")
@@ -200,6 +201,27 @@ def test_the_error_names_every_missing_variable_at_once():
 def test_surrounding_whitespace_is_stripped_from_a_value():
     settings = load(HELENA_TENANT="  tenant-under-test\n")
     assert settings.identity.tenant == "tenant-under-test"
+
+
+def test_ingress_and_egress_may_not_be_the_same_topic():
+    """One name for both ends is a deployment consuming its own output.
+
+    The failure it produces is the expensive kind: every emitted message comes
+    back as a flow record, every one is refused as unparseable and filed in
+    quarantine, all the counters reconcile, and the symptom reads as a sensor
+    sending malformed traffic. It is one comparison to make impossible.
+    """
+    with pytest.raises(ConfigurationError) as raised:
+        load(HELENA_OUTPUT_TOPIC=COMPLETE_ENVIRONMENT["HELENA_INGEST_TOPIC"])
+    message = str(raised.value)
+    assert "HELENA_INGEST_TOPIC" in message
+    assert "HELENA_OUTPUT_TOPIC" in message
+
+
+def test_the_two_topics_are_two_separate_variables():
+    settings = load()
+    assert settings.infrastructure.ingest_topic == "helena.ingest"
+    assert settings.infrastructure.output_topic == "helena.output"
 
 
 # --- No defaults -------------------------------------------------------------

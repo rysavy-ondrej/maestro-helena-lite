@@ -191,6 +191,7 @@ def test_the_producer_and_consumer_take_the_configured_address():
             "RISINGWAVE_DSN": "postgresql://root@127.0.0.1:4566/dev",
             "KAFKA_BOOTSTRAP_SERVERS": "192.0.2.7:9092",
             "HELENA_INGEST_TOPIC": "helena.ingest",
+            "HELENA_OUTPUT_TOPIC": "helena.output",
         },
         env_file=None,
     )

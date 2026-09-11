@@ -101,7 +101,8 @@
 -- is therefore a batch read, this view included -- so emission (task 47) is
 -- deterministic code reading this view and producing over the Kafka wire
 -- protocol, not `CREATE SINK`. The engine-side count `concept/03` asks for
--- (*"a count of rows the sink view produced"*) is a batch `SELECT` over it.
+-- (*"a count of rows the sink view produced"*) is a batch `SELECT` over it, and
+-- is `helena_analytical_emission_counts` in sql/migrations/0020.
 
 
 -- helena_analytical_sink: one row per (terminal run, entity, source).
@@ -124,8 +125,10 @@
 --           helena_analytical_enriched_context, helena_signal_host_context_live,
 --           helena_signal_context_entities
 -- Read by:  src/helena/sink.py -- `SinkStore.project`, which assembles the
---           emitted message out of it, and `SinkStore.pending`, which counts the
---           rows it produced -- and tests/test_sink.py.
+--           emitted message out of it, and `SinkStore.terminal`, which is the
+--           list of messages to emit -- helena_analytical_emission_counts in
+--           sql/migrations/0020, which is the engine-side count of them -- and
+--           tests/test_sink.py.
 CREATE VIEW helena_analytical_sink AS
 SELECT
        -- --- The terminal run: what is emitted, and what identifies it ---------

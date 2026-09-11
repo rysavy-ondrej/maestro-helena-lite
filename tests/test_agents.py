@@ -211,6 +211,7 @@ def environment(**overrides: str) -> dict[str, str]:
         "RISINGWAVE_DSN": "postgresql://root@127.0.0.1:4566/dev",
         "KAFKA_BOOTSTRAP_SERVERS": "127.0.0.1:9092",
         "HELENA_INGEST_TOPIC": "helena.ingest",
+        "HELENA_OUTPUT_TOPIC": "helena.output",
         **overrides,
     }
 

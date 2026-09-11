@@ -56,6 +56,7 @@ ENVIRONMENT = {
     "RISINGWAVE_DSN": "postgresql://root@localhost:4566/dev",
     "KAFKA_BOOTSTRAP_SERVERS": "localhost:9092",
     "HELENA_INGEST_TOPIC": "helena.ingest",
+    "HELENA_OUTPUT_TOPIC": "helena.output",
 }
 FIXTURE_CAPTURES = Path(__file__).resolve().parent / "fixtures" / "captures"
 LAYERS_CAPTURE = "ace6ca33f7bf8aa949f79124abf33fc115cfd0909e9dea798f4762cf87af8318"

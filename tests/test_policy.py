@@ -91,6 +91,7 @@ ENVIRONMENT = {
     "RISINGWAVE_DSN": "postgresql://root@localhost:4566/dev",
     "KAFKA_BOOTSTRAP_SERVERS": "localhost:9092",
     "HELENA_INGEST_TOPIC": "helena.ingest",
+    "HELENA_OUTPUT_TOPIC": "helena.output",
 }
 
 #: Evidence identifiers. Real ones are a 64-character sha256; nothing here

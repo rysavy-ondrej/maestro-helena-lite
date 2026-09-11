@@ -71,25 +71,46 @@ differ from the stored rows for no benefit; what it carries is the statement of
 the obligation, in `docs/decisions/0036-the-output-message.md` §5 and in
 `MESSAGE_CAVEAT`, which is on every message.
 
-## What is deliberately not here
+## Delivery is at-least-once, and the consumer deduplicates
 
-Emission. Nothing in this module produces to a topic, opens a broker connection
-or counts what was delivered — that is task 47, and `helena.broker` is the one
-module that speaks the Kafka wire protocol on either end. `SinkStore.pending`
-counts rows the view produced because *"emission must be observable from the
-engine side"*, and counting the rows is the half that lives in the engine.
+`emit` produces one message per terminal outcome and then reconciles what it
+produced against `SinkStore.pending`. It does **not** remember what it emitted
+last time, so a second run puts the same messages on the topic again — which is
+what `concept/03`'s *"delivery is at-least-once, so consumers deduplicate;
+exactly-once is not attempted"* means in code rather than in prose.
 
-Reads: helena_analytical_sink, helena_analytical_assessment_citation,
-helena_analytical_assessment_gap, helena_analytical_assessment_pattern,
-helena_analytical_assessment_retrieval, helena_analytical_assessment_disclosure.
-Writes: nothing. A sink is egress.
+**The deduplication key is `OutputMessage.assessment_id`**, and it also travels
+in the `helena-assessment-id` header so a consumer can discard a repeat without
+parsing the value. It is a digest over
+`(tenant, sensor, context_id, context_version, emitter, trigger)`
+(`sql/migrations/0018`) with no outcome and no timestamp in it, so two emissions
+of one terminal run carry one key and deduplicating on it is correct rather than
+lossy. `docs/decisions/0037-at-least-once-emission.md` §2 is the contract a
+consumer implements against.
 
-Maturity: experimental — `tests/test_sink.py` executes the view and the read
-against the pinned engine over rows a real `AssessmentStore` wrote, including an
-escalated pass, a typed failure, a context whose version has moved on and a
-deployment with no feed loaded. Nothing has been emitted to a topic and no
-consumer has read one, so the interface is unexercised by anything but this
-project.
+## Emission is not recorded, and the count is of what there is to emit
+
+Nothing here writes a row saying a message was produced. The engine-side number
+`concept/03` asks for is `helena_analytical_emission_counts`
+(`sql/migrations/0020`) — how many messages the store holds, not how many left —
+and that is the number that answers the question the note poses: a consumer that
+sees nothing asks the engine, and gets `0` for *"nothing was assessed"* or `12`
+for *"twelve existed and are gone"*. A ledger of what was emitted would be the
+first step toward the exactly-once this project does not attempt, and would make
+the sink write to the store it exists to read from. ADR-0037 §3.
+
+Reads: helena_analytical_sink, helena_analytical_emission_counts,
+helena_analytical_assessment_citation, helena_analytical_assessment_gap,
+helena_analytical_assessment_pattern, helena_analytical_assessment_retrieval,
+helena_analytical_assessment_disclosure. Writes: the output topic, through
+`helena.broker` and no other way. Nothing durable — a sink is egress.
+
+Maturity: experimental — `tests/test_sink.py` executes the view, the read and the
+emission against the pinned engine and the pinned broker, over rows a real
+`AssessmentStore` wrote: an escalated pass, a typed failure, a context whose
+version has moved on and a deployment with no feed loaded, drained back off the
+topic and compared to what the store projects. No consumer outside this project
+has read one, so the interface is exercised by these tests and by nothing else.
 """
 
 from __future__ import annotations
@@ -102,11 +123,14 @@ import psycopg
 from pydantic import BaseModel, ConfigDict
 
 from helena import orchestration
-from helena.config import IngestionIdentity
+from helena.broker import BrokerProducer
+from helena.config import ConfigurationError, IngestionIdentity
 from helena.versions import VERSION_COLUMNS
 
 __all__ = [
     "CITED_ROLES",
+    "EMISSION_COUNTS_VIEW",
+    "EmissionCounts",
     "EmittedCitation",
     "EmittedDisclosure",
     "EmittedEntity",
@@ -116,12 +140,16 @@ __all__ = [
     "EmittedVersions",
     "MESSAGE_CAVEAT",
     "MESSAGE_VERSION",
+    "OUTPUT_HEADERS",
+    "OUTPUT_HEADER_ASSESSMENT",
+    "OUTPUT_HEADER_MESSAGE_VERSION",
     "OutputMessage",
     "SINK_COLUMNS",
     "SINK_VIEW",
     "SinkError",
     "SinkStore",
     "TriageDecision",
+    "emit",
 ]
 
 #: The shape of the bytes on the topic. See the head: an interface version, not a
@@ -140,6 +168,25 @@ MESSAGE_CAVEAT = (
 
 #: The view this module reads. `sql/migrations/0019_sink.sql`.
 SINK_VIEW = "helena_analytical_sink"
+
+#: The engine-side count of messages there are to emit.
+#: `sql/migrations/0020_emission_counts.sql`.
+EMISSION_COUNTS_VIEW = "helena_analytical_emission_counts"
+
+# What a message says about itself in its headers, so that a consumer can act on
+# both without parsing the value. `helena.broker` carries header bytes and knows
+# nothing of what they mean; this is the only place that does, exactly as
+# `helena.normalizer.INGEST_HEADERS` is on the ingress side.
+#
+# Two headers and no more. The identifier is here because deduplication is the
+# consumer's obligation under an at-least-once contract and making it parse a
+# few hundred kilobytes of JSON to learn a key it may be about to discard is a
+# cost the header removes. The version is here because a consumer that does not
+# understand a shape should be able to route the message aside rather than fail
+# parsing it. Everything else about the message is in the message.
+OUTPUT_HEADER_ASSESSMENT = "helena-assessment-id"
+OUTPUT_HEADER_MESSAGE_VERSION = "helena-message-version"
+OUTPUT_HEADERS = (OUTPUT_HEADER_ASSESSMENT, OUTPUT_HEADER_MESSAGE_VERSION)
 
 #: Every column of `SINK_VIEW`, in the order the migration declares them. Named
 #: once for the reason `helena.orchestration.ASSESSMENT_COLUMNS` is: the read
@@ -602,26 +649,30 @@ class SinkStore:
     identity: IngestionIdentity
 
     def pending(self) -> int:
-        """How many rows the sink view produced for this identity, at message grain.
+        """How many messages this identity has to emit, asked of the engine.
 
         `concept/03`: *"Emission must be observable from the engine side — a count
         of rows the sink view produced — because the broker discards its queue on
         restart, so a message emitted with no consumer attached is simply gone.
         Otherwise 'nothing arrived' cannot be told apart from 'nothing was
-        assessed'."* This is the engine-side half of that; the delivered half is
-        task 47's.
+        assessed'."*
 
-        Counted DISTINCT on the assessment identifier, because the view's grain
-        is one row per (terminal run x entity x source) and the count a consumer
-        would reconcile against is messages.
+        The count lives in `sql/migrations/0020` rather than in this query, so
+        that an operator who is not running the emitter can ask the engine the
+        same question and get the same number (`docs/runbook.md` §12). It is at
+        message grain — the view's own grain is one row per
+        (terminal run x entity x source) — and the reason is in that migration.
+
+        No row for this identity means nothing has been assessed, which is a real
+        answer and not a missing one; the ingest counter reads the same way.
         """
         self.connection.execute("FLUSH")
-        (count,) = self.connection.execute(
-            f"SELECT count(DISTINCT assessment_id) FROM {SINK_VIEW} "
+        rows = self.connection.execute(
+            f"SELECT pending FROM {EMISSION_COUNTS_VIEW} "
             f"WHERE tenant = %s AND sensor = %s",
             (self.identity.tenant, self.identity.sensor),
-        ).fetchone()
-        return int(count)
+        ).fetchall()
+        return int(rows[0][0]) if rows else 0
 
     def terminal(self) -> tuple[str, ...]:
         """Every terminal run this identity holds, oldest first.
@@ -822,6 +873,117 @@ class SinkStore:
                 ) in rows
             )
         return tuple(ledger)
+
+
+@dataclass(frozen=True)
+class EmissionCounts:
+    """One emission run's two numbers: what the store held, and what was produced.
+
+    `concept/instruction.md` §7 requires produced-versus-materialised counts to
+    reconcile, and the two here deliberately come from different sides of the
+    wire:
+
+    - `pending` from `helena_analytical_emission_counts` in the engine, read as
+      the run started;
+    - `emitted` from the run, counting messages the broker acknowledged — `flush`
+      raises for anything it did not, so this is deliveries and not attempts.
+
+    `emitted > pending` is refused rather than reported. It cannot happen in a
+    run that emits `SinkStore.terminal()` once each, so it means a message was
+    produced twice inside one run — which is the producer's half of *"exactly
+    once per terminal outcome"* failing, and the one duplicate the at-least-once
+    contract does not cover, because a consumer deduplicating across runs would
+    not be looking within one.
+
+    `emitted < pending` is reported and not raised, through `complete`. It is a
+    real and ordinary state: a pass that landed after `terminal()` was read is a
+    message this run did not emit and the next one will.
+    """
+
+    pending: int
+    emitted: int
+
+    def __post_init__(self) -> None:
+        if self.emitted > self.pending:
+            raise SinkError(
+                f"{self.emitted} message(s) were emitted and the engine held "
+                f"{self.pending}; a run emits each terminal outcome once, so a "
+                f"number larger than the store's is a message produced twice "
+                f"within one run rather than the repeat a consumer deduplicates"
+            )
+
+    @property
+    def complete(self) -> bool:
+        """Whether every message the store held reached the broker."""
+        return self.emitted == self.pending
+
+
+def emit(
+    *, store: SinkStore, producer: BrokerProducer, topic: str
+) -> EmissionCounts:
+    """Emit every terminal outcome this identity holds. At-least-once.
+
+    `concept/03`: *"Every assessed context is emitted, exactly once per terminal
+    outcome — including `normal` verdicts and typed failures. A context that was
+    escalated is emitted once, carrying the analyst's verdict and the triage
+    decision that led to it. Delivery is at-least-once, so consumers
+    deduplicate; exactly-once is not attempted."*
+
+    The three halves of that sentence are three different mechanisms and only one
+    of them is here. *One per terminal outcome* is `SINK_VIEW`'s own selection,
+    read through `SinkStore.terminal`: the analyst row where a pass escalated and
+    the triage row otherwise, so a `normal`, a `suspicious` and a typed failure
+    are each one message and an escalated context is one message under the
+    analyst's identifier. *Carrying the triage decision* is `project`, which puts
+    it in the `triage` object. What is here is the loop, the topic and the count.
+
+    **`topic` is a parameter and there is no default.** It comes from
+    `HELENA_OUTPUT_TOPIC` through `helena.config`, the way the address does, so
+    that "replacing the broker is a configuration change" stays true of egress as
+    well as ingress. Nothing in this module names a topic.
+
+    **The topic is created before anything is published**, because the pinned
+    broker accepts a publish to a topic that does not exist and then keeps the
+    message in the local queue with no error at all (`helena.broker`,
+    `docs/runbook.md` §3). Every message is then flushed before this returns, so
+    a count it reports is a count the broker acknowledged.
+
+    **Re-running emits the same messages again, and that is the contract.**
+    Nothing is recorded about what was emitted (see the module head), so a second
+    run produces every terminal outcome the store still holds. The consumer
+    discards the repeat by `assessment_id`, which is stable across runs.
+
+    Raises `BrokerError` if the broker refused anything, and `SinkError` if a
+    message could not be assembled — neither is swallowed, because a message that
+    did not go is a record the broker keeps nothing of.
+    """
+    if not topic:
+        raise ConfigurationError(
+            "the output topic is empty. It comes from HELENA_OUTPUT_TOPIC "
+            "through helena.config and has no default; emitting to an unnamed "
+            "topic is a run that publishes nothing and says it published."
+        )
+    # The list first and the count second, and the order is load-bearing. Both
+    # are reads of a store that is still being written to, and a pass that lands
+    # between them has to fall on the side the counters can describe: read this
+    # way it raises `pending`, which `complete` reports as a message this run did
+    # not emit. Read the other way round it would raise `emitted` above `pending`
+    # and be refused as a double-emission that never happened.
+    terminal = store.terminal()
+    pending = store.pending()
+    producer.create_topic(topic)
+    for assessment_id in terminal:
+        message = store.project(assessment_id)
+        producer.publish(
+            topic,
+            message.model_dump_json().encode("utf-8"),
+            {
+                OUTPUT_HEADER_ASSESSMENT: assessment_id.encode("utf-8"),
+                OUTPUT_HEADER_MESSAGE_VERSION: MESSAGE_VERSION.encode("utf-8"),
+            },
+        )
+    producer.flush()
+    return EmissionCounts(pending=pending, emitted=len(terminal))
 
 
 def _one_run(rows: list[dict[str, Any]], identifier: str) -> dict[str, Any]:

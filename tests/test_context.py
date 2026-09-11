@@ -82,6 +82,7 @@ ENVIRONMENT = {
     "RISINGWAVE_DSN": "postgresql://root@localhost:4566/dev",
     "KAFKA_BOOTSTRAP_SERVERS": "localhost:9092",
     "HELENA_INGEST_TOPIC": "helena.ingest",
+    "HELENA_OUTPUT_TOPIC": "helena.output",
 }
 
 # The flatten layer, as sql/migrations/0005_flatten_layer.sql declares it: the

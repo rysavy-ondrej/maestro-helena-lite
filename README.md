@@ -66,7 +66,8 @@ config/agents.toml   how many times one assessment may ask the model, and
 config/policy.toml   the confidence thresholds, the budget values, and the send policy
 tests/               the one pytest suite, mirroring the package
 scripts/             dev-up / dev-down, the pin-and-endpoint check, migrate, replay,
-                     and measure_rendering (what a real capture renders to)
+                     emit (drain the assessed contexts to the output topic), and
+                     measure_rendering (what a real capture renders to)
 demo/                one script that runs ingest and context and prints the result
 docs/decisions/      why each dependency and each layout choice is here
 docs/versions.md     the pinned binaries and their checksums
@@ -415,8 +416,11 @@ does not claim.
 and `tests/test_broker.py` asserts that structurally — along with the absence of
 any HTTP or socket client in it, so the broker's own REST port is unreachable
 rather than merely untouched, and the absence of any address literal anywhere in
-the package. The address and the topic are `KAFKA_BOOTSTRAP_SERVERS` and
-`HELENA_INGEST_TOPIC`, with no defaults.
+the package. The address is `KAFKA_BOOTSTRAP_SERVERS` and the two topics are
+`HELENA_INGEST_TOPIC` and `HELENA_OUTPUT_TOPIC`, with no defaults — and startup
+refuses a configuration where the two topics are the same name, because a
+deployment emitting onto its own input would quarantine every message it produced
+and look like a sensor sending malformed traffic.
 
 One flow record per message, **exactly as the producer wrote it**, with the
 raw-record reference in two message headers. The record cannot carry that

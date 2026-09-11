@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -49,7 +50,8 @@ from helena import (
     sink,
     triage,
 )
-from helena.config import IngestionIdentity, Settings
+from helena.broker import BrokerConsumer, BrokerProducer
+from helena.config import ConfigurationError, IngestionIdentity, Settings
 from helena.contracts.v1 import (
     CACHE_HIT,
     CONTRACT_VERSION,
@@ -107,6 +109,7 @@ ENVIRONMENT = {
     "RISINGWAVE_DSN": "postgresql://root@localhost:4566/dev",
     "KAFKA_BOOTSTRAP_SERVERS": "localhost:9092",
     "HELENA_INGEST_TOPIC": "helena.ingest",
+    "HELENA_OUTPUT_TOPIC": "helena.output",
 }
 
 TRIAGE_PROMPT = triage.version("v1")
@@ -1271,16 +1274,17 @@ def test_every_message_carries_the_redaction_caveat(
     )
 
 
-def test_the_sink_neither_produces_nor_counts_what_was_delivered():
-    """Emission is task 47's, and `helena.broker` is the one Kafka client.
+def test_the_sink_reaches_the_broker_only_through_the_one_kafka_client():
+    """`helena.broker` is the one module that speaks the protocol, on both ends.
 
     `concept/instruction.md` §2: *"the broker is addressed only through the Kafka
     wire protocol"*, and `tests/test_broker.py` asserts there is exactly one
-    module that does. This is the sink's half of that: it reads the engine and
-    builds bytes, and nothing here opens a socket.
+    module that constructs a client. This is the sink's half of that: it reads
+    the engine, builds bytes, and hands them to `helena.broker` — it does not
+    open a socket, and it does not import a client of its own.
     """
     source = (Path(sink.__file__)).read_text()
-    for forbidden in ("confluent_kafka", "KafkaProducer", "import socket", "Producer("):
+    for forbidden in ("confluent_kafka", "KafkaProducer", "import socket"):
         assert forbidden not in source, forbidden
 
 
@@ -1302,3 +1306,356 @@ def test_pending_counts_messages_and_not_the_view_s_rows(
     assert raw > 1
     assert store.pending() == 1
     assert len(store.terminal()) == 1
+
+
+# --- Emission: at-least-once, counted engine-side ----------------------------
+#
+# `concept/03-architecture.md`:
+#
+#   *"Every assessed context is emitted, exactly once per terminal outcome —
+#   including `normal` verdicts and typed failures. A context that was escalated
+#   is emitted once, carrying the analyst's verdict and the triage decision that
+#   led to it. Delivery is at-least-once, so consumers deduplicate; exactly-once
+#   is not attempted."*
+#
+#   *"Emission must be observable from the engine side — a count of rows the sink
+#   view produced — because the broker discards its queue on restart, so a
+#   message emitted with no consumer attached is simply gone and nothing counts
+#   it. Otherwise 'nothing arrived' cannot be told apart from 'nothing was
+#   assessed'."*
+#
+# Every test below runs against the pinned broker and drains the topic to see
+# what actually crossed the wire. A test that asserted on what `emit` returned
+# would be asserting that the loop counted its own iterations.
+
+
+def a_topic() -> str:
+    """A topic of this test's own. The broker keeps topics for the session."""
+    return f"helena-emit-{uuid.uuid4().hex[:12]}"
+
+
+def moved_on(connection: psycopg.Connection, suffix: str) -> Snapshot:
+    """The same context under a version the store does not hold.
+
+    The device `test_a_context_whose_version_has_moved_on_says_so_rather_than
+    _emptying` uses, here for a different reason: an assessment is superseded per
+    `(tenant, sensor, context_id, context_version)` (task 44), so a second pass
+    over the same version replaces the first rather than adding a message. The
+    capture is one host in one window, so a distinct version is how this file
+    gets a second and a third terminal outcome to emit.
+    """
+    snapshot = Snapshot(connection)
+    snapshot.context_version = f"{snapshot.context_version}-{suffix}"
+    return snapshot
+
+
+def drain(bootstrap: str, topic: str) -> list[tuple[dict[str, bytes], bytes]]:
+    """Everything on `topic`, headers and value, in offset order."""
+    with BrokerConsumer(bootstrap) as consumer:
+        return [
+            (dict(message.headers), message.value)
+            for message in consumer.consume(topic, idle_timeout=2.0)
+        ]
+
+
+def emitted(bootstrap: str, topic: str) -> list[sink.OutputMessage]:
+    """The topic, parsed back into messages by the shape that wrote them."""
+    return [
+        sink.OutputMessage.model_validate_json(value)
+        for _, value in drain(bootstrap, topic)
+    ]
+
+
+@pytest.fixture
+def three_outcomes(enriched: psycopg.Connection, matched: str):
+    """One `normal`, one typed failure and one escalated pass. Three messages.
+
+    The three kinds `concept/03` names in one sentence, and the two that are
+    easiest to lose: a `normal` verdict is the one an implementation is tempted
+    to suppress as uninteresting, and a typed failure is the one it is tempted to
+    drop as not being a verdict at all.
+    """
+    shown = Snapshot(enriched).evidence_id(matched)
+    (normal,) = store_pass(
+        enriched,
+        moved_on(enriched, "normal"),
+        shown,
+        matched,
+        # A `normal` triage decision carries verdict and confidence only
+        # (`concept/04`), so it is also the message with the least in it — which
+        # is exactly why it is the one an implementation might drop.
+        triage_outcome=a_result(TRIAGE, shown, classification="normal", citations=()),
+    )
+    (failed,) = store_pass(
+        enriched,
+        moved_on(enriched, "failed"),
+        shown,
+        matched,
+        triage_outcome=a_failure(TRIAGE),
+    )
+    # This one over the context the store really holds, so at least one of the
+    # three messages carries the entity rows and the view is at its real grain.
+    triage_id, analyst_id = store_pass(
+        enriched,
+        Snapshot(enriched),
+        shown,
+        matched,
+        analysis=a_result(ANALYST, shown, classification="malicious.c2"),
+    )
+    return {
+        "normal": normal,
+        "failed": failed,
+        "triage": triage_id,
+        "analyst": analyst_id,
+    }
+
+
+@pytest.mark.integration
+def test_every_terminal_outcome_reaches_the_topic_once(
+    enriched: psycopg.Connection, broker_bootstrap: str, three_outcomes
+):
+    """*"Every assessed context is emitted, exactly once per terminal outcome."*
+
+    Three passes, three messages: a `normal` verdict, a typed failure and an
+    escalated context. The escalated one contributes **one** message and not two,
+    and the identifier it carries is the analyst's — the triage half of that pass
+    is in the payload, not on the topic.
+    """
+    topic = a_topic()
+    store = a_sink(enriched)
+    with BrokerProducer(broker_bootstrap) as producer:
+        counts = sink.emit(store=store, producer=producer, topic=topic)
+
+    assert counts == sink.EmissionCounts(pending=3, emitted=3)
+    assert counts.complete
+
+    messages = emitted(broker_bootstrap, topic)
+    assert [message.assessment_id for message in messages] == list(store.terminal())
+    assert len(messages) == 3
+
+    by_id = {message.assessment_id: message for message in messages}
+    assert by_id[three_outcomes["normal"]].classification == "normal"
+    assert by_id[three_outcomes["normal"]].outcome_kind == "verdict"
+    assert by_id[three_outcomes["failed"]].outcome_kind == "typed_failure"
+    assert by_id[three_outcomes["failed"]].verdict is None
+    assert three_outcomes["analyst"] in by_id
+    assert three_outcomes["triage"] not in by_id, (
+        "the triage half of an escalated pass was emitted as a message of its "
+        "own; concept/03 says such a context is emitted once"
+    )
+
+
+@pytest.mark.integration
+def test_an_escalated_context_carries_the_analyst_verdict_and_the_triage_decision(
+    enriched: psycopg.Connection, broker_bootstrap: str, escalated
+):
+    """*"...carrying the analyst's verdict and the triage decision that led to it."*
+
+    Read off the wire rather than out of `project`, because the point of the
+    sentence is what a consumer receives.
+    """
+    _, _, (triage_id, analyst_id) = escalated
+    topic = a_topic()
+    with BrokerProducer(broker_bootstrap) as producer:
+        sink.emit(store=a_sink(enriched), producer=producer, topic=topic)
+
+    (message,) = emitted(broker_bootstrap, topic)
+    assert message.assessment_id == analyst_id
+    assert message.emitter == ANALYST
+    assert message.classification == "malicious.c2"
+    assert message.triage is not None
+    assert message.triage.assessment_id == triage_id
+    assert message.triage.classification == "suspicious"
+    assert message.trigger == "triage_suspicious"
+
+
+@pytest.mark.integration
+def test_the_bytes_on_the_topic_are_the_message_the_store_projects(
+    enriched: psycopg.Connection, broker_bootstrap: str, escalated
+):
+    """The wire adds nothing and loses nothing.
+
+    The whole of `tests/test_sink.py` above this line is about `project`; this is
+    what makes those tests statements about the topic too. Equality across the
+    whole model, because a field that survived serialization in a shape a
+    consumer cannot read back is the failure this catches.
+    """
+    _, _, (_, analyst_id) = escalated
+    topic = a_topic()
+    store = a_sink(enriched)
+    with BrokerProducer(broker_bootstrap) as producer:
+        sink.emit(store=store, producer=producer, topic=topic)
+
+    (message,) = emitted(broker_bootstrap, topic)
+    assert message == store.project(analyst_id)
+
+
+@pytest.mark.integration
+def test_the_headers_carry_the_deduplication_key_and_the_shape(
+    enriched: psycopg.Connection, broker_bootstrap: str, triage_only
+):
+    """A consumer can deduplicate and route without parsing the value.
+
+    Both headers are also fields of the payload, deliberately: the header is the
+    cheap read and the payload is the record, and a consumer that trusted only
+    the header would be trusting metadata the engine cannot reproduce. So the
+    two are asserted equal here rather than just present.
+    """
+    _, _, (written,) = triage_only
+    topic = a_topic()
+    with BrokerProducer(broker_bootstrap) as producer:
+        sink.emit(store=a_sink(enriched), producer=producer, topic=topic)
+
+    ((headers, value),) = drain(broker_bootstrap, topic)
+    assert sorted(headers) == sorted(sink.OUTPUT_HEADERS)
+    assert headers[sink.OUTPUT_HEADER_ASSESSMENT] == written.encode()
+    assert headers[sink.OUTPUT_HEADER_MESSAGE_VERSION] == sink.MESSAGE_VERSION.encode()
+    message = sink.OutputMessage.model_validate_json(value)
+    assert message.assessment_id == written
+    assert message.message_version == sink.MESSAGE_VERSION
+
+
+@pytest.mark.integration
+def test_emitting_twice_repeats_the_key_rather_than_minting_a_new_one(
+    enriched: psycopg.Connection, broker_bootstrap: str, triage_only
+):
+    """*"Delivery is at-least-once, so consumers deduplicate."*
+
+    The duplicate is the contract, not a defect — so what is under test is that
+    the repeat is **deduplicable**: two emissions of one terminal run carry one
+    identifier, in the header and in the payload, and the bytes are identical.
+    An emitter that stamped a message id, a sequence number or an emission
+    timestamp would satisfy "at-least-once" and leave a consumer with two
+    messages it cannot tell are one.
+    """
+    _, _, (written,) = triage_only
+    topic = a_topic()
+    store = a_sink(enriched)
+    with BrokerProducer(broker_bootstrap) as producer:
+        first = sink.emit(store=store, producer=producer, topic=topic)
+        second = sink.emit(store=store, producer=producer, topic=topic)
+
+    assert first == second == sink.EmissionCounts(pending=1, emitted=1)
+    delivered = drain(broker_bootstrap, topic)
+    assert len(delivered) == 2, "the second run did not emit — this is a drain"
+    assert delivered[0] == delivered[1], (
+        "two emissions of one terminal run produced different bytes, so a "
+        "consumer deduplicating on assessment_id would keep whichever it saw "
+        "last and could not tell the two apart"
+    )
+    assert {
+        headers[sink.OUTPUT_HEADER_ASSESSMENT] for headers, _ in delivered
+    } == {written.encode()}
+
+
+@pytest.mark.integration
+def test_the_engine_still_counts_the_messages_a_drained_topic_no_longer_holds(
+    enriched: psycopg.Connection, broker_bootstrap: str, three_outcomes
+):
+    """*"Otherwise 'nothing arrived' cannot be told apart from 'nothing was assessed'."*
+
+    The measured behaviour of the pinned broker (`tests/test_broker.py`): a topic
+    read once is empty, and one nobody read is empty after a restart. So after a
+    consumer has taken the messages — or failed to attach at all — the broker can
+    no longer say how many there were, and the engine is the only side that can.
+
+    Both readings are asserted, because the count is only useful if it separates
+    them: a deployment that has assessed nothing answers `0`, and one whose
+    messages are gone answers `3`.
+    """
+    store = a_sink(enriched)
+    nothing_assessed = a_sink(enriched, OTHER_TENANT)
+    assert nothing_assessed.pending() == 0
+
+    topic = a_topic()
+    with BrokerProducer(broker_bootstrap) as producer:
+        counts = sink.emit(store=store, producer=producer, topic=topic)
+    assert counts.emitted == 3
+
+    # Drained once. `tests/test_broker.py` is where the pinned broker's
+    # consume-once behaviour is measured — including that the reclaim lands a few
+    # seconds later rather than instantly — so this does not re-measure it; what
+    # matters here is that the number survives on the other side of the wire.
+    assert len(drain(broker_bootstrap, topic)) == 3
+    assert store.pending() == 3
+
+
+@pytest.mark.integration
+def test_another_deployments_assessments_are_not_emitted(
+    enriched: psycopg.Connection, broker_bootstrap: str, triage_only
+):
+    """The identity is on the store, so a sink cannot drain a tenant it is not.
+
+    `concept/instruction.md` §6 — a defaulted tenant is an isolation failure that
+    looks like it is working, and on the egress side it would look like an empty
+    topic or another tenant's traffic on this one.
+    """
+    topic = a_topic()
+    with BrokerProducer(broker_bootstrap) as producer:
+        counts = sink.emit(
+            store=a_sink(enriched, OTHER_TENANT), producer=producer, topic=topic
+        )
+    assert counts == sink.EmissionCounts(pending=0, emitted=0)
+    assert drain(broker_bootstrap, topic) == []
+
+
+@pytest.mark.integration
+def test_the_count_is_the_number_the_engine_answers_with_directly(
+    enriched: psycopg.Connection, three_outcomes
+):
+    """`SinkStore.pending` and plain SQL are one number, not two.
+
+    The count has to be askable by an operator who is not running the emitter —
+    that is what "observable from the engine side" means once the broker has
+    discarded everything — so the arithmetic lives in `sql/migrations/0020` and
+    this asserts the Python read has not grown a second opinion.
+    """
+    (direct,) = enriched.execute(
+        f"SELECT pending FROM {sink.EMISSION_COUNTS_VIEW} "
+        f"WHERE tenant = %s AND sensor = %s",
+        (TENANT, SENSOR),
+    ).fetchone()
+    assert direct == 3
+    assert a_sink(enriched).pending() == 3
+    # And it is messages, not the view's rows: the grain of the sink view is
+    # (terminal run x entity x source) and three messages are many more rows.
+    (rows,) = enriched.execute(
+        f"SELECT count(*) FROM {sink.SINK_VIEW} WHERE tenant = %s", (TENANT,)
+    ).fetchone()
+    assert rows > direct
+
+
+def test_a_run_that_emitted_more_than_the_store_held_is_refused():
+    """The one duplicate at-least-once does not cover: two inside one run.
+
+    A consumer deduplicates across runs by `assessment_id`. It is not looking for
+    a message the same run sent twice, and a loop that did that would be
+    inflating the topic with no counter noticing.
+    """
+    with pytest.raises(sink.SinkError) as raised:
+        sink.EmissionCounts(pending=2, emitted=3)
+    assert "produced twice" in str(raised.value)
+
+
+def test_a_run_that_emitted_fewer_is_incomplete_and_not_an_error():
+    """A pass that landed mid-drain is the next run's message, not a failure."""
+    counts = sink.EmissionCounts(pending=3, emitted=2)
+    assert counts.complete is False
+
+
+def test_emission_has_no_topic_to_fall_back_on(migrated_engine: psycopg.Connection):
+    """The topic is configuration, the way the address is.
+
+    `tests/test_broker.py` asserts that no module in the package holds a broker
+    address. This is the same rule one level up: a topic name compiled into the
+    emitter would be a default, and there are no defaults — so an unnamed topic
+    is a startup-shaped refusal naming the variable, rather than a run that
+    publishes into the void and reports success.
+
+    The producer is `None` here on purpose: the refusal has to come before
+    anything is produced, so a test that had to supply a working broker to reach
+    it would be testing a different order of events.
+    """
+    with pytest.raises(ConfigurationError) as raised:
+        sink.emit(store=a_sink(migrated_engine), producer=None, topic="")
+    assert "HELENA_OUTPUT_TOPIC" in str(raised.value)

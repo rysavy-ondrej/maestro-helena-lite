@@ -46,6 +46,7 @@ ENVIRONMENT = {
     "RISINGWAVE_DSN": "postgresql://root@localhost:4566/dev",
     "KAFKA_BOOTSTRAP_SERVERS": "localhost:9092",
     "HELENA_INGEST_TOPIC": "helena.ingest",
+    "HELENA_OUTPUT_TOPIC": "helena.output",
 }
 VIEW = "helena_analytical_enriched_context"
 
@@ -143,9 +144,12 @@ def test_the_enriched_context_is_the_first_analytical_object():
     # context and to the evidence need to read `signal` and `reference` both.
     # `sql/migrations/0019_sink.sql` is the second reader, and the first object
     # anywhere to read its own layer -- it joins the assessment rows to this view.
+    # `sql/migrations/0020_emission_counts.sql` is the third, and it reads nothing
+    # but the sink: the engine-side count of messages there are to emit.
     assert [name for name in analytical if declared[name].reads] == [
         VIEW,
         "helena_analytical_sink",
+        "helena_analytical_emission_counts",
     ]
     # This view is still the one that crosses UPWARD, and it still reads nothing
     # above the signal layer.

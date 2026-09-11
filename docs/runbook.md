@@ -348,9 +348,11 @@ The same holds for a store migrated before `0010_entity_value_null_guard.sql`,
 which retrofitted `Superseded by:` into the seven definitions it replaces, in
 0007, 0008 and 0009, and for one migrated before `0019_sink.sql`, which
 retrofitted `Read by:` into the five definitions the sink view reads — in 0009,
-0010, 0015 and 0018 (twice). There is no in-place repair short of writing the new
-checksums into the ledger by hand, which is the same act with the evidence
-removed.
+0010, 0015 and 0018 (twice). `0020_emission_counts.sql` adds one more, into 0019
+itself, for the same reason: the emission counter reads the sink view, and every
+relation that is read has to name its reader. There is no in-place repair short
+of writing the new checksums into the ledger by hand, which is the same act with
+the evidence removed.
 
 **`Read by:` is the second standing cost of the same kind, and it has the same
 justification as `Superseded by:`.**
@@ -695,10 +697,9 @@ bug in the derivation.
 
 ## 11. Egress: what the output topic carries, and what you inherit by forwarding it
 
-Nothing emits yet — the sink is `src/helena/sink.py` plus
-`sql/migrations/0019_sink.sql`, and the producer is not built. This section is
-here for whoever wires the first consumer, because the property it describes is a
-property of the **payload** and not of the deployment.
+`uv run scripts/emit.py` is what emits — see §12 for running it. This section is
+about what the bytes contain, because the property it describes is a property of
+the **payload** and not of the deployment.
 
 **The message is unredacted and no redaction is planned in the sink.**
 `concept/03-architecture.md`, "Trust and egress boundaries", 2.: the sink writes
@@ -729,3 +730,94 @@ Two operational consequences:
 `docs/decisions/0036-the-output-message.md` §5 has the argument, and §7 the rule
 for changing the shape: a change to the field set, a field's meaning or a field's
 type bumps `helena.sink.MESSAGE_VERSION` and comes with a decision record.
+
+---
+
+## 12. Emitting: draining the store to the output topic, and counting it
+
+### Running it
+
+```bash
+uv run scripts/emit.py --count      # ask the engine; produce nothing
+uv run scripts/emit.py              # drain every terminal outcome to the topic
+```
+
+There are no flags for the topic or the broker. Both come from configuration —
+`HELENA_OUTPUT_TOPIC` and `KAFKA_BOOTSTRAP_SERVERS` — because a topic typed on a
+command line is a topic that can differ between two runs of the same deployment.
+`HELENA_OUTPUT_TOPIC` **may not be the same name as `HELENA_INGEST_TOPIC`**;
+startup refuses that, and §12.3 below says what it would otherwise look like.
+
+The exit status is 0 only when every message the store held reached the broker.
+
+### It is a drain, not a stream, and it repeats
+
+`scripts/emit.py` emits every terminal outcome the store holds and returns.
+**It keeps no cursor**, so running it twice puts the same messages on the topic
+twice. That is the contract rather than a defect — `concept/03-architecture.md`:
+*"delivery is at-least-once, so consumers deduplicate; exactly-once is not
+attempted"* — and the consumer discards the repeat by `assessment_id`, which is
+identical across runs, in the payload and in the `helena-assessment-id` header.
+`docs/decisions/0037-at-least-once-emission.md` §2 is the contract to hand a
+consumer.
+
+Two operational consequences:
+
+- **there is no continuous emitter.** Nothing runs on a schedule; a message
+  reaches the topic when somebody runs the drain;
+- **the topic carries the full context volume.** `normal` verdicts are emitted
+  too, by design, and one message over the ten-record layers capture measures
+  36 994 bytes. ADR-0037 §4 has the hazard and what would have to be measured
+  before changing it.
+
+### 12.1 "The consumer sees nothing"
+
+Ask the engine. The broker is memory-first and consume-once — a topic read once
+is empty and a topic nobody read is empty after a restart (§3) — so once the
+messages are gone, the engine is the only side that still knows there were any.
+
+```bash
+uv run scripts/emit.py --count
+```
+
+or the same number in plain SQL, for an operator who is not running the emitter:
+
+```sql
+SELECT * FROM helena_analytical_emission_counts;
+```
+
+| What it says | What happened |
+| --- | --- |
+| no row, or `pending = 0` | **Nothing was assessed.** Look upstream — ingest (§7), the context views, the orchestrator. Nothing was ever emitted because there was nothing to emit |
+| `pending = N`, N > 0 | **N messages existed.** If none arrived, they were emitted with no consumer attached, or the consumer read them and the broker reclaimed them. They are gone; the assessments are not — they are still rows, and another drain re-emits them |
+
+The count is at **message** grain, one per terminal outcome. `helena_analytical_sink`
+itself is one row per (terminal run × entity × source) — 41 rows for one message
+over the layers capture — so counting that view directly answers a different
+question.
+
+### 12.2 "It emitted fewer than the engine holds"
+
+```
+emitted 7 of 9 message(s) to helena.output
+2 message(s) were assessed after this run read its list and were not emitted; run it again
+```
+
+Ordinary, and it says so: a pass that landed while the drain was in flight is the
+next run's message. The drain reads its list first and the count second precisely
+so that this case shows up as a shortfall to re-run rather than as an error.
+
+`emitted` larger than `pending` is different and is refused — it would mean one
+run produced a message twice, which is the one duplicate at-least-once does not
+cover, because a consumer deduplicating across runs is not looking for it.
+
+### 12.3 The failure that looks like something else
+
+If `HELENA_OUTPUT_TOPIC` and `HELENA_INGEST_TOPIC` were ever the same name, the
+pipeline would consume every message it emitted back as a flow record, fail to
+parse it, and file it in quarantine (§6) — with every counter reconciling. The
+symptom would read as *a sensor sending malformed traffic*, which is a real thing
+that happens, so the diagnosis would go to the wrong place entirely.
+`helena.config` refuses that configuration at startup, naming both variables. If
+you see quarantine filling with records that look like assessments, check those
+two variables first.
