@@ -232,9 +232,9 @@ SELECT f.event_id FROM probe_flatten f JOIN probe_events e USING (event_id);
     )
     assert migrations.layering_violations(declared) == [
         "probe_analytical (analytical) reads probe_events (source); the "
-        "analytical layer may read reference, signal",
+        "analytical layer may read analytical, reference, signal",
         "probe_analytical (analytical) reads probe_flatten (flatten); the "
-        "analytical layer may read reference, signal",
+        "analytical layer may read analytical, reference, signal",
     ]
 
 
@@ -770,7 +770,14 @@ def test_the_layer_vocabulary_is_what_the_concept_note_names():
     row the invariant is about.
     """
     assert set(migrations.MAY_READ) == set(migrations.LAYERS)
-    assert migrations.MAY_READ["analytical"] == frozenset({"signal", "reference"})
+    # `analytical` reads its own layer as of `sql/migrations/0019` — the sink
+    # view joins the assessment rows to the enriched context and both are
+    # analytical. The invariant is about the direction BETWEEN layers and is
+    # unchanged: the test below still refuses an analytical view that reaches the
+    # flatten layer or the source. `docs/decisions/0036-the-output-message.md` §3.
+    assert migrations.MAY_READ["analytical"] == frozenset(
+        {"analytical", "signal", "reference"}
+    )
     assert migrations.MAY_READ["flatten"] == frozenset({"source"})
 
 

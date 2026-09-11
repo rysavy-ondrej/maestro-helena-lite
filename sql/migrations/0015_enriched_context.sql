@@ -201,7 +201,9 @@ GROUP BY c.context_id, c.tenant, c.sensor, c.host, f.dst_address, f.dst_port;
 --           helena_reference_feed_snapshot_validity,
 --           helena_reference_feed_attempt_validity
 -- Read by:  src/helena/rendering/__init__.py -- the triage rendering, which is
---           the reader this view was built for -- tests/test_enriched.py and
+--           the reader this view was built for -- helena_analytical_sink
+--           (sql/migrations/0019), which carries these rows out to the output
+--           topic with the four statuses intact, tests/test_enriched.py and
 --           tests/test_acceptance_enrichment.py.
 --
 -- **What the rendering does NOT take from here is the entity list.** The source

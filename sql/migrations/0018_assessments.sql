@@ -96,7 +96,9 @@
 -- Object:   TABLE. Agent output written by code; there is nothing below it to
 --           derive it from.
 -- Reads:    nothing.
--- Read by:  src/helena/orchestration.py (the writer) and
+-- Read by:  src/helena/orchestration.py (the writer),
+--           helena_analytical_sink (sql/migrations/0019, which selects the
+--           terminal run of a pass and the triage decision beside it) and
 --           tests/test_assessments.py.
 CREATE TABLE IF NOT EXISTS helena_analytical_assessment (
     -- sha256 over identity, context reference, context version, emitter and
@@ -198,7 +200,9 @@ CREATE TABLE IF NOT EXISTS helena_analytical_assessment (
 -- Layer:    analytical. The join `concept/03` asks for by name.
 -- Object:   TABLE. Written by code from `AgentResult.citations`.
 -- Reads:    nothing.
--- Read by:  src/helena/orchestration.py and tests/test_assessments.py.
+-- Read by:  src/helena/orchestration.py, helena_analytical_sink
+--           (sql/migrations/0019, for `cited_as`) and
+--           tests/test_assessments.py.
 --
 -- The primary key is `(assessment_id, evidence_id)` and not all three columns:
 -- `helena.contracts.v1.AgentResult` already refuses a result that cites one

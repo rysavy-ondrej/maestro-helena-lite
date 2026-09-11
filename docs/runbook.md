@@ -346,9 +346,20 @@ A store that has had the migrations applied before task 17 (which retrofitted th
 declaration comments into 0001–0004 and 0008) has to be dropped and re-migrated.
 The same holds for a store migrated before `0010_entity_value_null_guard.sql`,
 which retrofitted `Superseded by:` into the seven definitions it replaces, in
-0007, 0008 and 0009. There is no in-place repair short of writing the new
+0007, 0008 and 0009, and for one migrated before `0019_sink.sql`, which
+retrofitted `Read by:` into the five definitions the sink view reads — in 0009,
+0010, 0015 and 0018 (twice). There is no in-place repair short of writing the new
 checksums into the ledger by hand, which is the same act with the evidence
 removed.
+
+**`Read by:` is the second standing cost of the same kind, and it has the same
+justification as `Superseded by:`.**
+`tests/test_view_layering.py::test_every_relation_that_reads_an_object_is_named_in_its_read_by`
+fails until a new reader is named in the file that defines what it reads, so
+adding a view is an edit to the files above it. That is deliberate: the question
+"what would break if I changed this view?" is answered in the file a person
+already has open, rather than by a grep that misses the reader written last
+week.
 
 **This is the standing cost of `Superseded by:`, and it is deliberate.** A
 migration that drops and recreates an object has to go back and mark the
@@ -679,3 +690,42 @@ bug in the derivation.
 | `helena_ingest_quarantine` is filling up | the producer drifted, or the wrong `HELENA_INPUT_FORMAT` is set. §6 — the `reason` column tells you which |
 | `list_not_loaded` on every domain row | the Public Suffix List was never loaded. §9 |
 | `load_public_suffix_list.py` prints `failed: ... fetch_failed` | no route to the publisher, or a proxy. The previous snapshot is still in place; §9 |
+
+---
+
+## 11. Egress: what the output topic carries, and what you inherit by forwarding it
+
+Nothing emits yet — the sink is `src/helena/sink.py` plus
+`sql/migrations/0019_sink.sql`, and the producer is not built. This section is
+here for whoever wires the first consumer, because the property it describes is a
+property of the **payload** and not of the deployment.
+
+**The message is unredacted and no redaction is planned in the sink.**
+`concept/03-architecture.md`, "Trust and egress boundaries", 2.: the sink writes
+to the *local* broker, so no gate is crossed — but the payload contains
+
+| Field | What it is |
+| --- | --- |
+| `host` | an internal address: the monitored host |
+| `entities[].entity_value` | addresses contacted, names resolved, URLs, certificate fingerprints |
+| `entities[].evidence[].native_evidence` | the publisher's record, verbatim — retrieved external text |
+| `disclosures[].query` | which indicators this network told an external provider about, and which model endpoint it prompted |
+
+**Any consumer that forwards a message off-site inherits the redaction,
+minimization and disclosure obligations, and the pipeline cannot enforce that.**
+Every message carries `helena.sink.MESSAGE_CAVEAT` in its `caveat` field so the
+statement travels with the bytes, but a caveat is not a control.
+
+Two operational consequences:
+
+- a SIEM forwarder, a cloud connector or a hosted dashboard on this topic is an
+  egress decision, not a configuration detail — `concept/instruction.md` §3 makes
+  a second egress channel something to stop and ask about;
+- the topic is **egress, not storage**. Nothing in a message is recoverable only
+  from it (`tests/test_sink.py` executes that), so a consumer that lost a message
+  can read the assessment back out of the engine; and a consumer that retained
+  one has made a second copy of internal addresses outside the store.
+
+`docs/decisions/0036-the-output-message.md` §5 has the argument, and §7 the rule
+for changing the shape: a change to the field set, a field's meaning or a field's
+type bumps `helena.sink.MESSAGE_VERSION` and comes with a decision record.

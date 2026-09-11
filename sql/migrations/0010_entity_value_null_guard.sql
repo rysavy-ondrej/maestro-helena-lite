@@ -288,7 +288,10 @@ JOIN (
 --           helena_signal_domain_suffix_candidates and
 --           helena_signal_context_domains (the registrable-domain derivation),
 --           helena_analytical_enriched_context (sql/migrations/0015, the join
---           this exists for), and tests/test_context.py. The triage rendering
+--           this exists for), helena_analytical_sink (sql/migrations/0019 --
+--           the emitted message takes its entity list from here rather than
+--           from the enriched context, for the reason that file's head gives),
+--           and tests/test_context.py. The triage rendering
 --           needs per-domain and per-address records rather than arrays, which
 --           is the other half of why these rows are shaped this way.
 --

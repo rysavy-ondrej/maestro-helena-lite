@@ -221,7 +221,10 @@ WHERE window_end > now() - INTERVAL '24 hours';
 --           helena_frozen_context, src/helena/rendering/__init__.py, which reads
 --           the context's version and its bidirectional counters for the triage
 --           rendering and refuses to render a context this view no longer shows,
---           and tests/test_context.py.
+--           helena_analytical_sink (sql/migrations/0019), which joins an
+--           assessment to the context AT THE VERSION IT RECORDED and reports
+--           `context_resolved = FALSE` when this view no longer shows it, and
+--           tests/test_context.py.
 CREATE VIEW helena_signal_host_context_live AS
 SELECT c.context_id,
        encode(

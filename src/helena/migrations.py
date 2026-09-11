@@ -388,13 +388,22 @@ LAYERS = ("operational", "source", "reference", "flatten", "signal", "analytical
 # invariant in `concept/instruction.md` §2 and `concept/03-architecture.md`.
 # `flatten` reading only `source` is the same rule from the bottom: a flatten
 # view that read another one would make the layer a stack of its own.
+#
+# `analytical` reads `analytical` for the same reason `signal` reads `signal` and
+# `reference` reads `reference`: the layering rule is about the DIRECTION between
+# layers, and a layer with more than one object in it needs its objects to be
+# able to compose. It was absent until 0019 because the analytical layer had one
+# view in it. The invariant is unchanged and still checked -- an analytical view
+# that reaches past the signal layer to the flatten layer or the source is still
+# a violation, and `tests/test_view_layering.py` still executes that case.
+# `docs/decisions/0036-the-output-message.md` §3 records the change.
 MAY_READ: Mapping[str, frozenset[str]] = {
     "operational": frozenset(),
     "source": frozenset({"source"}),
     "reference": frozenset({"reference"}),
     "flatten": frozenset({"source"}),
     "signal": frozenset({"flatten", "signal", "reference"}),
-    "analytical": frozenset({"signal", "reference"}),
+    "analytical": frozenset({"analytical", "signal", "reference"}),
 }
 
 # What the engine reports for each, in `information_schema.tables.table_type`.

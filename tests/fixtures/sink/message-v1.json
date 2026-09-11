@@ -1,0 +1,910 @@
+{
+  "$defs": {
+    "EmittedCitation": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_id": {
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "role"
+      ],
+      "title": "EmittedCitation",
+      "type": "object"
+    },
+    "EmittedDisclosure": {
+      "additionalProperties": false,
+      "properties": {
+        "channel": {
+          "title": "Channel",
+          "type": "string"
+        },
+        "disclosed_at": {
+          "format": "date-time",
+          "title": "Disclosed At",
+          "type": "string"
+        },
+        "disclosed_to": {
+          "title": "Disclosed To",
+          "type": "string"
+        },
+        "emitter": {
+          "title": "Emitter",
+          "type": "string"
+        },
+        "query": {
+          "title": "Query",
+          "type": "string"
+        },
+        "query_digest": {
+          "title": "Query Digest",
+          "type": "string"
+        },
+        "send_policy_version": {
+          "title": "Send Policy Version",
+          "type": "string"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "emitter",
+        "channel",
+        "source",
+        "disclosed_to",
+        "query",
+        "query_digest",
+        "disclosed_at",
+        "send_policy_version"
+      ],
+      "title": "EmittedDisclosure",
+      "type": "object"
+    },
+    "EmittedEntity": {
+      "additionalProperties": false,
+      "properties": {
+        "entity_type": {
+          "title": "Entity Type",
+          "type": "string"
+        },
+        "entity_value": {
+          "title": "Entity Value",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EmittedEvidence"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "observed_as_flow_destination": {
+          "title": "Observed As Flow Destination",
+          "type": "boolean"
+        },
+        "observed_bytes_received": {
+          "title": "Observed Bytes Received",
+          "type": "integer"
+        },
+        "observed_bytes_sent": {
+          "title": "Observed Bytes Sent",
+          "type": "integer"
+        },
+        "observed_flow_count": {
+          "title": "Observed Flow Count",
+          "type": "integer"
+        },
+        "observed_in_dns_query": {
+          "title": "Observed In Dns Query",
+          "type": "boolean"
+        },
+        "observed_in_dns_response": {
+          "title": "Observed In Dns Response",
+          "type": "boolean"
+        },
+        "observed_in_http": {
+          "title": "Observed In Http",
+          "type": "boolean"
+        },
+        "observed_in_tls": {
+          "title": "Observed In Tls",
+          "type": "boolean"
+        },
+        "observed_packets_received": {
+          "title": "Observed Packets Received",
+          "type": "integer"
+        },
+        "observed_packets_sent": {
+          "title": "Observed Packets Sent",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "entity_type",
+        "entity_value",
+        "observed_as_flow_destination",
+        "observed_in_dns_query",
+        "observed_in_dns_response",
+        "observed_in_tls",
+        "observed_in_http",
+        "observed_flow_count",
+        "observed_bytes_sent",
+        "observed_bytes_received",
+        "observed_packets_sent",
+        "observed_packets_received",
+        "evidence"
+      ],
+      "title": "EmittedEntity",
+      "type": "object"
+    },
+    "EmittedEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "cited_as": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Cited As"
+        },
+        "classification": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Classification"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Confidence"
+        },
+        "evidence_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Evidence Id"
+        },
+        "evidence_tier": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Evidence Tier"
+        },
+        "first_seen": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "First Seen"
+        },
+        "last_seen": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Last Seen"
+        },
+        "native_evidence": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Native Evidence"
+        },
+        "port_matched": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Port Matched"
+        },
+        "scope_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Scope Type"
+        },
+        "scope_value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Scope Value"
+        },
+        "snapshot_loaded_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Snapshot Loaded At"
+        },
+        "snapshot_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Snapshot Version"
+        },
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        },
+        "source_tier": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Tier"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "taxonomy_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Taxonomy Version"
+        }
+      },
+      "required": [
+        "source_id",
+        "status",
+        "classification",
+        "evidence_id",
+        "source_tier",
+        "evidence_tier",
+        "snapshot_version",
+        "snapshot_loaded_at",
+        "taxonomy_version",
+        "confidence",
+        "scope_type",
+        "scope_value",
+        "first_seen",
+        "last_seen",
+        "native_evidence",
+        "port_matched",
+        "cited_as"
+      ],
+      "title": "EmittedEvidence",
+      "type": "object"
+    },
+    "EmittedGap": {
+      "additionalProperties": false,
+      "properties": {
+        "detail": {
+          "title": "Detail",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "detail"
+      ],
+      "title": "EmittedGap",
+      "type": "object"
+    },
+    "EmittedRetrieval": {
+      "additionalProperties": false,
+      "properties": {
+        "emitter": {
+          "title": "Emitter",
+          "type": "string"
+        },
+        "entity_type": {
+          "title": "Entity Type",
+          "type": "string"
+        },
+        "entity_value": {
+          "title": "Entity Value",
+          "type": "string"
+        },
+        "evidence_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Evidence Id"
+        },
+        "failure_detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Failure Detail"
+        },
+        "failure_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Failure Reason"
+        },
+        "outcome": {
+          "title": "Outcome",
+          "type": "string"
+        },
+        "retrieved_at": {
+          "format": "date-time",
+          "title": "Retrieved At",
+          "type": "string"
+        },
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "emitter",
+        "source_id",
+        "entity_type",
+        "entity_value",
+        "outcome",
+        "retrieved_at",
+        "evidence_id",
+        "failure_reason",
+        "failure_detail"
+      ],
+      "title": "EmittedRetrieval",
+      "type": "object"
+    },
+    "EmittedVersions": {
+      "additionalProperties": false,
+      "properties": {
+        "aggregation_version": {
+          "title": "Aggregation Version",
+          "type": "string"
+        },
+        "enrichment_snapshot_version": {
+          "title": "Enrichment Snapshot Version",
+          "type": "string"
+        },
+        "model_requested": {
+          "title": "Model Requested",
+          "type": "string"
+        },
+        "model_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Model Version"
+        },
+        "normalization_snapshot_version": {
+          "title": "Normalization Snapshot Version",
+          "type": "string"
+        },
+        "policy_version": {
+          "title": "Policy Version",
+          "type": "string"
+        },
+        "prompt_version": {
+          "title": "Prompt Version",
+          "type": "string"
+        },
+        "rendering_version": {
+          "title": "Rendering Version",
+          "type": "string"
+        },
+        "schema_version": {
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "taxonomy_version": {
+          "title": "Taxonomy Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model_version",
+        "prompt_version",
+        "schema_version",
+        "rendering_version",
+        "taxonomy_version",
+        "enrichment_snapshot_version",
+        "normalization_snapshot_version",
+        "policy_version",
+        "aggregation_version",
+        "model_requested"
+      ],
+      "title": "EmittedVersions",
+      "type": "object"
+    },
+    "TriageDecision": {
+      "additionalProperties": false,
+      "properties": {
+        "assessed_at": {
+          "format": "date-time",
+          "title": "Assessed At",
+          "type": "string"
+        },
+        "assessment_id": {
+          "title": "Assessment Id",
+          "type": "string"
+        },
+        "classification": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Classification"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Confidence"
+        },
+        "failure_detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Failure Detail"
+        },
+        "failure_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Failure Reason"
+        },
+        "model_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Model Version"
+        },
+        "outcome_kind": {
+          "title": "Outcome Kind",
+          "type": "string"
+        },
+        "prompt_version": {
+          "title": "Prompt Version",
+          "type": "string"
+        },
+        "trigger": {
+          "title": "Trigger",
+          "type": "string"
+        },
+        "verdict": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Verdict"
+        }
+      },
+      "required": [
+        "assessment_id",
+        "trigger",
+        "outcome_kind",
+        "verdict",
+        "classification",
+        "confidence",
+        "failure_reason",
+        "failure_detail",
+        "assessed_at",
+        "model_version",
+        "prompt_version"
+      ],
+      "title": "TriageDecision",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "assessed_at": {
+      "format": "date-time",
+      "title": "Assessed At",
+      "type": "string"
+    },
+    "assessment_id": {
+      "title": "Assessment Id",
+      "type": "string"
+    },
+    "bytes_received": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Bytes Received"
+    },
+    "bytes_sent": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Bytes Sent"
+    },
+    "caveat": {
+      "title": "Caveat",
+      "type": "string"
+    },
+    "citations": {
+      "items": {
+        "$ref": "#/$defs/EmittedCitation"
+      },
+      "title": "Citations",
+      "type": "array"
+    },
+    "classification": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Classification"
+    },
+    "confidence": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Confidence"
+    },
+    "context_id": {
+      "title": "Context Id",
+      "type": "string"
+    },
+    "context_resolved": {
+      "title": "Context Resolved",
+      "type": "boolean"
+    },
+    "context_version": {
+      "title": "Context Version",
+      "type": "string"
+    },
+    "disclosures": {
+      "items": {
+        "$ref": "#/$defs/EmittedDisclosure"
+      },
+      "title": "Disclosures",
+      "type": "array"
+    },
+    "duration_seconds": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Duration Seconds"
+    },
+    "emitter": {
+      "title": "Emitter",
+      "type": "string"
+    },
+    "entities": {
+      "items": {
+        "$ref": "#/$defs/EmittedEntity"
+      },
+      "title": "Entities",
+      "type": "array"
+    },
+    "failure_detail": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Failure Detail"
+    },
+    "failure_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Failure Reason"
+    },
+    "flow_count": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Flow Count"
+    },
+    "gaps": {
+      "items": {
+        "$ref": "#/$defs/EmittedGap"
+      },
+      "title": "Gaps",
+      "type": "array"
+    },
+    "host": {
+      "title": "Host",
+      "type": "string"
+    },
+    "message_version": {
+      "title": "Message Version",
+      "type": "string"
+    },
+    "narrative": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Narrative"
+    },
+    "outcome_kind": {
+      "title": "Outcome Kind",
+      "type": "string"
+    },
+    "packets_received": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Packets Received"
+    },
+    "packets_sent": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Packets Sent"
+    },
+    "patterns": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Patterns",
+      "type": "array"
+    },
+    "retrievals": {
+      "items": {
+        "$ref": "#/$defs/EmittedRetrieval"
+      },
+      "title": "Retrievals",
+      "type": "array"
+    },
+    "sensor": {
+      "title": "Sensor",
+      "type": "string"
+    },
+    "tenant": {
+      "title": "Tenant",
+      "type": "string"
+    },
+    "triage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TriageDecision"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "trigger": {
+      "title": "Trigger",
+      "type": "string"
+    },
+    "verdict": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Verdict"
+    },
+    "versions": {
+      "$ref": "#/$defs/EmittedVersions"
+    },
+    "window_end": {
+      "format": "date-time",
+      "title": "Window End",
+      "type": "string"
+    },
+    "window_start": {
+      "format": "date-time",
+      "title": "Window Start",
+      "type": "string"
+    }
+  },
+  "required": [
+    "message_version",
+    "caveat",
+    "assessment_id",
+    "tenant",
+    "sensor",
+    "host",
+    "context_id",
+    "context_version",
+    "window_start",
+    "window_end",
+    "assessed_at",
+    "context_resolved",
+    "flow_count",
+    "duration_seconds",
+    "bytes_sent",
+    "bytes_received",
+    "packets_sent",
+    "packets_received",
+    "entities",
+    "emitter",
+    "trigger",
+    "outcome_kind",
+    "verdict",
+    "classification",
+    "confidence",
+    "narrative",
+    "failure_reason",
+    "failure_detail",
+    "triage",
+    "citations",
+    "gaps",
+    "patterns",
+    "retrievals",
+    "disclosures",
+    "versions"
+  ],
+  "title": "OutputMessage",
+  "type": "object"
+}
