@@ -141,7 +141,7 @@
     "task 47: A SECOND DRAIN ASSERTING THE TOPIC IS EMPTY as the proof that the broker keeps nothing. Written, run, and failed \u2014 the reclaim lands seconds later, which tests/test_broker.py already measures. Replaced with the assertion that actually belongs in this file: after the topic has been drained once, the ENGINE still answers 3.",
     "task 47: `pending` READ BEFORE `terminal()`. Written that way first. Reversed once the failure mode was traced: a pass landing between the two reads would make `emitted` exceed `pending` and be refused as a double-emission, which is the one thing `EmissionCounts` is supposed to catch for real."
   ],
-  "lastUpdated": "2026-09-11T07:25:56.168071+00:00",
+  "lastUpdated": "2026-09-11T07:56:12.394712+00:00",
   "lessonsLearned": [
     "task 00: The two earlier task-00 sessions failed at 0 s with exit 1 and wrote nothing to disk. The cause is in prds/logs/*.stderr: '--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons'. It was a runner invocation problem, not a code problem \u2014 nothing had been half-built.",
     "task 00: bin/blink starts from a settings YAML containing just `{}`. Defaults observed: broker ports 9094 and 9092 (metadata advertises 9094), REST port 30004, retention 5m, 1 partition per topic, kafka_hostname 'localhost'. It prints a large ANSI banner to stdout \u2014 pipe it to a file, not into a terminal you are reading.",
@@ -1138,6 +1138,12 @@
       "status": "completed",
       "summary": "`helena.sink.emit` produces one message per terminal outcome to `HELENA_OUTPUT_TOPIC` through `helena.broker` \u2014 `normal` verdicts, `suspicious` ones and typed failures alike, an escalated context once under the analyst's identifier carrying the triage decision beside it \u2014 and returns `EmissionCounts`, reconciling what the broker acknowledged against `helena_analytical_emission_counts`, the plain view `sql/migrations/0020` adds so an operator can ask the engine the same number in plain SQL after the broker has discarded everything. `scripts/emit.py` is the operator surface, `docs/decisions/0037-at-least-once-emission.md` \u00a72 the deduplication contract and \u00a74 the measured output-volume hazard, `docs/runbook.md` \u00a712 the runbook.",
       "title": "[D7 Emit] At-least-once emission of every terminal outcome, counted engine-side"
+    },
+    "48": {
+      "next_session_should_know": "The previous session produced no report. Check prds/logs/ before assuming nothing was changed on disk.",
+      "status": "failed",
+      "summary": "Session ended with exit code 143 and wrote no report.",
+      "title": "[D7 Observability] Metrics and reconciliation over the whole pipeline"
     }
   }
 }
