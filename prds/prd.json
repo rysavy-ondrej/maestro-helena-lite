@@ -593,7 +593,7 @@
         "Add a test that replay performs zero live provider queries",
         "Record replayability as a goal rather than a claim while the silent-record-loss hazard at a catch-up boundary stands"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D7 Emit] Sink view and the field-level output message shape",
