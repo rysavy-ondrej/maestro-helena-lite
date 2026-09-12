@@ -95,6 +95,12 @@ feedback, evaluation and replay.
 the test that governs entry: an experiment or a measured need, not a gap in a
 diagram.
 
+> **The record is [`../docs/deferred.md`](../docs/deferred.md)** (task 55): one
+> entry per capability below, each with the re-entry test this paragraph
+> demands, plus what exists *instead* where that is a seam rather than nothing.
+> `tests/test_governance.py` fails if this list grows a bullet the register does
+> not carry, or if an entry loses its re-entry test.
+
 - the analyst feedback loop, and agent memory / dynamic infrastructure knowledge;
 - a demonstration UI, a finding store, an evidence graph and a query API;
 - the evaluation harness;

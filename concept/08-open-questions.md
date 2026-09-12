@@ -24,6 +24,15 @@ being contemporaneous.
 
 ## Blocking — must be answered inside the stage that needs them
 
+> **Answered, 2026-09-12 (task 55) — and the questions below are left exactly as
+> they were written.** Every one of them has been settled inside the stage that
+> needed it, so the answers are beside the code rather than here, and
+> [`../docs/decisions/README.md`](../docs/decisions/README.md) is the map from
+> each question to the record that settled it. One row of that map says **STILL
+> OPEN** — the silently lost record under *cross-cutting and urgent* — and it is
+> still open. The questions stay as written because a question rewritten into its
+> answer loses what was not known when the work started.
+
 **Enrichment.** How the enriched context represents enrichment that is missing,
 stale, in flight or failed, so triage cannot read absence of evidence as evidence
 of absence — this is the stage's central acceptance property. The loader's schedule
@@ -97,6 +106,12 @@ says holds everything.
 ## Known hazards, recorded rather than resolved
 
 Not questions — accepted risks the concept must not be read as denying.
+
+> **The register for these is [`../docs/hazards.md`](../docs/hazards.md)** (task
+> 55): the same ten hazards, each with what is actually done about it — which for
+> several is *nothing, and the claim is narrowed instead*. This table stays the
+> authority, and `tests/test_governance.py` fails if it grows a row the register
+> does not carry.
 
 | Hazard | Statement |
 | --- | --- |
