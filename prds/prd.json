@@ -709,7 +709,7 @@
         "List each research question with the measurement that would answer it and the blocker that currently prevents it",
         "Keep the evaluation harness itself marked deferred rather than partially building it"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D9 Governance] Decision records, deferred register and open-question closure",

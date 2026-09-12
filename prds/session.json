@@ -1,12 +1,12 @@
 {
-  "currentIteration": 50,
+  "currentIteration": 51,
   "currentTaskIndex": 54,
-  "elapsedTimeSeconds": 791236,
-  "lastUpdateTime": 1789226971676,
+  "elapsedTimeSeconds": 796152,
+  "lastUpdateTime": 1789229123107,
   "startTime": 1788432970645,
   "statistics": {
-    "averageDurationMs": 1859144,
-    "completedIterations": 44,
+    "averageDurationMs": 1863851,
+    "completedIterations": 45,
     "failedIterations": 5,
     "iterationTimings": [
       {
@@ -406,12 +406,20 @@
         "startTime": 1789221939316,
         "status": "failed",
         "task": 53
+      },
+      {
+        "durationMs": 2099194,
+        "endTime": 1789229123107,
+        "iteration": 51,
+        "startTime": 1789227023913,
+        "status": "completed",
+        "task": 54
       }
     ],
-    "successRate": 0.88,
-    "successfulIterations": 44,
-    "totalDurationMs": 92957220,
-    "totalIterations": 50
+    "successRate": 0.8824,
+    "successfulIterations": 45,
+    "totalDurationMs": 95056414,
+    "totalIterations": 51
   },
   "status": "running",
   "tasksLandedOutsideRunner": {
@@ -429,5 +437,5 @@
     ],
     "note": "Implemented, verified and merged by sessions launched outside implement.sh, so no runner iteration recorded them. The statistics block counts the runner's own iterations only and deliberately excludes these eight. Their reports were rebuilt from the commit record on 2026-09-06 -- see prds/progress.txt and each report's `reconstructed` field. Task 48 is on this list for a different reason and is the one exception to the sentence above: the runner DID start it, and iteration 45 records that session failing -- killed by SIGTERM after 1815 s with a zero-byte log and no report. Its increment was intact in the working tree, and a later session verified it (two inventory pins needed extending), wrote the report and did this bookkeeping on 2026-09-12. The iteration 45 entry is left exactly as it stands, because that iteration really did fail; what happened outside the runner was the landing, not the work. The statistics block still counts the runner's own iterations only. Task 53 joins task 48 as the second exception of that kind, with a different cause: the runner started it and iteration 49 records the session failing, but it was not killed -- it ended its own turn to wait for a background test run it expected to be woken for, wrote no report, and exited 0 with the whole increment uncommitted in the working tree. A later session verified it, fixed a restore() refusal that fired after the first INSERT, wrote the report and did this bookkeeping on 2026-09-12. The iteration 49 entry is left exactly as it stands, because that iteration really did fail; what happened outside the runner was the landing, not the work. The statistics block still counts the runner's own iterations only."
   },
-  "totalIterations": 50
+  "totalIterations": 51
 }
