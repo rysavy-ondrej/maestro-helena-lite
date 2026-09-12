@@ -494,7 +494,17 @@ for the same information.
 - Start a throwaway engine with `source bin/env.sh && ./bin/risingwave playground`
   rather than mocking SQL you could execute.
 - Long-running things (an engine, a broker) go in the background; do not block a
-  turn on a `sleep`.
+  turn on a `sleep`. **A thing you need the RESULT of is not one of them** — see
+  the next bullet, which is what that distinction cost.
+- **Never end your turn expecting to be woken up. Your turn ending IS your
+  session ending.** `implement.sh` runs one non-interactive `claude -p` session;
+  there is no watcher, no notification and no re-invocation, so a turn that ends
+  "I'll finish when the suite completes" ends the task instead. **Run the full
+  suite in the foreground and wait for it**, all fifteen minutes, even though
+  backgrounding it looks cheaper. Task 53 is why: it backgrounded the suite, said
+  a watcher would re-invoke it, and exited 0 with `stop_reason: end_turn` — a
+  finished increment, no report, nothing committed, and the runner correctly
+  scoring it `failed`. The work had to be verified and landed by a later session.
 - Keep a failing command's real output. Do not summarise an error you did not read.
 
 **Context discipline**
