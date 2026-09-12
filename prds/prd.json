@@ -722,7 +722,7 @@
         "Add a test or CI check that every module marked deferred has an entry in the deferred register",
         "Record that failed and inconclusive experiments are valid results, kept with their reasons rather than rewritten or hidden"
       ],
-      "done": false
+      "done": true
     }
   ]
 }
