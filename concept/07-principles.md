@@ -184,7 +184,7 @@ cache hit or live, disclosed-to, and when.
 | Analyst provider lookups | The indicators the case suggests — and only for contexts that escalated, never for the whole stream |
 | The output topic | Internal addresses, hostnames, retrieved external text. Local broker, so no redaction is performed — **and any consumer forwarding it off-site inherits the obligations** |
 
-**"Local pipeline" means local inference and decisions, not zero network egress.**
+**"Local pipeline" means local decisions and control, not zero network egress.**
 The two must not be conflated in prose or in policy.
 
 ## Untrusted input
