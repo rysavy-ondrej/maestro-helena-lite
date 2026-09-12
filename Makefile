@@ -3,7 +3,7 @@
 # Everything runs through `uv run`, against the `.venv/` that is already at the
 # project root. Never `pip`, never a second virtualenv, never a system python.
 
-.PHONY: help sync test check acceptance conformance lint typecheck dev-up dev-down migrate storage rendering-size status backup
+.PHONY: help sync test check acceptance conformance lint typecheck dev-up dev-down migrate storage rendering-size corpus-sizing status backup
 
 help:
 	@echo "sync       install the locked environment (uv sync)"
@@ -18,6 +18,7 @@ help:
 	@echo "status     the pipeline's own numbers, read out of the engine"
 	@echo "backup     copy the engine's durable tables into .backups/"
 	@echo "rendering-size  what a real capture renders to, against the configured budget"
+	@echo "corpus-sizing   what an evaluation would spend in live queries - see docs/evaluation-corpus.md"
 	@echo "lint       not yet available - see docs/decisions/0003-lint-and-typecheck-tooling.md"
 	@echo "typecheck  not yet available - see docs/decisions/0003-lint-and-typecheck-tooling.md"
 
@@ -76,6 +77,17 @@ storage:
 # cites what this produced; see docs/decisions/0019-the-rendering-size-budget.md.
 rendering-size:
 	uv run scripts/measure_rendering.py
+
+# What an evaluation over a labelled corpus would cost in live queries, and the
+# ceiling the provider's quota puts on one. Sized against config/policy.toml, not
+# against a number in a document; docs/evaluation-corpus.md cites what it prints.
+# There is no default daily quota - abuse.ch publishes fair-use terms and no
+# number - so this target passes the ceiling our own [rate_limits] implies:
+#
+#     uv run scripts/corpus_sizing.py --daily-quota 500       # ... a published one
+#     uv run scripts/corpus_sizing.py --daily-quota self-imposed --snapshot
+corpus-sizing:
+	uv run scripts/corpus_sizing.py --daily-quota self-imposed
 
 # `helena status`: latency, cost, staleness, escalation, the typed failures and
 # the end-to-end record reconciliation, every one of them a plain SELECT over the

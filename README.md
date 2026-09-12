@@ -8,6 +8,9 @@ non-blocking.
 **Maturity: experimental.** The skeleton exists and is under construction. No
 claim is made here about verdict quality: the evaluation corpus does not exist,
 and every measurement is gated on it.
+[`docs/evaluation-corpus.md`](docs/evaluation-corpus.md) is what one would have to
+be, what an evaluation over it would spend against the provider's quota, and which
+research question each missing piece blocks.
 
 What the prototype *does* demonstrate, what it may not be read as, and the test
 that executes each of those properties end to end, are in
@@ -72,10 +75,13 @@ config/policy.toml   the confidence thresholds, the budget values, and the send 
 tests/               the one pytest suite, mirroring the package
 scripts/             dev-up / dev-down, the pin-and-endpoint check, migrate, replay,
                      emit (drain the assessed contexts to the output topic),
-                     status (the pipeline's own numbers, as plain SQL), and
-                     measure_rendering (what a real capture renders to)
+                     status (the pipeline's own numbers, as plain SQL),
+                     measure_rendering (what a real capture renders to), and
+                     corpus_sizing (what an evaluation would cost in live queries)
 demo/                one script that runs ingest and context and prints the result
 docs/acceptance.md   what "the prototype works" means, and what it does not
+docs/evaluation-corpus.md  what a labelled corpus would have to be, and what
+                     measuring against it would cost - the gate on every claim
 docs/decisions/      why each dependency and each layout choice is here
 docs/versions.md     the pinned binaries and their checksums
 docs/runbook.md      running the engine and broker, and the libpython hazard
