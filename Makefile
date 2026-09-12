@@ -8,7 +8,7 @@
 help:
 	@echo "sync       install the locked environment (uv sync)"
 	@echo "test       run the one pytest suite"
-	@echo "acceptance run the enrichment-status gate alone (a subset of test)"
+	@echo "acceptance run the acceptance gate alone (a subset of test) - see docs/acceptance.md"
 	@echo "conformance  run the must-never-happen table alone (a subset of test)"
 	@echo "check      lockfile is in sync, sources compile, suite passes"
 	@echo "dev-up     verify the pinned binaries and run the engine and broker"
@@ -26,10 +26,17 @@ sync:
 test:
 	uv run pytest -q
 
-# The D3 gate. Not a second suite - these tests are part of `make test` and are
-# marked so they can be run alone, because "the triage stage is not buildable
-# until this passes" needs something a person can actually run. See the head of
-# tests/test_acceptance_enrichment.py.
+# The acceptance gate: two modules, and docs/acceptance.md is what they are for.
+# tests/test_acceptance_enrichment.py is the D3 half - the six enrichment states,
+# and "the triage stage is not buildable until this passes".
+# tests/test_end_to_end.py is the D9 half - the six stages composed over the wire,
+# one test per claimable property in concept/01-goal-and-scope.md, and the
+# not-claimable list beside them.
+#
+# Not a second suite: both are part of `make test` and therefore of `make check`,
+# which is what makes them required. The marker exists because "does the prototype
+# do what we say it does" is a question someone needs to be able to ask directly,
+# and because the answer takes under a minute rather than twelve.
 acceptance:
 	uv run pytest -q -m acceptance
 

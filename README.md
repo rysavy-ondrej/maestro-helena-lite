@@ -9,6 +9,10 @@ non-blocking.
 claim is made here about verdict quality: the evaluation corpus does not exist,
 and every measurement is gated on it.
 
+What the prototype *does* demonstrate, what it may not be read as, and the test
+that executes each of those properties end to end, are in
+[`docs/acceptance.md`](docs/acceptance.md) — `make acceptance` runs it.
+
 ## The authoritative source is `concept/`
 
 **`concept/` describes what HELENA is, and it wins over this README, over any
@@ -71,6 +75,7 @@ scripts/             dev-up / dev-down, the pin-and-endpoint check, migrate, rep
                      status (the pipeline's own numbers, as plain SQL), and
                      measure_rendering (what a real capture renders to)
 demo/                one script that runs ingest and context and prints the result
+docs/acceptance.md   what "the prototype works" means, and what it does not
 docs/decisions/      why each dependency and each layout choice is here
 docs/versions.md     the pinned binaries and their checksums
 docs/runbook.md      running the engine and broker, and the libpython hazard

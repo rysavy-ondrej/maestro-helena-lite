@@ -1,8 +1,8 @@
 """Acceptance: what a reader sees when there is no evidence, and why it is not `no_match`.
 
 This is the named suite `prds/prd.json` task 25 asks for, and it is a **gate**:
-`make acceptance` runs it alone, and the triage stage (D4) is not buildable until
-it passes. Everything D4 renders to an agent comes out of
+`make acceptance` runs it, beside `tests/test_end_to_end.py`'s D9 run, and the
+triage stage (D4) is not buildable until it passes. Everything D4 renders to an agent comes out of
 `helena_analytical_enriched_context`, so the property tested here is the one that
 decides whether triage can tell "nobody knows" from "nothing was found".
 

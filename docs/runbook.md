@@ -392,6 +392,36 @@ Rows already in the store keep the version they recorded. Nothing rewrites them:
 replay validates a stored assessment against the version *it* recorded
 (`docs/decisions/0008-version-registry.md`).
 
+### A migrated schema costs streaming jobs, and an abandoned one keeps costing them
+
+Measured on the pinned RisingWave 3.0.3, 2026-09-12, against a `single_node` with
+`parallelism: 4`: applying `sql/migrations/` into one schema takes the cluster
+from **273 actors to about 466** — roughly **190 actors per migrated schema** —
+and the engine refuses a new streaming job above `hard limit: 400` **per unit of
+parallelism**, so the practical ceiling on this machine is around 1 600 actors:
+
+    Not supported: the number of actors exceeds the limit ...
+    DETAILS: - hard limit: 400 ... actor_count: 1606, parallelism: 4
+
+The suite's fixtures create their schemas as `helena_test_…` / `helena_e2e_…` and
+drop them in a `finally`, so a run that completes leaves nothing behind. **A run
+that is killed cannot**, and each abandoned schema holds its ~190 actors until
+somebody drops it. Four of them is a cluster that refuses the next migration, and
+the failure arrives as a `MigrationFailed` in whatever test happened to be
+migrating — which reads like a broken migration and is not one. To check and to
+clear:
+
+```sql
+SELECT count(*) FROM rw_catalog.rw_actors;
+SELECT name FROM rw_catalog.rw_schemas WHERE name LIKE 'helena\_test\_%'
+    OR name LIKE 'helena\_e2e\_%';
+DROP SCHEMA <name> CASCADE;    -- one per abandoned run
+```
+
+Nothing outside those two prefixes is the suite's. `public` is where
+`uv run scripts/migrate.py` puts a deployment's own schema, and dropping that is
+dropping the store.
+
 ---
 
 ## 6. Quarantine: what ingestion refused
@@ -685,6 +715,7 @@ bug in the derivation.
 | A blink setting has no effect | it is an environment variable, not a YAML key; §3 |
 | The integration tests raise `ConfigurationError` | no `.env`. Copy `.env.example` and fill it in; the addresses are read through `helena.config` |
 | `scripts/migrate.py` refuses with "has changed since it was applied" | an applied migration was edited. §5 — write the next one instead |
+| `MigrationFailed: ... the number of actors exceeds the limit ... hard limit: 400` | abandoned `helena_test_*` / `helena_e2e_*` schemas from killed test runs are still holding streaming jobs. §5, last block |
 | A view exists but is empty and the data is old | the records never reached the store, or they are not this capture's. §8 |
 | `FAILED: ... a capture file is named <sha256>.jsonl` | `--captures` is not a capture directory. §8 |
 | `FAILED: ... holds no assessment <id>` | that identifier is not in this store, or a later pass superseded the run. §8 |

@@ -286,6 +286,9 @@ COVERED_BY: dict[str, tuple[str, ...]] = {
     ),
     "MNH-20": (
         "test_acceptance_enrichment::test_the_gate_covers_every_status_the_model_defines",
+        "test_end_to_end::test_the_claims_this_module_executes_are_the_notes_own",
+        "test_end_to_end::test_the_checklist_states_the_claims_and_the_ones_it_may_not_make",
+        "test_end_to_end::test_the_checklist_names_the_test_that_demonstrates_each_claim",
     ),
 }
 
@@ -1384,6 +1387,14 @@ NO_ACCURACY_CLAIMED = (
     (
         PROJECT_ROOT / "docs" / "overview-slides.md",
         "Nothing here claims the verdicts are right",
+    ),
+    # The acceptance checklist (task 52) is where a reader goes to find out what
+    # "the prototype works" means, so it is the place the disclaimer has to be
+    # hardest to miss. `tests/test_end_to_end.py` holds the rest of that file to
+    # `concept/01`'s two lists; this row is the one sentence MNH-20 owns.
+    (
+        PROJECT_ROOT / "docs" / "acceptance.md",
+        "This checklist is not evidence that the verdicts are right",
     ),
 )
 
