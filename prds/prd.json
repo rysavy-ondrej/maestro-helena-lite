@@ -671,7 +671,7 @@
         "Add a test that no prompt, evidence row or emitted message can contain a credential",
         "Document the two exposure profiles in the runbook so the asymmetry is understood rather than uniformly assumed"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D9 Integration] End-to-end fixture run and the acceptance definition",
