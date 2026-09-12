@@ -1402,3 +1402,56 @@ rate; no agent has driven a tool loop through this; and the **retrieval confound
 is now measured** — for three indicators present in both tiers, every field the
 two surfaces share was identical, so a ThreatFox analyst claim corroborating a
 ThreatFox enrichment claim is one source agreeing with itself.
+
+## Durability: two halves of one record, and a backup of the half nothing else holds
+
+`concept/08-open-questions.md` files this under *cross-cutting and urgent* —
+*"durability and backup for the single store, now that findings and evidence
+exist only there, which is a correctness concern rather than an ops detail."*
+[`helena.durability`](src/helena/durability.py) is the model,
+[`scripts/backup.py`](scripts/backup.py) is the command,
+[`docs/runbook.md`](docs/runbook.md) §15 is the procedure and the residual risk,
+and [`docs/decisions/0040-durability-and-backup.md`](docs/decisions/0040-durability-and-backup.md)
+is the record.
+
+    retained captures on disk    +    the engine's durable tables
+
+**They recover different things, and that is measured rather than argued.** A
+capture replayed into an empty migrated schema reconstructs the input and
+everything derived from it — normalized events, quarantine rows, the flatten and
+signal layers, because a view over a table backfills from the table. It
+reconstructs **nothing** the pipeline learned: no feed snapshot, no evidence, no
+assessment, no citation. Re-asking the model is a different run and re-fetching a
+feed is a *different snapshot*, so those rows are not a cache of something
+re-derivable — they are the record.
+
+| Excluded from the backup | Because |
+| --- | --- |
+| **The broker** | consume-once, restart-volatile, a topic never re-readable. There is nothing to copy, and retention is not durability |
+| **The output topic** | egress only; nothing may be recoverable only from it, and every field of a message is a projection of a row that *is* in the backup |
+| Materialized views | derived — a restore applies the migrations and the engine rebuilds them from the tables |
+
+```bash
+make backup                                          # into .backups/, gitignored
+uv run scripts/backup.py --verify .backups/<file>    # is it whole?
+uv run scripts/backup.py --restore <file> --schema helena_restore_test
+uv run scripts/dev_check.py --captures <dir>         # the other half, at startup
+```
+
+The backup is JSON lines — header, one row per line, trailer — and it refuses
+four things by name rather than reconciling any of them: a file whose trailer is
+missing or does not verify (truncation is visible or it is a bug), a store that
+changed while it was being read, a target whose migration ledger or column types
+are not the backup's or that already holds rows, and a capture store that is
+unreachable rather than empty. The relation set comes from the engine's
+catalogue, so a migration that adds a table is in the backup without anyone
+remembering to add it.
+
+**Measured 2026-09-12**, warm, against the pinned engine: a 3 375-claim snapshot
+backs up in 0.34 s to 2.36 MB and restores in 2.26 s, and applying the schema to
+a fresh target takes ~24 s — so recovery is dominated by the migration and not by
+the data. What is **not** demonstrated: a restore into a different engine process
+or across an engine version (one engine runs per machine), a store larger than a
+fixture, and the case where enough time has passed for a context to leave the
+24-hour retention horizon, which would change what the *retained* views hold
+while leaving every table exact.

@@ -696,7 +696,7 @@
         "Add a startup check that the capture store is reachable and its hashes verify",
         "Record the residual risk and the recovery time in the runbook"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D9 Research] Evaluation corpus requirements and provider quota sizing",

@@ -1076,3 +1076,144 @@ own redacted message and raise it with the cause suppressed
 (`helena.enrichment._FETCH_FAILURES` has the measurement). A traceback prints a
 `__cause__` chain in full, so a redacted message over an unredacted cause is not
 redacted.
+
+---
+
+## 15. Durability: what survives, what is backed up, and how long recovery takes
+
+Findings and evidence exist in one place. `concept/08-open-questions.md` files
+this under *cross-cutting and urgent* — *"durability and backup for the single
+store, now that findings and evidence exist only there, which is a correctness
+concern rather than an ops detail"* — and that is why there is a command for it
+and a suite behind it (`helena.durability`, `tests/test_durability.py`).
+
+### The durable record is two things
+
+    retained captures on disk    +    the engine's durable tables
+
+They recover two different things and neither substitutes for the other:
+
+| Half | What it brings back | What it does not |
+| --- | --- | --- |
+| The retained captures | the input, and everything derived from it — normalized events, quarantine rows, the flatten and signal layers, because a view over a table backfills from the table (§8) | anything the pipeline *learned* |
+| The engine's durable tables | the feed snapshot an assessment cited, the feed rows, the evidence, the assessments with their citation, gap, pattern, retrieval and disclosure rows | the input, if the capture is gone |
+
+**The tables are not a cache of something re-derivable**, and that is measured
+rather than argued: `test_a_replay_without_a_restore_does_not_bring_back_an_assessment`
+replays a capture into an empty migrated schema and the analytical tables stay
+empty. Re-asking the model is a different run, and re-fetching a feed is a
+*different snapshot* — a later snapshot changes what an identical context would
+say (`concept/08`), so the snapshot that an assessment cited only exists in the
+store that holds it.
+
+### What is excluded, and why it is an exclusion rather than a gap
+
+| Not backed up | Because |
+| --- | --- |
+| **The broker** | consume-once, restart-volatile, a topic never re-readable (§3). There is nothing to copy, and retention is not a durability mechanism |
+| **The output topic** | egress only — *nothing may be recoverable only from it* (`concept/03`). Every field of a message is a projection of a row that is in the backup, and `tests/test_sink.py` executes a recovery query per field group |
+| Materialized views | derived. A restore applies the migrations and the engine rebuilds them from the tables |
+| In-flight run state | *"an interrupted run is simply re-run"* (`concept/03`). There is no checkpoint to lose |
+
+### The procedure
+
+    uv run scripts/backup.py --out .backups                    # take one
+    uv run scripts/backup.py --verify .backups/<file>           # is it whole?
+    uv run scripts/backup.py --restore .backups/<file>          # put it back
+
+    uv run scripts/dev_check.py --captures <dir>                # the other half
+
+`.backups/` is not committed and nothing in the package reads it. A backup is
+JSON lines — a header, one line per row, a trailer — and the three things it
+refuses are worth knowing before you need them:
+
+| Refusal | What it means |
+| --- | --- |
+| `BackupIncomplete` | the trailer is missing, its digest does not verify, or the row counts in the header, the trailer and the file disagree. This is what a truncated write looks like, and it is refused before any row is restored |
+| `BackupMoved` | a relation held a different number of rows when it was read than when it was counted. RisingWave has no multi-statement read transaction, so **a backup taken under live ingestion is not a point-in-time snapshot.** Quiesce and retake it |
+| `RestoreRefused` | the target's migration ledger, relation set or column types are not the backup's, or a target relation already holds rows. Every table has a primary key, so restoring onto rows would upsert and leave a store that is neither the backup nor what was there |
+
+### Rehearsing a restore
+
+There is one engine per machine (§2), so the throwaway instance is a **schema**:
+
+    uv run psql -c "CREATE SCHEMA helena_restore_test"          # or any client
+    # apply the migrations to it, then:
+    uv run scripts/backup.py --restore .backups/<file> --schema helena_restore_test
+
+Drop it again afterwards with `DROP SCHEMA ... CASCADE`, and drop it *promptly*:
+an abandoned migrated schema keeps ~190 actors alive and the ceiling is ~1 600
+(§5). Use **one connection per schema.** Measured 2026-09-12: a single session
+that did `SET search_path` from one migrated schema to a second one had
+`information_schema.tables` report the second schema's migration ledger as
+existing and then fail to select from it — so the runner saw a ledger that was
+not there.
+
+### Recovery time
+
+Measured 2026-09-12 against the pinned engine on this machine, warm:
+
+| Step | 65-row fixture state | 3 375-claim ThreatFox snapshot |
+| --- | --- | --- |
+| `make migrate` into a fresh schema | 23.3 s | 24.4 s |
+| backup | 0.22 s | 0.34 s (2 364 121 bytes) |
+| restore | 0.39 s | 2.26 s |
+| **recovery total** | **~24 s** | **~27 s** |
+
+**The migration dominates**, and it will keep dominating: applying the schema
+starts a streaming job per materialized view and the row count barely moves it.
+A capture replay after the restore is the §8 command and costs what it costs
+there — the ten-record fixture goes in under a second.
+
+### Residual risk
+
+Recorded rather than resolved, in the order they are likely to bite:
+
+1. **A backup is not a point-in-time snapshot.** There is no read transaction to
+   take one under. `BackupMoved` detects the case where a relation changed while
+   it was being read; it cannot detect two relations that were each self-
+   consistent at different instants. **Quiesce ingestion before a backup you
+   intend to restore from.**
+2. **A restore reads the whole file into memory before it writes a row.** That is
+   deliberate — there is no transaction to roll a half-applied restore back, so
+   the only guarantee available is to refuse the file first. The measured cost is
+   ~700 bytes of JSON per row (2.36 MB for 3 376 rows), so a million-row store
+   wants roughly a gigabyte to restore. Splitting a restore per relation is the
+   change to make when that bites, and it costs the all-or-nothing property.
+3. **Clock-derived state is derived again, not restored.** The retention horizon,
+   the snapshot-currency window and the completeness flag reach `now()`. A
+   restore performed *after* a context has left the 24-hour retention horizon
+   does not bring the retained views back, because the horizon is re-evaluated as
+   the rows arrive. The tables are exact either way — no durable table reads the
+   clock, which `tests/test_durability.py` asserts — but
+   `helena_signal_host_context_retained` and its readers are not. **Not measured:
+   it needs a day to pass between backup and restore.**
+4. **A restore into a different engine process is untested.** One engine per
+   machine (§2) means every restore this suite has performed went into another
+   schema of the same process. The format is logical rather than a copy of
+   `.rwdata/`, which is the form that *should* cross a process and a version, and
+   the engine version is recorded in every backup's header so that a restore
+   elsewhere is a known fact rather than a guess. It is still untested.
+5. **Nothing schedules a backup.** There is no timer, no retention policy for the
+   backup files and no off-machine copy. A backup that exists only beside the
+   store it came from survives the engine and not the disk.
+6. **The capture store's identity is provisional under live ingestion.** A
+   capture is addressed by the hash of its file, and a file still being written
+   has no final digest (`helena.normalizer`, `concept/08`). The startup check
+   verifies what is closed; it cannot verify what is open.
+
+### The startup check
+
+    uv run scripts/dev_check.py --captures tests/fixtures/captures
+    ok: tests/fixtures/captures: 2 capture(s), 11 record(s), 11,103 bytes, every
+        file verified against its own sha256
+
+Three outcomes and they stay three, because the operator does something
+different about each:
+
+| Outcome | Means |
+| --- | --- |
+| `<dir>: N capture(s), …` with N ≥ 1 | reachable, and every file hashes to its own name |
+| `<dir>: 0 capture(s), …` | reachable and holding nothing. A real state for a deployment that has retained nothing yet |
+| `FAILED: … does not exist` / `is not a directory` | **unreachable.** Until task 53 this returned "no captures" — a glob over a missing directory returns nothing — so a mistyped directory read as a deployment that had lost every record it ever ingested (§13.1). `helena.normalizer.CaptureStoreUnreachable` is now a different failure from a corrupt file |
+| `FAILED: … is not the capture its name claims` | a capture changed under its name. A capture's sha256 is half of every event id and every raw-record reference in the store, so every citation pointing into it now points at different records |

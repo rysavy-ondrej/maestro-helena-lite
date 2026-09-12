@@ -3,7 +3,7 @@
 # Everything runs through `uv run`, against the `.venv/` that is already at the
 # project root. Never `pip`, never a second virtualenv, never a system python.
 
-.PHONY: help sync test check acceptance conformance lint typecheck dev-up dev-down migrate storage rendering-size status
+.PHONY: help sync test check acceptance conformance lint typecheck dev-up dev-down migrate storage rendering-size status backup
 
 help:
 	@echo "sync       install the locked environment (uv sync)"
@@ -16,6 +16,7 @@ help:
 	@echo "migrate    apply sql/migrations/ to the configured engine"
 	@echo "storage    what each relation of the migrated schema stores"
 	@echo "status     the pipeline's own numbers, read out of the engine"
+	@echo "backup     copy the engine's durable tables into .backups/"
 	@echo "rendering-size  what a real capture renders to, against the configured budget"
 	@echo "lint       not yet available - see docs/decisions/0003-lint-and-typecheck-tooling.md"
 	@echo "typecheck  not yet available - see docs/decisions/0003-lint-and-typecheck-tooling.md"
@@ -85,6 +86,18 @@ rendering-size:
 #     uv run scripts/status.py --captures data/ingest
 status:
 	uv run scripts/status.py
+
+# The engine's durable tables, copied out. The other half of the durable record
+# is the retained captures, and `uv run scripts/dev_check.py --captures DIR`
+# verifies those - there is no default directory, deliberately. Restoring takes
+# a path and optionally a schema, so it is not a make target:
+#
+#     uv run scripts/backup.py --verify .backups/<file>
+#     uv run scripts/backup.py --restore .backups/<file> --schema <throwaway>
+#
+# docs/runbook.md §15 is the procedure, the residual risk and the recovery time.
+backup:
+	uv run scripts/backup.py --out .backups
 
 check:
 	uv lock --check

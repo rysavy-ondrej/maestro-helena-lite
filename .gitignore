@@ -40,3 +40,8 @@ prds/.usage-cache.json
 # untracked it makes the linear-history gate (prds/CONTEXT.md §4) fire on a
 # tool's scratch space rather than on this project's own unlanded work.
 .claude/
+
+# Backups of the engine's durable tables (scripts/backup.py --out). A copy of
+# the one store, taken by an operator; not a second store, and not source.
+# docs/decisions/0040-durability-and-backup.md is the model.
+.backups/

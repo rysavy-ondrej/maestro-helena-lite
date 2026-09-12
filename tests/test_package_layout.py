@@ -121,8 +121,20 @@ COMPONENT_MODULES = {
 # imports `helena.observability` for the redactor. One module would be an import
 # cycle. `docs/decisions/0038-pipeline-metrics-and-reconciliation.md` §5 records
 # it.
+# `durability` is here on the same terms as `migrations`, and for a reason the
+# concept notes give rather than one this file invents: `concept/08-open-questions.md`
+# files durability and backup under *cross-cutting and urgent* -- "now that
+# findings and evidence exist only there, which is a correctness concern rather
+# than an ops detail". It is not a stage, and it is not one stage's property: the
+# durable record is the retained captures plus every durable table, so a module
+# living inside `normalizer` would own half of it and a module inside
+# `orchestration` the other half. It reads `helena.migrations` for the schema
+# identity a restore compares and `helena.normalizer` for the capture store, owns
+# no relation of its own, and adds no store -- the bytes of a backup live in
+# `scripts/backup.py`, so the package still writes to no file.
 SUPPORT_MODULES = {
     "config",
+    "durability",
     "observability",
     "status",
     "migrations",

@@ -15,6 +15,7 @@ Run it directly:
     uv run scripts/dev_check.py --wait 120      # retry the endpoints until up
     uv run scripts/dev_check.py --addresses     # shell assignments for dev-up
     uv run scripts/dev_check.py --storage       # what the migrated schema stores
+    uv run scripts/dev_check.py --captures DIR  # the capture store is whole
 
 Maturity: experimental — exercised by tests/test_infrastructure.py and by
 scripts/dev-up on every start, and the measurements behind it are recorded in
@@ -336,6 +337,31 @@ def storage_report(stored: dict[str, tuple[str, int]]) -> list[str]:
     return lines
 
 
+def check_captures(directory: Path) -> list[str]:
+    """The capture store is reachable, and every file hashes to its own name.
+
+    The startup check for the half of the durable record that is not in the
+    engine (`helena.durability`). It is here rather than in the pipeline because
+    there is no daemon to start: this is what `scripts/dev-up` runs, and it is
+    the check a replay or a status read should not be the first thing to
+    discover.
+
+    The hash is not a formality. A capture's sha256 is half of every event id
+    and of every raw-record reference in the store, so a capture that changed
+    under its name turns every citation pointing into it into a citation to
+    different records. There is no directory default, for the reason
+    `scripts/replay_capture.py` gives: naming the wrong one addresses another
+    deployment's records under this one's identity.
+    """
+    from helena.durability import check_capture_store
+    from helena.normalizer import CaptureError
+
+    try:
+        return [check_capture_store(directory).summary()]
+    except CaptureError as error:
+        raise CheckFailed(f"the capture store is not usable: {error}") from None
+
+
 def addresses() -> dict[str, str]:
     """The engine and broker addresses, resolved the way the package does.
 
@@ -405,6 +431,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print the resolved addresses as shell assignments and exit",
     )
+    parser.add_argument(
+        "--captures",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help=(
+            "also check that the retained capture store is reachable and that "
+            "every capture in it hashes to its own name. There is no default"
+        ),
+    )
     arguments = parser.parse_args(argv)
 
     try:
@@ -422,6 +458,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         recorded = pins()
         reported = check_binaries(recorded)
+        if arguments.captures is not None:
+            # Before the endpoints, and included even with --binaries-only: the
+            # capture store needs nothing running, and it is the half of the
+            # durable record a restarted engine cannot be asked about.
+            reported += check_captures(arguments.captures)
         if not arguments.binaries_only:
             reported += _wait_for_endpoints(
                 time.monotonic() + arguments.wait, recorded

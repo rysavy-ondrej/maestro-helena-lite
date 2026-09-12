@@ -300,6 +300,7 @@ __all__ = [
     "QUARANTINE_TABLE",
     "Capture",
     "CaptureError",
+    "CaptureStoreUnreachable",
     "DnsObservation",
     "DnsQuery",
     "DnsResponse",
@@ -693,6 +694,24 @@ class CaptureError(Exception):
     """
 
 
+class CaptureStoreUnreachable(CaptureError):
+    """The capture directory is not there, is not a directory, or cannot be read.
+
+    A `CaptureError` because it is one, and its own class because the operator
+    does something different about it: a capture that fails its hash is a
+    corrupted file, and this is a store that was never opened.
+
+    It exists because the alternative is the worst kind of wrong answer.
+    `scan_captures` globs a directory, and a glob over a path that is not there
+    returns nothing — so until task 53 a mistyped `--captures` directory read as
+    *"this deployment retained no captures"*, which `helena.status` would then
+    print as zero records ever ingested (`docs/runbook.md` §13.1 refuses to print
+    that zero for exactly this reason, and could not tell the two cases apart).
+    `concept/instruction.md` §2: **absence is not emptiness**. Reachable and
+    empty is a real state and still returns `{}`.
+    """
+
+
 @dataclass(frozen=True)
 class Capture:
     """One retained capture file: what identifies it, and what it holds.
@@ -774,9 +793,24 @@ def scan_captures(directory: Path) -> dict[str, Capture]:
     is not a sha256, or whose name is not *its* sha256, is an error. Anything
     that is not a `.jsonl` is left alone, so the directory can carry a README
     saying what each digest holds.
+
+    A path that is not a readable directory is `CaptureStoreUnreachable` and not
+    an empty result — see that class for what the empty result cost.
     """
+    if not directory.is_dir():
+        raise CaptureStoreUnreachable(
+            f"{directory} does not exist"
+            if not directory.exists()
+            else f"{directory} is not a directory"
+        )
+    try:
+        paths = sorted(directory.glob(f"*{CAPTURE_SUFFIX}"))
+    except OSError as error:
+        raise CaptureStoreUnreachable(
+            f"{directory} cannot be listed: {error}"
+        ) from None
     captures: dict[str, Capture] = {}
-    for path in sorted(directory.glob(f"*{CAPTURE_SUFFIX}")):
+    for path in paths:
         if not CAPTURE_FILENAME.match(path.name):
             raise CaptureError(
                 f"{path}: a capture file is named <sha256>{CAPTURE_SUFFIX}"
