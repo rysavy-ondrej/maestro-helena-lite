@@ -16,6 +16,12 @@ What the prototype *does* demonstrate, what it may not be read as, and the test
 that executes each of those properties end to end, are in
 [`docs/acceptance.md`](docs/acceptance.md) — `make acceptance` runs it.
 
+**To stand one up and operate it**, [`docs/deployment.md`](docs/deployment.md) is
+the ordered path — what ships, what does not, the one ordering constraint that
+matters, the operating loop, and the limits you will hit.
+[`docs/runbook.md`](docs/runbook.md) is the per-operation reference beneath it.
+**To see all six stages run**, `demo/run-demo 3`.
+
 ## The authoritative source is `concept/`
 
 **`concept/` describes what HELENA is, and it wins over this README, over any

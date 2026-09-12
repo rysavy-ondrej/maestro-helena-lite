@@ -4,6 +4,12 @@ HELENA's automatic pipeline is local end to end. Two third-party binaries carry
 it: **RisingWave**, the streaming engine and single store, and **Blink**, the
 Kafka-protocol broker. Both are pinned in [`versions.md`](versions.md).
 
+**This file is the reference, organised by topic — one section per operation.**
+If you are standing up a deployment for the first time and want the order to do
+things in, read [`deployment.md`](deployment.md) first and come back here for the
+detail. It links to these sections rather than restating them, so there is one
+copy of each procedure.
+
 ---
 
 ## 1. The hazard: a different Python minor under the engine's library name
