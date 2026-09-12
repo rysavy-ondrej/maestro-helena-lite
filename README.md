@@ -96,6 +96,32 @@ make check              # lockfile in sync, sources compile, suite passes
 `uv.lock` is the reproducibility contract and is committed; the environment is
 disposable and rebuilt from it.
 
+### The conformance gate, and the rule that comes with it
+
+[`concept/07-principles.md`](concept/07-principles.md) ends with a table headed
+**"Behaviour that must be impossible"** — twenty rows, each a plausible
+implementation that would produce a pipeline which *runs and lies*.
+[`tests/test_conformance.py`](tests/test_conformance.py) is that table as an
+executable suite: one named test per row, `MNH-01` to `MNH-20` in the note's own
+order, so a regression is caught by the suite rather than by a reader.
+
+```bash
+make conformance        # the twenty rows alone, ~30 s
+make check              # lockfile, compile, and the whole suite including them
+```
+
+It is not a second suite. It is collected by `uv run pytest -q` like everything
+else, which is what makes it required; the marker exists so that *"do the
+guarantees still hold"* is a question you can ask on its own.
+
+**Adding a row to the table means adding a test.** That is enforced rather than
+requested — the suite parses the note on every run, and a row with no
+`test_mnhNN_…` named for it is a failure, as is a test naming a row the table no
+longer holds, as is a reworded row whose test still asserts the old sentence.
+Each row also names its in-depth coverage elsewhere in the suite (`COVERED_BY`),
+and those names are resolved, so deleting the only thing checking a row fails at
+the row. The module docstring is the whole rule.
+
 The local infrastructure — the broker and the streaming engine — comes up with
 
 ```bash

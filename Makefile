@@ -3,12 +3,13 @@
 # Everything runs through `uv run`, against the `.venv/` that is already at the
 # project root. Never `pip`, never a second virtualenv, never a system python.
 
-.PHONY: help sync test check acceptance lint typecheck dev-up dev-down migrate storage rendering-size status
+.PHONY: help sync test check acceptance conformance lint typecheck dev-up dev-down migrate storage rendering-size status
 
 help:
 	@echo "sync       install the locked environment (uv sync)"
 	@echo "test       run the one pytest suite"
 	@echo "acceptance run the enrichment-status gate alone (a subset of test)"
+	@echo "conformance  run the must-never-happen table alone (a subset of test)"
 	@echo "check      lockfile is in sync, sources compile, suite passes"
 	@echo "dev-up     verify the pinned binaries and run the engine and broker"
 	@echo "dev-down   stop them again"
@@ -31,6 +32,19 @@ test:
 # tests/test_acceptance_enrichment.py.
 acceptance:
 	uv run pytest -q -m acceptance
+
+# The D8 gate: `concept/07-principles.md`'s "Behaviour that must be impossible",
+# one named test per row of the table. Like `acceptance` this is not a second
+# suite - it is part of `make test` and therefore of `make check`, which is what
+# makes it required. The marker exists because "do the guarantees still hold" is
+# a question someone needs to be able to ask on its own, and because the answer
+# takes half a minute rather than twelve.
+#
+# ADDING A ROW TO THE TABLE MEANS ADDING A TEST, and that is enforced rather than
+# asked for: tests/test_conformance.py parses the note on every run and fails
+# when a row has no test named for it. Its module docstring is the whole rule.
+conformance:
+	uv run pytest -q -m conformance
 
 dev-up:
 	scripts/dev-up
