@@ -1053,6 +1053,40 @@ In this order, and the first step is not the repository:
 4. Do not put the old value in the commit message, the report or the ticket while
    you do it. `***redacted***` is what those say.
 
+### A key did get out, on 2026-09-12, and was accepted rather than rotated
+
+Recorded because the procedure above says rotation comes first and **this
+deployment deliberately did not do it** — an exception that is worthless unless a
+later reader can see it was a decision rather than an oversight.
+
+**What happened.** While task 51 was writing the exception test in this very
+section, `http.client.InvalidURL` escaped both fetch functions untyped — it is a
+subclass of neither `OSError` nor `ValueError`, so neither typed-failure wrapper
+caught it — and pytest printed the traceback, with the live `ABUSECH_AUTH_KEY` in
+the URL path, into that session's transcript. **The bug that did it is fixed**
+(`InvalidURL` is in `_FETCH_FAILURES`, and the message is redacted), and the test
+that would catch it returning is `tests/test_secrets.py`'s exception case. Note
+what this was: the path profile biting exactly where the table above says it
+does, in the row that reads *"reaches an exception"*, during the work that was
+documenting it. The table was written against a live key for this reason.
+
+**Containment, measured rather than assumed** — zero matches for the live value
+across all of `git log --all -p`, every tracked file, `prds/`, `.run/`,
+`.pytest_cache/`, `.rwdata/`, `secrets/`, the runner logs and shell history. It
+survives in exactly one file: the task-51 agent transcript under
+`~/.claude/projects/`, outside the repository and untracked.
+
+**The decision.** The operator was asked and chose to **accept the risk and record
+it** — not to rotate, and not to scrub the transcript. The premise is that the
+container is disposable and the transcript is local to it, so the exposure ends
+when the container does.
+
+**What would reverse it:** the premise, not the incident. If this tree is ever
+copied to a machine that outlives it, if the transcript directory is backed up,
+synced or shared, or if the container stops being disposable, then step 1 of the
+procedure above applies and the key is rotated. Nothing automated watches for
+that, which is the residual risk in one sentence.
+
 ### What enforces each channel
 
 No single module owns "no credential anywhere", and that is on purpose — each
