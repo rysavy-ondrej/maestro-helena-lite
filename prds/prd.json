@@ -684,7 +684,7 @@
         "Assert a new enrichment source can be added without changing identity, provenance or assessment contracts, by adding a trivial second source in the test",
         "Write the acceptance checklist into the repository, stating the claimable properties and, beside them, the explicitly not-claimable ones: accuracy, recall, false-positive rate, escalation rate, latency, cost and identical replay"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D9 Operations] Durability, backup and single-store correctness",
