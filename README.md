@@ -122,6 +122,37 @@ Each row also names its in-depth coverage elsewhere in the suite (`COVERED_BY`),
 and those names are resolved, so deleting the only thing checking a row fails at
 the row. The module docstring is the whole rule.
 
+### The architectural boundary: five rejections, five tests
+
+[`concept/06-technology.md`](concept/06-technology.md)'s table does not only say
+what HELENA uses. Five of its rows say what it does not — **graph framework**
+(not adopted), **higher-level agent frameworks** (deferred), **workflow engine**
+(rejected), **hosted tracing** (local structured logs only), and the **second
+store**: relational profile store, vector store, checkpoint store. Each is load
+bearing for a rule somewhere else — a graph framework brings a checkpointer, a
+workflow engine brings a metadata database, a hosted tracer is a second egress
+channel for prompts and retrieved text — and each is one `uv add` from being
+reversed by accident rather than by decision.
+
+[`tests/test_architecture_boundary.py`](tests/test_architecture_boundary.py) is
+those five as tests. Beyond the declared-and-imported check that
+`tests/test_dependency_boundary.py` already makes, it asserts that a second-store
+client is not *installed* (a transitive one is an `import` away), that the
+**standard library's** stores are unimported — `sqlite3`, `shelve` and `dbm` need
+no dependency, so the approved-set test passes them by construction — that the
+package writes **no file** and starts no process, that the deployment names
+exactly two topics, and that the migrated schema defines **no source, sink,
+connection or secret**, which is the persistence target no import scan would
+reveal.
+
+**Reversing one takes a decision record, not an incidental dependency** — the
+note says so itself for the second store, and
+[`docs/decisions/0039-architectural-boundaries.md`](docs/decisions/0039-architectural-boundaries.md)
+says it for all five and lists what a reversal has to answer. A test requires
+that record to exist and to name every rejection it governs, and two meta-tests
+parse the technology table on every run, so adding a rejection to the note means
+adding a test and withdrawing one is red until the commit carries all three.
+
 The local infrastructure — the broker and the streaming engine — comes up with
 
 ```bash
