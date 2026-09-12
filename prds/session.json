@@ -1,12 +1,12 @@
 {
-  "currentIteration": 46,
-  "currentTaskIndex": 49,
-  "elapsedTimeSeconds": 778765,
-  "lastUpdateTime": 1789211735753,
+  "currentIteration": 47,
+  "currentTaskIndex": 50,
+  "elapsedTimeSeconds": 780456,
+  "lastUpdateTime": 1789213427286,
   "startTime": 1788432970645,
   "statistics": {
-    "averageDurationMs": 1755450,
-    "completedIterations": 41,
+    "averageDurationMs": 1752593,
+    "completedIterations": 42,
     "failedIterations": 4,
     "iterationTimings": [
       {
@@ -374,12 +374,20 @@
         "startTime": 1789209261067,
         "status": "completed",
         "task": 49
+      },
+      {
+        "durationMs": 1621130,
+        "endTime": 1789213427286,
+        "iteration": 47,
+        "startTime": 1789211806156,
+        "status": "completed",
+        "task": 50
       }
     ],
-    "successRate": 0.8913,
-    "successfulIterations": 41,
-    "totalDurationMs": 80750743,
-    "totalIterations": 46
+    "successRate": 0.8936,
+    "successfulIterations": 42,
+    "totalDurationMs": 82371873,
+    "totalIterations": 47
   },
   "status": "running",
   "tasksLandedOutsideRunner": {
@@ -396,5 +404,5 @@
     ],
     "note": "Implemented, verified and merged by sessions launched outside implement.sh, so no runner iteration recorded them. The statistics block counts the runner's own iterations only and deliberately excludes these eight. Their reports were rebuilt from the commit record on 2026-09-06 -- see prds/progress.txt and each report's `reconstructed` field. Task 48 is on this list for a different reason and is the one exception to the sentence above: the runner DID start it, and iteration 45 records that session failing -- killed by SIGTERM after 1815 s with a zero-byte log and no report. Its increment was intact in the working tree, and a later session verified it (two inventory pins needed extending), wrote the report and did this bookkeeping on 2026-09-12. The iteration 45 entry is left exactly as it stands, because that iteration really did fail; what happened outside the runner was the landing, not the work. The statistics block still counts the runner's own iterations only."
   },
-  "totalIterations": 46
+  "totalIterations": 47
 }

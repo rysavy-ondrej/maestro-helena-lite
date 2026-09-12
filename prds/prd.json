@@ -658,7 +658,7 @@
         "Add a test asserting no component codes against a broker-specific API beyond the Kafka protocol",
         "Document that reversing any of these requires a decision record, not an incidental dependency"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D8 Guardrails] Secrets hygiene and key-in-URL redaction tests",
