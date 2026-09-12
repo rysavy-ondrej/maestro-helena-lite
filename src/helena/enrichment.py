@@ -85,6 +85,7 @@ has reached an assessment.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import re
 import urllib.error
@@ -220,6 +221,26 @@ FAILURE_REASONS = (FETCH_FAILED, MALFORMED_RULE, EMPTY_LIST)
 # records a failure, and the failure is the point.
 FETCH_TIMEOUT_SECONDS = 60.0
 
+# What a fetch through `urllib` can raise, and every one of them is this
+# project's `fetch_failed`. `http.client.HTTPException` is in the tuple because
+# it is NOT a subclass of either `OSError` or `ValueError` -- measured
+# 2026-09-12, and it had been missing: `http.client.InvalidURL`, which
+# `putrequest` raises for a path containing a space, escaped both fetch functions
+# untyped, and its message quotes the whole request path. A URL whose path holds
+# a credential therefore reached a traceback unredacted, which is
+# `docs/runbook.md` §14's second exposure profile arriving through the one channel
+# a logger cannot cover. Both fetch functions now raise their own typed error
+# with a redacted message, and `from None` rather than `from failure`: an
+# exception chain is printed in full by every traceback printer, so a cause whose
+# message carries the key would undo the redaction one line further down. The
+# type name and the message travel in the typed error instead.
+_FETCH_FAILURES = (
+    urllib.error.URLError,
+    OSError,
+    ValueError,
+    http.client.HTTPException,
+)
+
 # Rows per INSERT. Measured against RisingWave 3.0.3 on the 2026-09-03 snapshot
 # (10 781 rows): one statement per row through `executemany` took 15.9 s, and
 # 500-row multi-row INSERTs took 1.2 s. The round trip is the cost, not the
@@ -303,7 +324,9 @@ class PublicSuffixLoad(BaseModel):
                 raise ValueError(f"a {self.status} load names the snapshot it read")
 
 
-def fetch_public_suffix_list(url: str, *, timeout: float = FETCH_TIMEOUT_SECONDS) -> bytes:
+def fetch_public_suffix_list(
+    url: str, *, redactor: Redactor, timeout: float = FETCH_TIMEOUT_SECONDS
+) -> bytes:
     """The bytes at `url`, or a `PublicSuffixListError` with `fetch_failed`.
 
     Every transport failure becomes the same typed reason on purpose: from the
@@ -313,14 +336,18 @@ def fetch_public_suffix_list(url: str, *, timeout: float = FETCH_TIMEOUT_SECONDS
     `urllib` rather than an HTTP client library: `docs/decisions/0002-dependency-set.md`
     keeps `requests` and `httpx` deliberately absent, and one GET does not earn a
     dependency.
+
+    `redactor` is required, and `_FETCH_FAILURES` and `from None` are the reason —
+    see both, beside `fetch_threatfox`.
     """
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             return response.read()
-    except (urllib.error.URLError, OSError, ValueError) as failure:
+    except _FETCH_FAILURES as failure:
         raise PublicSuffixListError(
-            f"{type(failure).__name__}: {failure}", reason=FETCH_FAILED
-        ) from failure
+            redactor.text(f"{type(failure).__name__}: {failure}"),
+            reason=FETCH_FAILED,
+        ) from None
 
 
 def parse_public_suffix_list(raw: bytes) -> tuple[PublicSuffixRule, ...]:
@@ -411,7 +438,7 @@ def load_public_suffix_list(
     recorded_url = redactor.url(source_url)
 
     try:
-        raw = fetch_public_suffix_list(source_url)
+        raw = fetch_public_suffix_list(source_url, redactor=redactor)
         rules = parse_public_suffix_list(raw)
     except PublicSuffixListError as failure:
         return _record(
@@ -1344,9 +1371,17 @@ def _length_prefixed(value: str) -> bytes:
 # exception carrying a request URL leaks whatever was in it -- and not about this
 # provider.
 #
+# **Re-measured 2026-09-12, fourth time, unchanged:** the export is still 200 with
+# no credential, the API is still 401 without the header and 200 with it, and the
+# v2 export at `threatfox-api.abuse.ch/v2/files/exports/<AUTH-KEY>/full.csv.zip`
+# -- which nothing here fetches -- answers 401 for a key that is not one, so that
+# path segment really is the credential. `docs/runbook.md` §14 is the table of
+# what each profile reaches.
+#
 # **Re-measure before trusting this.** abuse.ch changes its auth on its own
 # schedule, and a bulk export that is open today may not be tomorrow. Probe with
-# status codes; never by printing a key.
+# status codes; never by printing a key, and probe the path profile with a key
+# that is not one.
 #
 # ## What the real export looks like, measured 2026-09-06 over 4 985 entries
 #
@@ -1486,20 +1521,28 @@ class ThreatFoxEntry:
     native: Mapping[str, Any]
 
 
-def fetch_threatfox(url: str, *, timeout: float = FETCH_TIMEOUT_SECONDS) -> bytes:
+def fetch_threatfox(
+    url: str, *, redactor: Redactor, timeout: float = FETCH_TIMEOUT_SECONDS
+) -> bytes:
     """The bytes at `url`, or a `ThreatFoxError` with `fetch_failed`.
 
     No credential is attached, and that is measured rather than assumed -- see
     the section head. A caller that needs the authenticated API is using the tool
     layer, which is a different thing with a different rule about keys.
+
+    `redactor` is required anyway, and not for the credential this fetch does not
+    send: a transport failure's own message can quote the request path, so the
+    typed error this raises is built through the redactor and raised `from None`.
+    `_FETCH_FAILURES` has the measurement.
     """
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             return response.read()
-    except (urllib.error.URLError, OSError, ValueError) as failure:
+    except _FETCH_FAILURES as failure:
         raise ThreatFoxError(
-            f"{type(failure).__name__}: {failure}", reason=FETCH_FAILED
-        ) from failure
+            redactor.text(f"{type(failure).__name__}: {failure}"),
+            reason=FETCH_FAILED,
+        ) from None
 
 
 def parse_threatfox(raw: bytes) -> tuple[ThreatFoxEntry, ...]:
@@ -1869,16 +1912,36 @@ def load_threatfox(
     `concept/instruction.md` §6 requires a credential in a URL to be redacted
     before anything is **stored**, not only before anything is logged. This
     endpoint needs no credential -- measured -- and the rule is about the channel.
+    It covers **two** stored columns and not one: the recorded URL, and the
+    failure detail, which is where a fetch exception's own message carries the
+    URL it was fetching.
     """
     attempted_at = now or datetime.now(timezone.utc)
     recorded_url = redactor.url(source_url)
     try:
-        payload = fetch_threatfox(source_url) if raw is None else raw
+        payload = (
+            fetch_threatfox(source_url, redactor=redactor) if raw is None else raw
+        )
         snapshot = threatfox_rows(payload)
     except ThreatFoxError as failure:
         # The previous snapshot is untouched: nothing has been written, and the
         # claims still join. `concept/instruction.md`: never let a failure empty
         # a table -- the result is `stale`, never a silent empty opinion.
+        #
+        # The detail is redacted BEFORE it is bounded, and the order is not a
+        # preference: a truncation first would leave a half-credential the
+        # redactor no longer recognizes (`ProviderTool._diagnostic` has the same
+        # two lines in the same order for the same reason). It is redacted here
+        # as well as in `fetch_threatfox` because the two cover different
+        # failures: that one covers a transport message, this one covers every
+        # `ThreatFoxError` the parse can raise as well.
+        #
+        # The message really can carry the request URL -- measured 2026-09-12: a
+        # path holding a key and a following segment holding a space raises
+        # `http.client.InvalidURL` from `putrequest`, whose message is
+        # "URL can't contain control characters. '/v2/files/exports/<AUTH-KEY>/
+        # full.csv.zip' ...". That is `docs/runbook.md` §14's second exposure
+        # profile, and this column is where it came to rest.
         return _record_snapshot(
             connection,
             FeedSnapshot(
@@ -1888,7 +1951,7 @@ def load_threatfox(
                 outcome=FAILED,
                 snapshot_version=None,
                 failure_reason=failure.reason,
-                failure_detail=str(failure)[:MAX_FAILURE_DETAIL],
+                failure_detail=redactor.text(str(failure))[:MAX_FAILURE_DETAIL],
             ),
             tenant=tenant,
             sensor=sensor,

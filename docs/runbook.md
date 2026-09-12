@@ -932,3 +932,116 @@ repository is configured against, so `priced 0/N` and no cost is the **normal**
 state and means *not priced*, never *free*. Add a `[model_prices.<model>]` entry
 to derive a figure; the revision that derived it is recorded on every assessment
 row beside the number.
+
+---
+
+## 14. Credentials: two exposure profiles, and only one needs the URL rule
+
+`concept/07-principles.md` is absolute about the five channels — *"never logged,
+in any form: tokens and credentials — in prompts, evidence, logs, traces or
+source control"* — and then adds one rule that is narrower than it looks:
+
+    *"a key that travels in a URL path must be redacted before anything is
+    logged or stored, including the fetch trace a loader records for
+    provenance."*
+
+**That rule is about the exposure channel, not about the provider.** The same
+abuse.ch secret has two profiles, and treating them uniformly gets one of them
+wrong in each direction: assume the header profile leaks like a path and you
+redact provenance you needed; assume the path profile is as contained as a header
+and the key reaches four places at once.
+
+| | Header profile | Path profile |
+| --- | --- | --- |
+| Surface | `POST threatfox-api.abuse.ch/api/v1/`, the hunting API | `GET threatfox-api.abuse.ch/v2/files/exports/<AUTH-KEY>/full.csv.zip`, the v2 export |
+| Where the key travels | an `Auth-Key` **request header** | a **URL path segment** |
+| Reaches a proxy or access log | no — a header is not in the request line | **yes**, the path is |
+| Reaches shell history | no | **yes** (`curl`, a `wget`, a pasted command) |
+| Reaches an exception | no | **yes** — `urllib.error.HTTPError.url` carries the full request URL, and `http.client.InvalidURL` quotes the path |
+| Reaches a pasted link | no | **yes**, and this is not hypothetical: a live key reached a project conversation exactly this way |
+| Used by this repository | yes — `helena.providers`, the analyst's lookup | **no.** Nothing here fetches it |
+
+**The export this repository does fetch needs no credential at all.**
+`GET threatfox.abuse.ch/export/json/recent/` — the one
+`helena.enrichment.fetch_threatfox` uses — answers `200` with nothing attached.
+Measured again on **2026-09-12**, which is the fourth time, because a concept note
+said the opposite until 2026-09-03 and the claim had already propagated through
+four files by then:
+
+| Request | Result, 2026-09-12 |
+| --- | --- |
+| `GET threatfox.abuse.ch/export/json/recent/`, no credential | **200**, `application/json` |
+| `POST threatfox-api.abuse.ch/api/v1/`, no `Auth-Key` header | **401** |
+| `POST threatfox-api.abuse.ch/api/v1/`, `Auth-Key` header | **200** |
+| `GET threatfox-api.abuse.ch/v2/files/exports/<a key that is not one>/full.csv.zip` | **401** — so the path segment really is the credential |
+
+**Do not "re-correct" the 2026-09-03 correction.** Until then
+`concept/05-threat-intelligence.md` said the *bulk export* carried the key in its
+path and that the key had two exposure profiles; the first half was wrong and the
+note records the correction rather than overwriting it. What is true is narrower
+and is the table above: the two profiles live on **two different endpoints**, the
+path one is a v2 export **nothing here fetches**, and the endpoint the loader does
+fetch has no credential at all. That claim has already flip-flopped through four
+files once.
+
+**Re-measure before trusting any row of that table.** abuse.ch changes its auth on
+its own schedule. Probe with **status codes**, never by printing a key — and probe
+the path profile with a key that is *not* one, so the probe itself does not put the
+live key in a URL. The section head of `helena.enrichment`'s ThreatFox block
+carries the same measurements with their dates, and
+`concept/05-threat-intelligence.md` carries the history.
+
+### The loader redacts anyway, and that is deliberate
+
+`load_threatfox` and `load_public_suffix_list` both take a required `redactor` and
+both put **two** stored columns through it — `source_url` and `failure_detail` —
+even though neither endpoint wants a credential today. The reason is the first
+paragraph: the rule is about the channel. If abuse.ch moves the bulk export behind
+the v2 surface, the loader's provenance column is already safe and nothing has to
+be remembered.
+
+`Redactor.url` replaces **registered values** in a path, and deliberately does not
+guess: a path segment that merely looks opaque is a file hash in this project, and
+redacting one would destroy the provenance the fetch exists to record. The
+consequence is stated rather than hidden — *an unregistered credential in a path
+is not redacted* — and what closes it is that credentials enter only through
+`helena.config`, where every one of them is registered.
+
+### If a key does get out
+
+In this order, and the first step is not the repository:
+
+1. **Rotate the key at the provider.** A key in a pasted link is disclosed from
+   the moment it is pasted; everything else is cleanup.
+2. Replace the value in `.env`. Nothing else holds it — `git ls-files` does not
+   list `.env`, `secrets/` is ignored, and `tests/test_secrets.py` asserts both.
+3. Then deal with the copy. `uv run pytest -q tests/test_secrets.py` is the scan:
+   it reads every tracked file for every value the local `.env` holds, so a
+   committed copy is a named failure. A commit that already happened needs a
+   history rewrite, which is an operator decision and not a session's.
+4. Do not put the old value in the commit message, the report or the ticket while
+   you do it. `***redacted***` is what those say.
+
+### What enforces each channel
+
+No single module owns "no credential anywhere", and that is on purpose — each
+channel is tested where it exists:
+
+| Channel | Test |
+| --- | --- |
+| a log line, and an exception carrying a request URL | `tests/test_observability.py`, against the live key |
+| the agent-visible tool surface | `tests/test_tools.py`, against the live key |
+| the prompt bytes and the disclosure record | `tests/test_conformance.py`, MNH-15 |
+| the loader's stored URL and failure detail, path form | `tests/test_secrets.py` |
+| the wrapper, and the three places `reveal()` may be called | `tests/test_secrets.py` |
+| source control, including fixtures | `tests/test_secrets.py` |
+| a stored evidence row and an emitted message | `tests/test_secrets.py` |
+
+One asymmetry in that table is worth knowing about as an operator: a fetch failure
+used to be able to print a key into a terminal with nothing logged at all, because
+`http.client.InvalidURL` is a subclass of neither `OSError` nor `ValueError` and so
+escaped the loader's typed-failure wrapper. Both fetch functions now build their
+own redacted message and raise it with the cause suppressed
+(`helena.enrichment._FETCH_FAILURES` has the measurement). A traceback prints a
+`__cause__` chain in full, so a redacted message over an unredacted cause is not
+redacted.

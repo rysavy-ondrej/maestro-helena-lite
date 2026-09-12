@@ -117,6 +117,31 @@ is closed by `helena.config` rather than by guesswork here.
   is an `Auth-Key` header (task 1). The feed-loader increment must establish the
   bulk endpoint and its auth for itself rather than inherit an assumption.
 
+### Amendment, 2026-09-12: one exception type does carry the URL in its message
+
+The second bullet above — *"`str(exception)` does not"* — is true of
+`urllib.error.HTTPError` and `URLError` and **not** of `http.client.InvalidURL`,
+whose message quotes the whole request path: `URL can't contain control
+characters. '/v2/files/exports/<AUTH-KEY>/ full.csv.zip' (found at least ' ')`.
+`InvalidURL` is a subclass of neither `OSError` nor `ValueError`, so it also
+escaped both of `helena.enrichment`'s fetch functions untyped, which put an
+unredacted request path into a traceback with nothing having been logged at all —
+the one surface this module cannot cover, because it is reached without the
+logger.
+
+Two consequences, both implemented:
+
+- `helena.enrichment._FETCH_FAILURES` names `http.client.HTTPException`, so every
+  transport failure is the loader's own typed `fetch_failed` again;
+- both fetch functions take a **required** `redactor`, build their message through
+  `Redactor.text`, and raise it `from None`. The suppressed chain is the
+  load-bearing half: a traceback printer prints `__cause__` in full, so a redacted
+  message over an unredacted cause is not redacted. What is lost is the original's
+  own frames; what is kept is its type name and message, inside the typed error.
+
+`tests/test_secrets.py` holds both, and `docs/runbook.md` §14 has the exposure
+profiles this belongs to.
+
 ## One logging path
 
 `tests/test_observability.py::test_the_package_has_no_second_logging_path`

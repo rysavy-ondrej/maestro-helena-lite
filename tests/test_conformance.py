@@ -50,7 +50,8 @@ capture or the real engine — none asserts on the text of the thing it is
 checking. But four rows are asserted at a **narrower seam** than the row states,
 and each says so in its own docstring: MNH-15 covers the prompt and the
 disclosure record and leaves the log, the URL and the repository to the modules
-and the task that own them; MNH-16 runs the real filter against a stand-in
+that own them (`tests/test_observability.py` and `tests/test_secrets.py`);
+MNH-16 runs the real filter against a stand-in
 relation, because nothing in this repository writes an analyst-tier row into the
 enriched context yet; MNH-17 checks that every version dimension refuses an
 identifier it does not hold, and leaves "a v0 row still replays" to
@@ -257,6 +258,9 @@ COVERED_BY: dict[str, tuple[str, ...]] = {
         "test_observability::test_a_key_in_a_path_segment_is_redacted_and_the_rest_of_the_url_survives",
         "test_observability::test_the_real_feed_key_never_reaches_the_log_from_a_url_or_an_exception",
         "test_agents::test_no_prompt_and_no_rendering_ever_reaches_the_log",
+        "test_secrets::test_no_committed_file_carries_a_configured_credential",
+        "test_secrets::test_the_stored_fetch_trace_of_a_feed_load_carries_no_key_from_the_path",
+        "test_secrets::test_no_prompt_evidence_row_or_emitted_message_can_carry_a_credential",
     ),
     "MNH-16": (
         "test_rendering::test_an_analyst_tier_claim_can_never_enter_a_triage_rendering",
@@ -1110,9 +1114,11 @@ def test_mnh15_no_token_reaches_a_prompt_a_record_or_the_repository():
     neither the bytes sent to a model nor the record of having sent them contains
     a configured credential.
 
-    The repository channel is `.gitignore` plus `tests/test_config.py`; a scan of
-    committed files for live values is `prd.json`'s task 51, which owns secrets
-    hygiene and the key-in-URL profile in full.
+    The repository channel is `.gitignore` plus `tests/test_secrets.py`, which
+    owns secrets hygiene and the key-in-URL exposure profile in full: it reads
+    every tracked file for every value the local `.env` holds, and it carries the
+    two surfaces this row names that no prompt test can reach — a stored evidence
+    row and an emitted message.
     """
     configured = Settings.load(environ=ENVIRONMENT, env_file=None)
     for value in SECRET_VALUES:

@@ -153,6 +153,31 @@ that record to exist and to name every rejection it governs, and two meta-tests
 parse the technology table on every run, so adding a rejection to the note means
 adding a test and withdrawing one is red until the commit carries all three.
 
+### Secrets hygiene: two exposure profiles, not one rule
+
+The same provider secret is exposed differently depending on where it travels.
+The abuse.ch **hunting API** takes the key in an `Auth-Key` *header*, where it
+does not reach a proxy log, shell history, an exception carrying the request URL,
+or a pasted link. The **v2 export** takes it in a *URL path segment*, where it
+reaches all four — and that is not hypothetical: a live key reached a project
+conversation inside a pasted link, which is the incident the redaction rule exists
+for. `concept/07-principles.md`'s *"a key that travels in a URL path must be
+redacted before anything is logged or stored, including the fetch trace a loader
+records for provenance"* is therefore narrower than *"redact everything"* and
+stronger than *"this provider is fine"*.
+
+[`tests/test_secrets.py`](tests/test_secrets.py) holds the channels that had no
+owner: the **path** form of a loader's stored fetch trace and of its stored
+failure detail, the wrapper as a property of the package (no model field can hold
+a credential without the redacting serializer, and `reveal()` is called in three
+declared places), **source control** — every tracked file, fixtures included, read
+for every value the local `.env` holds — and the two downstream surfaces a prompt
+test cannot reach, a stored evidence row and an emitted message. The log, the
+agent-visible tool surface and the prompt bytes are owned by three other modules
+and are not restated here; [`docs/runbook.md`](docs/runbook.md) §14 has the table,
+the measurements (re-measured 2026-09-12) and what to do if a key does get out —
+rotate first, the repository second.
+
 The local infrastructure — the broker and the streaming engine — comes up with
 
 ```bash
