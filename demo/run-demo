@@ -15,7 +15,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 # In the order demo/README.md numbers them.
-DEMOS=(ingest_and_context context_over_a_day)
+DEMOS=(ingest_and_context context_over_a_day assess_a_slice)
 
 # The comment block at the top of this file, minus the leading '#', is the help.
 usage() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"; }

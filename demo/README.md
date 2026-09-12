@@ -1,13 +1,30 @@
 # Demos
 
-Two scripts, both running the pipeline as it exists today rather than narrating
-it. They answer different questions and the second is not a bigger version of the
-first.
+Three scripts, all running the pipeline as it exists today rather than narrating
+it. They answer different questions and none is a bigger version of another.
 
 | | Script | Input | The question it answers |
 | --- | --- | --- | --- |
 | 1 | `ingest_and_context.py` | `data/ingest/flow-sample.jsonl` — 62 records, one host, 130.8 s | *what happens to a record*, at a size where every number can be checked by eye |
 | 2 | `context_over_a_day.py` | `data/demo/20250920/` — 143 captures, 239 850 records, 3 199 sources, 23.97 h | *what a context looks like* when there is enough traffic for the answer to be interesting |
+| 3 | `assess_a_slice.py` | `data/ingest/flow-sample.jsonl`, re-stamped into the current window, against a snapshot fetched now | *what the whole pipeline does* — all six stages, ending in the message a consumer reads off the output topic |
+
+**Demos 1 and 2 stop at context**, because when they were written the stages
+after it did not exist. Demo 3 is the one that enriches, triages, analyses and
+emits. It is small on purpose: volume lives in demo 2, and demo 3 is where the
+assessment does.
+
+**Why demo 3 cannot use demo 2's day.** The enrichment join matches a snapshot
+whose validity interval covers the context's window
+(`sql/migrations/0015_enriched_context.sql`), and a snapshot's interval begins
+when it was fetched. The 2025-09-20 capture is roughly a year older than any
+snapshot that can be fetched today, so no interval covers it: every entity comes
+back unenriched and no request can be built at all. That is
+`docs/evaluation-corpus.md` §4's finding — the recent export is a two-day
+sighting window, not an archive, so **a corpus must be captured and enriched
+contemporaneously** and retroactive enrichment is impossible rather than merely
+stale. Demo 3 re-stamps a small capture into the current window instead, which
+is what makes it time-correct rather than merely convenient.
 
 ```bash
 demo/run-demo            # start the engine and broker, then run demo 1
@@ -19,6 +36,8 @@ demo/run-demo --list     # what there is to run
 uv run demo/ingest_and_context.py           # demo 1, if scripts/dev-up already ran
 uv run demo/context_over_a_day.py           # demo 2, the whole day (~20 min)
 uv run demo/context_over_a_day.py --files 12   # demo 2, the first two hours
+uv run demo/assess_a_slice.py               # demo 3, both passes (~4 min)
+uv run demo/assess_a_slice.py --pass a      # demo 3, the honest pass only
 ```
 
 ---
@@ -231,3 +250,89 @@ The same two things demo 1 does not: **no enrichment and no assessment**, and
 **nothing about verdict quality**. There is still no labelled corpus, and a day
 of unlabelled traffic is not one — it is a great deal more input, which is a
 different thing from evidence about output.
+
+---
+
+# Demo 3 — the whole pipeline, and what a consumer reads
+
+`uv run demo/assess_a_slice.py`. Nine stages covering `concept/01`'s six —
+ingest, context, enrich, triage, analyse, emit — against the **live** model
+endpoint `.env` configures and a ThreatFox snapshot fetched at the moment the
+demo runs. Nothing is scripted and nothing is mocked; the last thing it prints is
+the message drained back off the output topic.
+
+## It runs the same capture twice, and the contrast is the point
+
+| | Feed | What happened, on the runs recorded here |
+| --- | --- | --- |
+| **Pass A** | exactly as ThreatFox published it | 8 643 claims stored, **131 entities, every one `ok`/`no_match`**, verdict `normal`, 0 citations |
+| **Pass B** | the same snapshot with **one entry repointed at a domain this capture really contains** | **1 `malicious` claim of 131**, triage escalated `triage_suspicious`, the analyst ran |
+
+**The model is live, so pass B's ending is not fixed, and both endings observed
+so far are correct behaviour.** Once it answered `suspicious.single_detection` at
+0.72 confidence with **one citation of stored evidence**. Another time the same
+model produced `suspicious.single_detection` with **no** citation three attempts
+running, and the contract refused all three:
+
+```
+outcome_kind   typed_failure
+failure_reason schema_invalid
+failure_detail no answer validated in 3 attempt(s). The last error was:
+               Value error, 'suspicious.single_detection' from analyst requires
+               at least one citation.
+```
+
+That second ending is not the demo failing. It is `concept/01`'s CLAIM-2 —
+*invalid model responses are visible rather than absorbed* — happening for real:
+bounded retries with the validation error fed back, then a **typed failure stored
+with no verdict and emitted anyway**, never a verdict the evidence does not
+support and never a silent drop. Run it twice and you will likely see both.
+
+Pass A is what ordinary traffic against a real feed looks like, and it is the
+more important half: a two-day sighting window of a few thousand indicators has
+nothing to say about one host's routine browsing, and the pipeline says so rather
+than finding something. **Pass B's indicator is planted**, the output says so
+every time it prints, and it exists because the alternative is a demo that can
+never reach the analyst. It is the same device `tests/test_end_to_end.py`,
+`tests/test_rendering.py` and `tests/test_enriched.py` use.
+
+## What to look at
+
+- **`status` and `classification` are printed separately**, at the enrichment
+  stage and on every entity of the message: `ok` is what happened to the
+  *lookup*, `no_match` is what the snapshot *said*, and `— (no source asked)` is
+  a third thing again. `concept/instruction.md` §2 forbids collapsing them, and
+  printing only `ok` would read as a hit.
+- **The rendering is shown section by section against its budget** (15 468 of
+  25 000 characters on the recorded run), because truncation is visible or it is
+  a bug.
+- **The deterministic escalation is computed for every context**, whether or not
+  triage answered — a `normal` from a model may not suppress a high-confidence
+  match.
+- **Stage 7 builds the request, and says that nothing in `src/helena` does.**
+  `helena.orchestration.assess` is *entered* with a request; the scheduler that
+  would turn "every live context" into requests is not part of the first version.
+  The demo writes its own, exactly as the acceptance harness does.
+
+## What it does not show
+
+**Whether the verdicts are right.** There is no labelled corpus, so accuracy,
+recall, false-positive rate, escalation rate, latency and cost are not claimable
+and are not claimed. `docs/acceptance.md` is the checklist.
+
+**No live provider lookup.** The analyst runs with `provider_tools=()`, so it
+reasons over stored evidence and cites it, and the run spends none of the daily
+quota `docs/evaluation-corpus.md` sizes.
+
+**One host, one window, one source.** With two enrichment sources the demo would
+hit the open contract question in `docs/acceptance.md` finding 1 —
+`RequestVersions.enrichment_snapshot_version` is one identifier and two current
+snapshots have no single value to record. `snapshot_at` raises rather than
+picking, which is why this demo loads one source.
+
+## Requirements
+
+The engine and the broker (`scripts/dev-up`, or `demo/run-demo 3`), a configured
+model endpoint in `.env`, and outbound access to `threatfox.abuse.ch` and
+`publicsuffix.org`. Each pass works in a schema and topics of its own and drops
+them afterwards, so it can be run beside a live deployment; `--keep` leaves them.
