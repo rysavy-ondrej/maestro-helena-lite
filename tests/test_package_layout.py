@@ -106,9 +106,25 @@ COMPONENT_MODULES = {
 # named `replay`, because `concept/03-architecture.md` puts "replays from stored
 # results" inside Orchestration and that runner does not exist yet; this is the
 # guard, not the replay.
+# `status` is here on the same terms as `observability`, and it is the other half
+# of the same section: `concept/07-principles.md` gives Observability a section of
+# the principles rather than a place in the pipeline, and says what belongs in
+# each half -- *"local structured logs only, no hosted tracing"*, which is
+# `observability`, and *"the audit record is the stored assessment ... queryable
+# in a way a trace UI is not"* with the list of what must be observable, which is
+# this. It reads every stage's counters and owns none of them, so it is a
+# component of nothing.
+#
+# It is not folded into `observability` for a reason that is mechanical rather
+# than aesthetic: the metrics have to read `helena.enrichment`'s feed statuses so
+# that `missing`, `stale` and `ok` are not respelled, and `helena.enrichment`
+# imports `helena.observability` for the redactor. One module would be an import
+# cycle. `docs/decisions/0038-pipeline-metrics-and-reconciliation.md` §5 records
+# it.
 SUPPORT_MODULES = {
     "config",
     "observability",
+    "status",
     "migrations",
     "versions",
     "broker",

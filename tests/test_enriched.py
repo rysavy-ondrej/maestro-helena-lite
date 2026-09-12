@@ -146,10 +146,24 @@ def test_the_enriched_context_is_the_first_analytical_object():
     # anywhere to read its own layer -- it joins the assessment rows to this view.
     # `sql/migrations/0020_emission_counts.sql` is the third, and it reads nothing
     # but the sink: the engine-side count of messages there are to emit.
+    # `sql/migrations/0021_pipeline_observability.sql` adds five more, all of them
+    # reading their own layer as 0019 was the first to do: four over the
+    # assessment rows (`concept/07`'s latency, cost, typed failures, escalation
+    # and retrieval metrics) and the reconciliation, which is the only one that
+    # reads DOWNWARD into `signal` for the context count -- its other two terms
+    # are the assessment rows and the emission counter. The source half of that
+    # reconciliation is `helena_ingest_ledger` and it is deliberately not here:
+    # one view over both would read `source` from `analytical`, which is the
+    # invariant. docs/decisions/0038-pipeline-metrics-and-reconciliation.md §3.
     assert [name for name in analytical if declared[name].reads] == [
         VIEW,
         "helena_analytical_sink",
         "helena_analytical_emission_counts",
+        "helena_analytical_run_metrics",
+        "helena_analytical_failure_counts",
+        "helena_analytical_escalation_counts",
+        "helena_analytical_retrieval_metrics",
+        "helena_analytical_pipeline_reconciliation",
     ]
     # This view is still the one that crosses UPWARD, and it still reads nothing
     # above the signal layer.

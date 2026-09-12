@@ -97,8 +97,10 @@
 --           and helena_reference_feed_snapshot_counts below,
 --           helena_reference_feed_snapshot_validity,
 --           helena_reference_feed_attempt_validity and
---           helena_analytical_enriched_context (sql/migrations/0015), and
---           tests/test_snapshots.py.
+--           helena_analytical_enriched_context (sql/migrations/0015),
+--           helena_reference_feed_staleness (sql/migrations/0021, which reads the
+--           attempt ledger so a source whose every load failed still has a row)
+--           and tests/test_snapshots.py.
 CREATE TABLE IF NOT EXISTS helena_reference_feed_snapshot (
     -- Identity, for the reason every other stored row carries it: an INSERT onto
     -- an existing key in RisingWave is a silent upsert, and two deployments
@@ -136,7 +138,10 @@ CREATE TABLE IF NOT EXISTS helena_reference_feed_snapshot (
 --           comparison against it. It is also the right shape regardless --
 --           staleness is a fact about the moment of reading, not a row to keep.
 -- Reads:    helena_reference_feed_snapshot
--- Read by:  src/helena/enrichment.py (feed_status) and tests/test_snapshots.py.
+-- Read by:  src/helena/enrichment.py (feed_status),
+--           helena_reference_feed_staleness (sql/migrations/0021, which puts the
+--           snapshot's age in seconds beside the status this computes) and
+--           tests/test_snapshots.py.
 --           The enriched-context view (a later D3 increment) is the reader this
 --           exists for: it is what turns a claim's `ok` into `stale` without
 --           rewriting the claim.

@@ -98,7 +98,12 @@
 -- Reads:    nothing.
 -- Read by:  src/helena/orchestration.py (the writer),
 --           helena_analytical_sink (sql/migrations/0019, which selects the
---           terminal run of a pass and the triage decision beside it) and
+--           terminal run of a pass and the triage decision beside it), the five
+--           observability views of sql/migrations/0021 --
+--           helena_analytical_run_metrics, helena_analytical_failure_counts,
+--           helena_analytical_escalation_counts,
+--           helena_analytical_retrieval_metrics (for the identity a trace row
+--           does not carry) and helena_analytical_pipeline_reconciliation -- and
 --           tests/test_assessments.py.
 CREATE TABLE IF NOT EXISTS helena_analytical_assessment (
     -- sha256 over identity, context reference, context version, emitter and
@@ -279,7 +284,10 @@ CREATE TABLE IF NOT EXISTS helena_analytical_assessment_pattern (
 -- Layer:    analytical.
 -- Object:   TABLE. Written by code from `AgentResult.retrieval_trace`.
 -- Reads:    nothing.
--- Read by:  src/helena/orchestration.py and tests/test_assessments.py.
+-- Read by:  src/helena/orchestration.py, helena_analytical_retrieval_metrics
+--           (sql/migrations/0021, which counts cache hit against live query and
+--           the typed retrieval failures per source) and
+--           tests/test_assessments.py.
 --
 -- `concept/07`, "Caching": *"the retrieval trace records, per result, **whether
 -- it was a cache hit or a live query**, and the retrieval time of the underlying

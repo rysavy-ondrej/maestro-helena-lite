@@ -63,7 +63,10 @@
 -- Reads:    helena_analytical_sink
 -- Read by:  src/helena/sink.py -- `SinkStore.pending`, which is the number
 --           `helena.sink.emit` reconciles what it produced against -- an operator
---           asking the engine directly (docs/runbook.md §12), and
+--           asking the engine directly (docs/runbook.md §12),
+--           helena_analytical_pipeline_reconciliation (sql/migrations/0021,
+--           which is this count beside the contexts and assessments behind it,
+--           rather than a second count of the sink view), and
 --           tests/test_sink.py.
 CREATE VIEW helena_analytical_emission_counts AS
 SELECT tenant,

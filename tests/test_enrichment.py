@@ -424,6 +424,14 @@ def test_the_reference_objects_are_what_they_declare(
         "helena_reference_analyst_response": "BASE TABLE",
         "helena_reference_analyst_evidence": "BASE TABLE",
         "helena_reference_evidence_analyst": "VIEW",
+        # sql/migrations/0021: each feed's snapshot age against its own schedule,
+        # which is `concept/07`'s staleness metric. A reference-layer object
+        # because it reads the snapshot ledger and its `current` view and nothing
+        # else, and a plain view because `age_seconds` comes from `now()` outside
+        # a WHERE clause, which a streaming query rejects (0009's head has the
+        # measurement). `missing` / `stale` / `ok` stay apart in it, and the names
+        # are `helena.enrichment`'s rather than a fourth spelling.
+        "helena_reference_feed_staleness": "VIEW",
     }
 
 

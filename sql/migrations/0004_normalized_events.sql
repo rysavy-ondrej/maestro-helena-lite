@@ -119,7 +119,9 @@ CREATE TABLE IF NOT EXISTS helena_normalized_events (
 -- Object:   VIEW (plain). A count over a table; nothing streams or joins from
 --           it, so materializing it would be disk for a number.
 -- Reads:    helena_normalized_events
--- Read by:  src/helena/normalizer.py (EventStore.normalized, ingest_counts) and
+-- Read by:  src/helena/normalizer.py (EventStore.normalized, ingest_counts),
+--           helena_ingest_ledger (sql/migrations/0021), which sums it against the
+--           quarantine counter so produced-against-materialized is one row, and
 --           tests/test_normalizer.py.
 CREATE VIEW helena_ingest_counts AS
 SELECT tenant,

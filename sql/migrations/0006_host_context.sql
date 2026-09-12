@@ -187,8 +187,12 @@
 --           boundary drops), helena_signal_context_entity_ports
 --           (sql/migrations/0015, which pairs a context with the ports its host
 --           reached), helena_signal_context_tls (sql/migrations/0016, which
---           pairs a context with the TLS parameters it negotiated) and
---           tests/test_context.py.
+--           pairs a context with the TLS parameters it negotiated),
+--           helena_analytical_pipeline_reconciliation (sql/migrations/0021, the
+--           signal-and-analytical half of the end-to-end record count -- it
+--           reads this unbounded aggregate rather than the retained view, so
+--           that records the boundary took are not confused with records lost)
+--           and tests/test_context.py.
 --
 -- `'v1'` below is the literal copy of `helena.versions.AGGREGATION_VERSION`.
 -- It is a literal because a streaming query cannot read

@@ -121,7 +121,9 @@ CREATE TABLE IF NOT EXISTS helena_ingest_quarantine (
 --           ingestion refused, and nothing streams or joins from it, so
 --           materializing it would be disk for a count.
 -- Reads:    helena_ingest_quarantine
--- Read by:  src/helena/normalizer.py (Quarantine.counts) and
+-- Read by:  src/helena/normalizer.py (Quarantine.counts),
+--           helena_ingest_ledger (sql/migrations/0021), which sums it against the
+--           normalized counter so produced-against-materialized is one row, and
 --           tests/test_normalizer.py.
 CREATE VIEW helena_ingest_quarantine_counts AS
 SELECT tenant,

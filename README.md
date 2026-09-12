@@ -56,6 +56,7 @@ src/helena/          one package, one module per architecture component
   broker.py            the Kafka wire protocol, both ends, and nothing else
   config.py            the fail-loud environment loader and Secret
   observability.py     the one structured log channel and its redactor
+  status.py            the metric views read back, and the rates that refuse zero
   migrations.py        applies sql/migrations/ and records what it applied
   versions.py          the nine recorded version dimensions, and stamping
 sql/migrations/      the engine's schema: NNNN_name.sql, applied in order
@@ -66,7 +67,8 @@ config/agents.toml   how many times one assessment may ask the model, and
 config/policy.toml   the confidence thresholds, the budget values, and the send policy
 tests/               the one pytest suite, mirroring the package
 scripts/             dev-up / dev-down, the pin-and-endpoint check, migrate, replay,
-                     emit (drain the assessed contexts to the output topic), and
+                     emit (drain the assessed contexts to the output topic),
+                     status (the pipeline's own numbers, as plain SQL), and
                      measure_rendering (what a real capture renders to)
 demo/                one script that runs ingest and context and prints the result
 docs/decisions/      why each dependency and each layout choice is here
@@ -186,6 +188,31 @@ strip the request URL structurally, and the serialized line is swept once more
 before it is written. What it covers and what it deliberately does not guess at
 are in
 [`docs/decisions/0005-structured-logging-and-redaction.md`](docs/decisions/0005-structured-logging-and-redaction.md).
+
+`helena.status` is the other half of the same decision. **The audit record is the
+stored assessment, not a trace UI** — it already carries the retrieval trace, the
+disclosure record, cost, latency and versions as typed columns, which is
+queryable in a way a trace UI is not. So what must be observable is seven plain
+views over rows the pipeline already writes
+([`sql/migrations/0021_pipeline_observability.sql`](sql/migrations/0021_pipeline_observability.sql)):
+latency, cost, tokens, retries and cache state per model; the typed failures by
+reason; the escalation rate and which trigger caused it; each feed's snapshot age
+against its own schedule; and the end-to-end record reconciliation, beside the
+retention boundary's rejection rate (0009) and the engine-side emission count
+(0020).
+
+    uv run scripts/status.py --captures data/ingest     # `helena status`
+
+Every number is a `SELECT` an operator with `psql` can run without any of this
+code, which is the point. **No rate is stored and no rate is computed over an
+empty denominator**: `0.0` would read as "the boundary dropped nothing", "triage
+escalates nothing" or "this model is free" when the truth is that nothing has
+run, so each one raises and the report prints the reason where the number would
+have been. The reconciliation is two views rather than one because its five terms
+live in three view layers and one of them — how many records the capture held —
+is not in the engine at all;
+[`docs/decisions/0038-pipeline-metrics-and-reconciliation.md`](docs/decisions/0038-pipeline-metrics-and-reconciliation.md)
+has that and the rest, and `docs/runbook.md` §13 explains the numbers.
 
 ## Versions
 

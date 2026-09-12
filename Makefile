@@ -3,7 +3,7 @@
 # Everything runs through `uv run`, against the `.venv/` that is already at the
 # project root. Never `pip`, never a second virtualenv, never a system python.
 
-.PHONY: help sync test check acceptance lint typecheck dev-up dev-down migrate storage rendering-size
+.PHONY: help sync test check acceptance lint typecheck dev-up dev-down migrate storage rendering-size status
 
 help:
 	@echo "sync       install the locked environment (uv sync)"
@@ -14,6 +14,7 @@ help:
 	@echo "dev-down   stop them again"
 	@echo "migrate    apply sql/migrations/ to the configured engine"
 	@echo "storage    what each relation of the migrated schema stores"
+	@echo "status     the pipeline's own numbers, read out of the engine"
 	@echo "rendering-size  what a real capture renders to, against the configured budget"
 	@echo "lint       not yet available - see docs/decisions/0003-lint-and-typecheck-tooling.md"
 	@echo "typecheck  not yet available - see docs/decisions/0003-lint-and-typecheck-tooling.md"
@@ -53,6 +54,16 @@ storage:
 # cites what this produced; see docs/decisions/0019-the-rendering-size-budget.md.
 rendering-size:
 	uv run scripts/measure_rendering.py
+
+# `helena status`: latency, cost, staleness, escalation, the typed failures and
+# the end-to-end record reconciliation, every one of them a plain SELECT over the
+# single store. Not a health check - it prints numbers and does not decide which
+# are bad; docs/runbook.md §13 explains them. Pass the retained capture directory
+# to include how many records existed:
+#
+#     uv run scripts/status.py --captures data/ingest
+status:
+	uv run scripts/status.py
 
 check:
 	uv lock --check

@@ -350,9 +350,13 @@ which retrofitted `Superseded by:` into the seven definitions it replaces, in
 retrofitted `Read by:` into the five definitions the sink view reads — in 0009,
 0010, 0015 and 0018 (twice). `0020_emission_counts.sql` adds one more, into 0019
 itself, for the same reason: the emission counter reads the sink view, and every
-relation that is read has to name its reader. There is no in-place repair short
-of writing the new checksums into the ledger by hand, which is the same act with
-the evidence removed.
+relation that is read has to name its reader.
+`0021_pipeline_observability.sql` is the largest of these so far — its seven
+views read relations defined in **0003, 0004, 0006, 0013 (twice), 0018 (twice)
+and 0020**, and every one of those files had to name its new reader. A store
+migrated before 0021 has to be dropped and re-migrated. There is no in-place
+repair short of writing the new checksums into the ledger by hand, which is the
+same act with the evidence removed.
 
 **`Read by:` is the second standing cost of the same kind, and it has the same
 justification as `Superseded by:`.**
@@ -821,3 +825,110 @@ that happens, so the diagnosis would go to the wrong place entirely.
 `helena.config` refuses that configuration at startup, naming both variables. If
 you see quarantine filling with records that look like assessments, check those
 two variables first.
+
+
+## 13. Status: what the pipeline's own numbers say
+
+```bash
+uv run scripts/status.py
+uv run scripts/status.py --captures data/ingest
+```
+
+This is `helena status`. It prints, for `HELENA_TENANT` / `HELENA_SENSOR`, the
+end-to-end reconciliation, what the retention boundary is dropping, each feed's
+snapshot age against its schedule, latency / cost / retries / cache state per
+model, the typed failures, the escalation rate and the retrieval trace by source.
+
+**It is not a health check.** It prints numbers and does not decide which of them
+is bad — there are no thresholds here and none are configured. This section is
+where the numbers are explained.
+
+**Every number is a `SELECT`, and none of it needs this command.** The views are
+`sql/migrations/0021_pipeline_observability.sql` plus `0009`'s rejection counter
+and `0020`'s emission counter, so an operator with `psql` and none of this
+project's code gets the same answers:
+
+```sql
+SELECT * FROM helena_analytical_pipeline_reconciliation;
+SELECT * FROM helena_analytical_run_metrics;
+SELECT * FROM helena_reference_feed_staleness;
+SELECT * FROM helena_signal_retention_rejections;
+```
+
+That is deliberate and it is the reason **no hosted tracer is configured, and
+adding one is not a configuration change**: a tracing service is a second egress
+channel carrying prompts, rendered context and retrieved provider text
+(`concept/07-principles.md`, `concept/instruction.md` §3). See
+`docs/decisions/0038-pipeline-metrics-and-reconciliation.md`.
+
+### 13.1 `--captures` and why its absence is not zero
+
+How many records **existed** is a property of the retained capture file and of
+nothing else: the broker is consume-once and restart-volatile (§3), so the topic
+cannot be asked. Without `--captures` the report prints
+
+```
+  capture records   not read (pass --captures DIR)
+  unaccounted       — (no capture directory was read, so how many records existed is unknown; ...)
+```
+
+rather than a zero, which would report a deployment that had lost every record it
+ever ingested.
+
+### 13.2 Reading the PIPELINE block
+
+```
+PIPELINE
+  capture records   11 in 1 capture(s)
+  normalized        10
+  quarantined       1
+  admitted          11
+  unaccounted       0
+  context records   10 in 1 context(s)
+  unaggregated      0
+  assessments       3 over 2 context(s)
+  emittable         2 message(s)
+```
+
+| Line | What a non-zero means |
+| --- | --- |
+| `unaccounted` | records that reached **neither** store. The broker keeps nothing, so they are gone; replay the capture (§8) |
+| `unaggregated` | normalized events that reached no context. Usually a record with no `ip` layer or an unparseable `ts` — the tumble drops it. A fact about the input, not a fault |
+| `assessments` > `emittable` | ordinary: an escalated pass stores two runs and emits one message |
+| `admitted` > `capture records` | refused outright. A capture was published to the topic twice and drained once; storing an event again is an upsert, so it looks exactly like loss (§7) |
+
+### 13.3 Reading FEEDS
+
+```
+FEEDS
+  threatfox                stale    1 attempt(s), 3.000 interval(s) behind
+```
+
+`missing`, `stale` and `ok` are three different things and are never collapsed:
+
+| Status | What it is | What to do |
+| --- | --- | --- |
+| `ok` | the snapshot is younger than the source's own refresh interval, **or** the source declares no schedule (the SSLBL JA3 list is not late, it is finished) | nothing |
+| `stale` | there is a snapshot and the publisher has moved past it. The claims still stand — removal from a feed is not exoneration | look at `intervals behind`. One is a late cron; thirty is a loader nobody is running |
+| `missing` | **no snapshot at all.** Never `no_match`, which is a source that ran and found nothing | if `attempt(s)` is non-zero and a `last failed attempt` line follows, the loader runs and fails — §10. If it is a source you expected, nobody has loaded it |
+
+### 13.4 Where a rate is a sentence instead of a number
+
+```
+    cache    0 hit(s) / 0 live, ratio — (triage's runs ... retrieved nothing, so
+             there is no cache-hit ratio; 0.0 would read as 'the cache never
+             helped' about runs that never asked)
+```
+
+That is the report working. Every rate here refuses an empty denominator and says
+why, because `0.0` over nothing reads as good news — "the boundary dropped
+nothing", "triage escalates nothing", "this model is free" — when the truth is
+that nothing has run.
+
+### 13.5 "The cost says 0.000000"
+
+`config/policy.toml` is deliberately silent about the price of the endpoint this
+repository is configured against, so `priced 0/N` and no cost is the **normal**
+state and means *not priced*, never *free*. Add a `[model_prices.<model>]` entry
+to derive a figure; the revision that derived it is recorded on every assessment
+row beside the number.
