@@ -162,7 +162,7 @@
     "task 52: A citation to a completed negative. `no_match` rows carry no `evidence_id` \u2014 they are the LEFT JOIN finding nothing to join, so there is no stored row to identify \u2014 so a test that asserted every emitted evidence row has an identifier fails, and an agent cannot cite 'nobody has heard of this'. CLAIM-1 is about the positives, and the module says so where it would otherwise look like an omission.",
     "task 52: Asserting that the fingerprint entities carry no evidence at all \u2014 the 'nobody to ask' sixth case of `sql/migrations/0019_sink.sql`. They carry `threatfox` / `ok` / `no_match` instead, because the join does not read a source's declared entity types. That is the second escalation above; the assertion was replaced by a test that pins the actual behaviour and names it as a finding."
   ],
-  "lastUpdated": "2026-09-12T14:05:35.387237+00:00",
+  "lastUpdated": "2026-09-12T14:43:27.680269+00:00",
   "lessonsLearned": [
     "task 00: The two earlier task-00 sessions failed at 0 s with exit 1 and wrote nothing to disk. The cause is in prds/logs/*.stderr: '--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons'. It was a runner invocation problem, not a code problem \u2014 nothing had been half-built.",
     "task 00: bin/blink starts from a settings YAML containing just `{}`. Defaults observed: broker ports 9094 and 9092 (metadata advertises 9094), REST port 30004, retention 5m, 1 partition per topic, kafka_hostname 'localhost'. It prints a large ANSI banner to stdout \u2014 pipe it to a file, not into a terminal you are reading.",
@@ -1260,6 +1260,12 @@
       "status": "completed",
       "summary": "`tests/test_end_to_end.py` runs the six stages over the real wire \u2014 the committed ten-record capture published to the pinned broker record by record, consumed back, aggregated by the engine, enriched against a loaded snapshot, rendered, triaged, analysed through a scripted OpenAI-compatible endpoint on the loopback interface, stored as typed rows, emitted, and drained back off the output topic \u2014 and asserts exactly the four properties `concept/01-goal-and-scope.md` permits, one test group per claim, all read off the emitted message. `docs/acceptance.md` is the checklist beside it: the four claimable properties with the test that demonstrates each, the eight not-claimable ones, in the note's own three clauses, with the reason, and six things the run does not demonstrate. Three meta-tests keep the note, the checklist and the module from drifting apart, and MNH-20 now requires this file to carry its own disclaimer.",
       "title": "[D9 Integration] End-to-end fixture run and the acceptance definition"
+    },
+    "53": {
+      "next_session_should_know": "The previous session produced no report. Check prds/logs/ before assuming nothing was changed on disk.",
+      "status": "failed",
+      "summary": "Session ended with exit code 0 and wrote no report.",
+      "title": "[D9 Operations] Durability, backup and single-store correctness"
     }
   }
 }
