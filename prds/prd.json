@@ -646,7 +646,7 @@
         "Map each test back to its concept row by identifier in the test name",
         "Wire the suite as a required gate and document that adding a row to the table means adding a test"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D8 Guardrails] Architectural boundary tests over dependencies and stores",
