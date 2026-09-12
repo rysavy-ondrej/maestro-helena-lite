@@ -632,7 +632,7 @@
         "Add a `helena status` command rendering these from plain SQL",
         "Document that these are queryable in a way a trace UI is not, and that no hosted tracer is adopted"
       ],
-      "done": false
+      "done": true
     },
     {
       "title": "[D8 Guardrails] Conformance suite for 'behaviour that must be impossible'",

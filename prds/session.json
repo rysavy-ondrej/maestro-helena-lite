@@ -1,6 +1,6 @@
 {
   "currentIteration": 45,
-  "currentTaskIndex": 48,
+  "currentTaskIndex": 49,
   "elapsedTimeSeconds": 680401,
   "lastUpdateTime": 1789113372263,
   "startTime": 1788432970645,
@@ -383,9 +383,10 @@
       22,
       23,
       24,
-      25
+      25,
+      48
     ],
-    "note": "Implemented, verified and merged by sessions launched outside implement.sh, so no runner iteration recorded them. The statistics block counts the runner's own iterations only and deliberately excludes these eight. Their reports were rebuilt from the commit record on 2026-09-06 -- see prds/progress.txt and each report's `reconstructed` field."
+    "note": "Implemented, verified and merged by sessions launched outside implement.sh, so no runner iteration recorded them. The statistics block counts the runner's own iterations only and deliberately excludes these eight. Their reports were rebuilt from the commit record on 2026-09-06 -- see prds/progress.txt and each report's `reconstructed` field. Task 48 is on this list for a different reason and is the one exception to the sentence above: the runner DID start it, and iteration 45 records that session failing -- killed by SIGTERM after 1815 s with a zero-byte log and no report. Its increment was intact in the working tree, and a later session verified it (two inventory pins needed extending), wrote the report and did this bookkeeping on 2026-09-12. The iteration 45 entry is left exactly as it stands, because that iteration really did fail; what happened outside the runner was the landing, not the work. The statistics block still counts the runner's own iterations only."
   },
   "totalIterations": 45
 }
