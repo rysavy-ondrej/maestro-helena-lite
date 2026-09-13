@@ -818,7 +818,7 @@ def test_an_unreachable_capture_store_is_not_an_empty_one(tmp_path: Path):
     for path in (
         tmp_path / "not-there",
         FIXTURE_CAPTURES / "README.md",
-        PROJECT_ROOT / "data" / "ingest" / "flow-sample.jsonl",
+        PROJECT_ROOT / "data" / "connections" / "maintainer-host" / "flow-sample.jsonl",
     ):
         with pytest.raises(CaptureStoreUnreachable) as unreachable:
             durability.check_capture_store(path)

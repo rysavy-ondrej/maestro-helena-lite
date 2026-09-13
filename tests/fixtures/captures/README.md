@@ -11,9 +11,9 @@ the record exactly as a producer supplies it. The second format's fixture is in
 `../captures-flow-envelope/`, in its own directory because a capture directory
 holds one format.
 
-Every record is a byte-for-byte copy of a line of `data/ingest/flow-sample.jsonl`
+Every record is a byte-for-byte copy of a line of `data/connections/maintainer-host/flow-sample.jsonl`
 (sha256 `6c2f903e…`, cleared for the repository, datasheet in
-`data/ingest/README.md`). Nothing here is synthesised: a hand-written flow record
+`data/connections/maintainer-host/README.md`). Nothing here is synthesised: a hand-written flow record
 would be a guess about the input contract, and the contract is exactly what these
 fixtures exist to test.
 

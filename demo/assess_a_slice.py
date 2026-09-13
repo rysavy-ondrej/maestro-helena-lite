@@ -37,7 +37,7 @@ appears in the other -- realistic, and useless for showing a join.
 
 ## Why the capture is re-stamped into the current window
 
-`data/ingest/flow-sample.jsonl` is dated 2024-06-01 and the retention boundary
+`data/connections/maintainer-host/flow-sample.jsonl` is dated 2024-06-01 and the retention boundary
 (`sql/migrations/0009_retention_boundary.sql`) does not show a context that old.
 Every record is therefore re-stamped into the window this run falls in -- `ts` is
 a field of the input contract, so moving it is a contract-permitted change to a
@@ -133,7 +133,7 @@ from helena.policy import v1 as policy_v1  # noqa: E402
 from helena.rendering import v1 as rendering_v1  # noqa: E402
 from helena.taxonomy import ANALYST, TRIAGE  # noqa: E402
 
-SAMPLE = ROOT / "data" / "ingest" / "flow-sample.jsonl"
+SAMPLE = ROOT / "data" / "connections" / "maintainer-host" / "flow-sample.jsonl"
 
 #: The same two URLs `scripts/load_threatfox.py` and `demo/context_over_a_day.py`
 #: hold. Neither carries a credential: the recent export answers 200 with nothing

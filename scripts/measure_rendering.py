@@ -2,7 +2,7 @@
 """Measure what a real capture renders to: entity rows per host, and characters.
 
     uv run scripts/measure_rendering.py
-    uv run scripts/measure_rendering.py --capture data/ingest/flow-sample.jsonl
+    uv run scripts/measure_rendering.py --capture data/connections/maintainer-host/flow-sample.jsonl
     uv run scripts/measure_rendering.py --budget 4000
 
 `concept/08-open-questions.md` leaves the numeric budget values open and
@@ -52,7 +52,7 @@ from helena.normalizer import CaptureError, EventStore, Normalizer, describe_cap
 from helena.rendering import v1
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CAPTURE = PROJECT_ROOT / "data" / "ingest" / "flow-sample.jsonl"
+DEFAULT_CAPTURE = PROJECT_ROOT / "data" / "connections" / "maintainer-host" / "flow-sample.jsonl"
 
 #: The context window `sql/migrations/0006_host_context.sql` tumbles on, in
 #: seconds. Shifting by a multiple of it is what preserves the capture's own

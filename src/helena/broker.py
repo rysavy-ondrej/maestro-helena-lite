@@ -113,7 +113,7 @@ _BROKER_TIMEOUT_SECONDS = 30.0
 # One message is one flow record (`docs/decisions/0014-the-ingest-topic-message.md`)
 # and the flow-record contract puts no bound on a record's size: a long-lived TCP
 # flow carries one `tcp.segs` entry per segment, so the record grows with the
-# traffic it describes. Measured over `data/demo/20250920` — 239 850 records of a
+# traffic it describes. Measured over `data/connections/network-day/20250920` — 239 850 records of a
 # day of one network — the median record is 470 bytes and the largest is
 # 4 382 610. librdkafka's producer default `message.max.bytes` is 1 000 000 and
 # its `max.partition.fetch.bytes` is 1 048 576, so two of those 239 850 records

@@ -491,7 +491,7 @@ Then check what already exists on disk before writing anything. Earlier tasks ha
 run and prds/reports/ holds their handovers, and the project already ships working
 artifacts you must use rather than rebuild (CONTEXT.md §3):
   - bin/risingwave 3.0.3 and bin/blink 0.2.0, already built. \`source bin/env.sh\` first.
-  - data/ingest/flow-sample.jsonl (62 real flow records) and data/threatfox/*.json
+  - data/connections/maintainer-host/flow-sample.jsonl (62 real flow records) and data/enrichment/threatfox/*.json
     (3375 ip:port, 433 domain, 287 url) — real shapes for design and for tests.
   - .venv/ — already created with uv venv (Python 3.12.14), no packages installed
     yet. Use it; \`uv add\` for dependencies, \`uv run\` for everything. Never pip,

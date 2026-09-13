@@ -62,7 +62,7 @@ snapshot versioning a harder problem, not an easier one
 | File-hash indicators | 452 (9.1 %) | **Skipped and counted** — no entity type to attach to |
 | `threat_type` | `botnet_cc` 4 084, `payload` 452, `payload_delivery` 447, `cc_skimming` a handful | Every one maps to the **root**; an unseen one is counted |
 
-Confidence distribution over the `data/threatfox/` snapshot, 2026-09-09, which is
+Confidence distribution over the `data/enrichment/threatfox/` snapshot, 2026-09-09, which is
 where the 0.80 threshold came from: the distribution is **bimodal**, and 0.75
 carries two thirds of the address side on its own (2 254 of 3 375). See
 `config/policy.toml`, which also says the threshold is **a candidate, not a
@@ -112,6 +112,6 @@ in `concept/05` — [0046](../decisions/0046-negative-results-are-kept.md).
 ## Terms
 
 Fair use binds both tiers; the datasets stay out of the repository
-(`data/threatfox/` is gitignored, and only a small extract is committed as a test
+(`data/enrichment/threatfox/` is gitignored, and only a small extract is committed as a test
 fixture). **There is no false-positive feed to enter** — measured 2026-09-10, and
 recorded in [`../deferred.md`](../deferred.md) §1 rather than designed around.

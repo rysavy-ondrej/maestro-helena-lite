@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Rewrite the destination of real flows to listed indicators, and label what was done.
 
-    uv run scripts/plant_indicators.py --captures .corpus/day --export data/threatfox \
+    uv run scripts/plant_indicators.py --captures .corpus/day --export data/enrichment/threatfox \
         --out .corpus/planted --per-scenario 2
-    uv run scripts/plant_indicators.py --captures .corpus/day --export data/threatfox \
+    uv run scripts/plant_indicators.py --captures .corpus/day --export data/enrichment/threatfox \
         --out .corpus/planted --scenario contacted-address --scenario resolved-only
 
 `docs/synthetic-corpus.md` is the design, the scenario table and — the part worth

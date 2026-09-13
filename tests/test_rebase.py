@@ -5,7 +5,7 @@ addition works — it is that **every absolute timestamp in a record moves by th
 same amount and nothing else moves at all**, because a record whose segments
 predate its own start is not something any downstream check would catch.
 
-The day capture (`data/demo/20250920`) carries four absolute epochs and the
+The day capture (`data/connections/network-day/20250920`) carries four absolute epochs and the
 committed sample carries one, so a test written only against the sample would
 pass while the script silently left three fields behind. These fixtures carry all
 four.

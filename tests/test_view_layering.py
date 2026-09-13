@@ -698,7 +698,7 @@ def test_materializing_an_intermediate_that_feeds_an_aggregate_costs_disk(
     What is asserted is the direction, because the size of the difference is a
     property of the input -- the aggregation factor -- and not a constant.
     Measured on 2026-09-04: **+12 %** over this ten-record capture, and **+56 %**
-    over 73 flow rows (these ten plus `data/ingest/flow-sample.jsonl`) collapsing
+    over 73 flow rows (these ten plus `data/connections/maintainer-host/flow-sample.jsonl`) collapsing
     into 2 contexts. `concept/03-architecture.md`'s 42 % is a third workload's
     number and is not reproduced here; what the check gives is the number for
     whatever is actually loaded, which is the point of having it. Run the suite

@@ -62,14 +62,14 @@ The models deliberately do **not** set `hide_input_in_errors`, which every
 settings model in `helena.config` does set. A credential must never reach a
 traceback; a rejected flow record has to name the offending value or the
 quarantine row it produces cannot be diagnosed — and that row holds the whole
-raw record anyway. `data/ingest/README.md` records what a flow record does carry
+raw record anyway. `data/connections/maintainer-host/README.md` records what a flow record does carry
 (device identifiers, GUIDs, user-agent strings) and confirms it carries no
 credentials, tokens, cookies or authorization headers.
 
 ## Requiredness is measured, and it is the likeliest source of a false quarantine
 
 **This is the open assumption in the contract.** The field set and the
-requiredness of every field were derived from `data/ingest/flow-sample.jsonl` —
+requiredness of every field were derived from `data/connections/maintainer-host/flow-sample.jsonl` —
 62 records, one host, 130.8 s — which is the only flow-record corpus that
 exists. The rule applied: a key is in the contract only if it was observed; it
 is required if it was present in every observation of its kind; it is optional
@@ -77,7 +77,7 @@ if the sample shows it absent at least once, **including when the counter-exampl
 comes from the other HTTP version**, because a response's `content_type` is the
 same fact over HTTP/1.1 as over HTTP/2.
 
-`data/ingest/README.md` warns that this capture's ratios describe the capture
+`data/connections/maintainer-host/README.md` warns that this capture's ratios describe the capture
 and not the schema. So a field required here because fifteen observations all
 carried it may be optional in reality, and a producer omitting it will be
 **quarantined rather than accepted**. That is the intended direction of the
@@ -94,7 +94,7 @@ responses.
 ### Addendum, 2026-09-05: the second capture arrived
 
 The paragraph above is kept as written, because what it predicted is what
-happened and the prediction is the useful part. `data/demo/20250920` — 143
+happened and the prediction is the useful part. `data/connections/network-day/20250920` — 143
 captures, 239 850 records, 3 199 source addresses, 23.97 hours of one network —
 was **refused in its entirety**: a quarantine rate of 100 %, every record a
 `contract_violation`.
@@ -134,7 +134,7 @@ further observation of the input, never a field tightened on a hunch.
 `tests/test_normalizer.py` measures both halves against the capture in place and
 skips when it is absent. The capture is not in the repository and `.gitignore`
 keeps it out: `flow-sample.jsonl` carries a recorded clearance and a datasheet
-(`data/ingest/README.md`) and this capture carries neither, which is a reason to
+(`data/connections/maintainer-host/README.md`) and this capture carries neither, which is a reason to
 leave it where it is rather than a finding about it.
 
 Two things the contract deliberately does **not** enforce, because enforcing

@@ -60,7 +60,7 @@ from helena.normalizer import (
 from helena.observability import Redactor
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SAMPLE = PROJECT_ROOT / "data" / "ingest" / "flow-sample.jsonl"
+SAMPLE = PROJECT_ROOT / "data" / "connections" / "maintainer-host" / "flow-sample.jsonl"
 FIXTURE_CAPTURES = Path(__file__).resolve().parent / "fixtures" / "captures"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "public-suffix-list"
 EXTRACT = FIXTURES / "extract.dat"
@@ -847,7 +847,7 @@ def test_the_private_section_separates_shared_infrastructure(
 ):
     """Two tenants of one platform are two registrants, and both sections say so.
 
-    `data/threatfox/domains_recent.json` carries `*.workers.dev` names, which is
+    `data/enrichment/threatfox/domains_recent.json` carries `*.workers.dev` names, which is
     the case this is about: an indicator on one tenant's name is not an
     indicator on another's, and an ICANN-only derivation would put both under
     `workers.dev` and lose the distinction entirely.
@@ -1040,7 +1040,7 @@ def test_the_extract_answers_as_the_published_list_does():
 
 
 def _sample_names() -> set[str]:
-    """Every domain name `data/ingest/flow-sample.jsonl` carries."""
+    """Every domain name `data/connections/maintainer-host/flow-sample.jsonl` carries."""
     from urllib.parse import urlsplit
 
     found: set[str] = set()

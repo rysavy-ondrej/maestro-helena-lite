@@ -204,7 +204,7 @@ uv run scripts/status.py --captures <dir>              # ... including records r
 
 `--captures` takes **the directory your deployment retains captures in**, and
 there is no default, deliberately. A capture store is a directory of files each
-named `<sha256>.jsonl` — `data/ingest/` is *not* one: it holds a sample under a
+named `<sha256>.jsonl` — `data/connections/maintainer-host/` is *not* one: it holds a sample under a
 human name, and both this file and the `Makefile` used it as the example until
 2026-09-12. A path that is not a readable capture store is a named failure
 (`CaptureStoreUnreachable`) rather than a report of zero records, because a

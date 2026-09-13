@@ -3,7 +3,7 @@
 Three things are under test: the raw flow record contract, the captures it is
 read from, and the identity the Normalizer stamps onto an event. The first two
 are exercised against real data — all 62 records of
-`data/ingest/flow-sample.jsonl` and the committed capture fixtures — because the
+`data/connections/maintainer-host/flow-sample.jsonl` and the committed capture fixtures — because the
 contract is a claim about what a producer actually sends, and a claim like that
 tested against a hand-written record only says what the test author remembered.
 
@@ -79,8 +79,8 @@ from helena.normalizer import (
 from helena.versions import VersionSet
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SAMPLE = PROJECT_ROOT / "data" / "ingest" / "flow-sample.jsonl"
-SAMPLE_DATASHEET = PROJECT_ROOT / "data" / "ingest" / "README.md"
+SAMPLE = PROJECT_ROOT / "data" / "connections" / "maintainer-host" / "flow-sample.jsonl"
+SAMPLE_DATASHEET = PROJECT_ROOT / "data" / "connections" / "maintainer-host" / "README.md"
 FIXTURE_CAPTURES = Path(__file__).resolve().parent / "fixtures" / "captures"
 
 # The two committed captures, by the digest each file is named with. Named here
@@ -159,12 +159,12 @@ def test_every_fixture_record_validates_and_round_trips(
 # The day capture is the second observation the contract's requiredness rests on
 # (see `helena.normalizer`, "Which fields are required"). It is not in the
 # repository: 239 850 records of a whole network's traffic, carrying no clearance
-# of the kind `data/ingest/README.md` records for the sample, kept out by
+# of the kind `data/connections/maintainer-host/README.md` records for the sample, kept out by
 # `.gitignore` and measured where it lies. So these tests skip when it is absent
 # rather than failing, and the
 # second one exists so that a *present* capture cannot quietly stop being
 # evidence for the fields the first one made optional.
-DAY_CAPTURE = PROJECT_ROOT / "data" / "demo" / "20250920"
+DAY_CAPTURE = PROJECT_ROOT / "data" / "connections" / "network-day" / "20250920"
 day_capture_present = pytest.mark.skipif(
     not DAY_CAPTURE.is_dir(),
     reason=f"{DAY_CAPTURE} is not present; it is deliberately not committed",
@@ -470,7 +470,7 @@ def test_a_lookup_that_resolved_nothing_is_not_an_unobserved_lookup():
 
 
 def _datasheet_value(label: str) -> str:
-    """One row of the datasheet table in `data/ingest/README.md`."""
+    """One row of the datasheet table in `data/connections/maintainer-host/README.md`."""
     match = re.search(rf"^\| {label} \| (.+?) \|$", SAMPLE_DATASHEET.read_text(), re.M)
     assert match, f"{SAMPLE_DATASHEET} has no '{label}' row"
     return match.group(1)
@@ -479,7 +479,7 @@ def _datasheet_value(label: str) -> str:
 def test_the_sample_capture_matches_its_datasheet():
     """Two copies of the capture's identity, asserted equal by computing one.
 
-    `data/ingest/README.md` records the sha256, the byte size and the record
+    `data/connections/maintainer-host/README.md` records the sha256, the byte size and the record
     count of the sample, and says the checksum *is* the version. This is the
     same rule the project applies to a version constant with two homes: two
     copies that can drift are worse than none. The datasheet is the second copy,

@@ -89,7 +89,7 @@ statistics bidirectional because direction is signal, and there is no
 ## The coverage this rests on, and its one hole
 
 Every assertion is over real records — the ten-record layer-coverage capture in
-`tests/fixtures/captures/`, and all 62 records of `data/ingest/flow-sample.jsonl`
+`tests/fixtures/captures/`, and all 62 records of `data/connections/maintainer-host/flow-sample.jsonl`
 — put through the real normalizer and the real event store, then read back out of
 the views on a throwaway engine.
 

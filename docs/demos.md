@@ -41,15 +41,15 @@ agreement.
 
 | # | Script | Tier | What it shows | Data it needs | Runtime |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `ingest_and_context.py` | foundations | one record's whole journey, at a size where every number checks by eye | `data/ingest/` (committed) | ~1 min |
-| 2 | `context_over_a_day.py` | scale | what a context looks like when there is enough traffic for the answer to be interesting | `data/demo/` (**not committed**) | ~20 min |
-| 3 | `assess_a_slice.py` | assessment | all six stages, ending in the message a consumer reads, twice — feed as published vs one entry repointed | `data/ingest/` + live feed + model | ~4 min |
+| 1 | `ingest_and_context.py` | foundations | one record's whole journey, at a size where every number checks by eye | `data/connections/maintainer-host/` (committed) | ~1 min |
+| 2 | `context_over_a_day.py` | scale | what a context looks like when there is enough traffic for the answer to be interesting | `data/connections/network-day/` (**not committed**) | ~20 min |
+| 3 | `assess_a_slice.py` | assessment | all six stages, ending in the message a consumer reads, twice — feed as published vs one entry repointed | `data/connections/maintainer-host/` + live feed + model | ~4 min |
 | 4 | `enrichment_states.py` | situations | `ok` / `stale` / `missing` / `failed` / `no_match` side by side, and why none of them means "safe" | committed; snapshot timing only | ~2 min |
 | 5 | `escalation_and_scope.py` | situations | the same indicator contacted vs only resolved — scope before severity, and the gate's subordination to escalation | committed + `plant_indicators.py` | ~3 min |
 | 6 | `failure_paths.py` | situations | quarantine, a schema-invalid model answer, a budget-truncated run, a source outage — four failures that are never a verdict | committed; scripted model | ~3 min |
 | 7 | `replay_an_assessment.py` | situations | a stored assessment replayed against the versions **it recorded**, and what a replay refuses | any prior run's store | ~2 min |
 | 8 | `backup_and_restore.py` | situations | what survives, what rebuilds, and what a capture replay alone does *not* bring back | any prior run's store | ~3 min |
-| 9 | `assess_a_day.py` | **proposed**, scale | the long run: a rebased day, planted, assessed, with cost and gate counts | `data/demo/` + both generators | hours |
+| 9 | `assess_a_day.py` | **proposed**, scale | the long run: a rebased day, planted, assessed, with cost and gate counts | `data/connections/network-day/` + both generators | hours |
 
 ### The tiers
 
@@ -90,7 +90,7 @@ pipeline's unit is a host in a window. A planted indicator makes the escalation 
 [`synthetic-corpus.md`](synthetic-corpus.md) §5 is the list of what it cannot
 measure.
 
-**One practical caveat that is not about sufficiency.** `data/demo/` is
+**One practical caveat that is not about sufficiency.** `data/connections/network-day/` is
 gitignored and not in this repository, so demos 2 and 9 run only where that
 capture exists. Demos 1 and 3–8 run from committed data, which is why the
 proposed set deliberately puts every *distinction* on committed inputs and

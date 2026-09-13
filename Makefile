@@ -94,7 +94,7 @@ corpus-sizing:
 # single store. Not a health check - it prints numbers and does not decide which
 # are bad; docs/runbook.md §13 explains them. Pass the retained capture directory
 # to include how many records existed. A capture store is a directory of files
-# each named <sha256>.jsonl -- NOT data/ingest, which holds one sample under a
+# each named <sha256>.jsonl -- NOT data/connections/maintainer-host, which holds one sample under a
 # human name and which this example named until 2026-09-12:
 #
 #     uv run scripts/status.py --captures /srv/helena/captures

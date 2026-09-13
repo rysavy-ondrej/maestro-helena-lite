@@ -50,7 +50,7 @@ from helena.normalizer import (  # noqa: E402
 )
 from helena.observability import Redactor  # noqa: E402
 
-SAMPLE = ROOT / "data" / "ingest" / "flow-sample.jsonl"
+SAMPLE = ROOT / "data" / "connections" / "maintainer-host" / "flow-sample.jsonl"
 THREATFOX_EXPORT_URL = "https://threatfox.abuse.ch/export/json/recent/"
 PUBLIC_SUFFIX_LIST_URL = "https://publicsuffix.org/list/public_suffix_list.dat"
 

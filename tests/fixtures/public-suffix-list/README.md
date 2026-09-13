@@ -9,7 +9,7 @@ markers and all — the parser reads it exactly as it reads the real thing.
 
 It holds every rule the committed tests need and nothing else: the rules the
 official `checkPublicSuffix` vectors turn on, the rules that decide the names in
-`data/ingest/flow-sample.jsonl`, and `github.io` / `workers.dev` /
+`data/connections/maintainer-host/flow-sample.jsonl`, and `github.io` / `workers.dev` /
 `trafficmanager.net` for the shared-infrastructure case. 34 rules against the
 snapshot's 10 321, which is why the suite can load it into a throwaway engine in
 a fraction of a second.

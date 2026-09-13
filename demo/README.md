@@ -11,9 +11,9 @@ failure rather than a surprise at `--list`.
 
 | | Script | Input | The question it answers |
 | --- | --- | --- | --- |
-| 1 | `ingest_and_context.py` | `data/ingest/flow-sample.jsonl` — 62 records, one host, 130.8 s | *what happens to a record*, at a size where every number can be checked by eye |
-| 2 | `context_over_a_day.py` | `data/demo/20250920/` — 143 captures, 239 850 records, 3 199 sources, 23.97 h | *what a context looks like* when there is enough traffic for the answer to be interesting |
-| 3 | `assess_a_slice.py` | `data/ingest/flow-sample.jsonl`, re-stamped into the current window, against a snapshot fetched now | *what the whole pipeline does* — all six stages, ending in the message a consumer reads off the output topic |
+| 1 | `ingest_and_context.py` | `data/connections/maintainer-host/flow-sample.jsonl` — 62 records, one host, 130.8 s | *what happens to a record*, at a size where every number can be checked by eye |
+| 2 | `context_over_a_day.py` | `data/connections/network-day/20250920/` — 143 captures, 239 850 records, 3 199 sources, 23.97 h | *what a context looks like* when there is enough traffic for the answer to be interesting |
+| 3 | `assess_a_slice.py` | `data/connections/maintainer-host/flow-sample.jsonl`, re-stamped into the current window, against a snapshot fetched now | *what the whole pipeline does* — all six stages, ending in the message a consumer reads off the output topic |
 
 **Demos 1 and 2 stop at context**, because when they were written the stages
 after it did not exist. Demo 3 is the one that enriches, triages, analyses and
@@ -137,10 +137,10 @@ against 143 ten-minute captures of one network's traffic for 2025-09-20 —
 
 ## Where the capture is, and why it is not here
 
-**`data/demo/` is in `.gitignore` and the capture is not in this repository.**
-`data/ingest/flow-sample.jsonl` is 62 records of the maintainer's own host,
+**`data/connections/network-day/` is in `.gitignore` and the capture is not in this repository.**
+`data/connections/maintainer-host/flow-sample.jsonl` is 62 records of the maintainer's own host,
 assessed by them as carrying nothing sensitive and cleared for publication with
-a datasheet (`data/ingest/README.md`). This capture is a whole network for a
+a datasheet (`data/connections/maintainer-host/README.md`). This capture is a whole network for a
 whole day and carries no such record. That is a reason to leave it in place, not
 a claim about it: it is measured where it lies and nothing copies it into the
 tree — not the demo, and not the test suite, which skips its two day-capture

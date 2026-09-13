@@ -33,7 +33,7 @@ because the gate is checked after the escalation and never before it.
 
 ## How the three hosts are made
 
-`data/ingest/flow-sample.jsonl` is one host's traffic. It is copied three times
+`data/connections/maintainer-host/flow-sample.jsonl` is one host's traffic. It is copied three times
 with `ip.src` rewritten, which makes three contexts in one window — a context is
 one host in one window. The indicator is then planted into two of the copies, the
 way `scripts/plant_indicators.py` does it for a corpus. **The indicator is
@@ -119,7 +119,7 @@ from helena.taxonomy import TRIAGE  # noqa: E402
 from helena import hosts  # noqa: E402
 
 CONTACTED, RESOLVED_ONLY, UNTOUCHED = "10.0.0.1", "10.0.0.2", "10.0.0.3"
-EXPORT = ROOT.parent / "data" / "threatfox"
+EXPORT = ROOT.parent / "data" / "enrichment" / "threatfox"
 
 
 def strongest(pool: list[Indicator]) -> Indicator:
@@ -202,7 +202,7 @@ def main() -> int:
     rule()
 
     # Fetched once, and BOTH the indicator and the snapshot come from these
-    # bytes. Picking from `data/threatfox/` while loading the live export
+    # bytes. Picking from `data/enrichment/threatfox/` while loading the live export
     # compares two different snapshots taken weeks apart, and every plant misses
     # -- silently, because a missed plant looks exactly like ordinary traffic.
     export = enrichment.fetch_threatfox(

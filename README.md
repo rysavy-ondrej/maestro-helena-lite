@@ -300,7 +300,7 @@ against its own schedule; and the end-to-end record reconciliation, beside the
 retention boundary's rejection rate (0009) and the engine-side emission count
 (0020).
 
-    uv run scripts/status.py --captures data/ingest     # `helena status`
+    uv run scripts/status.py --captures data/connections/maintainer-host     # `helena status`
 
 Every number is a `SELECT` an operator with `psql` can run without any of this
 code, which is the point. **No rate is stored and no rate is computed over an
@@ -452,8 +452,8 @@ tenant, no sensor, no schema version and no raw-record reference** — all four 
 assigned at ingestion, never read from the record. Unknown fields are refused
 rather than coerced, no type is coerced either, and `as_supplied()` round-trips a
 parsed record back to the JSON it came from, asserted over all 62 records of
-`data/ingest/flow-sample.jsonl`, both capture fixtures, and — when it is present
-— all 239 850 records of the day capture `data/demo/20250920`.
+`data/connections/maintainer-host/flow-sample.jsonl`, both capture fixtures, and — when it is present
+— all 239 850 records of the day capture `data/connections/network-day/20250920`.
 
 A **capture** is a retained file of flow records identified by the sha256 of the
 file, and the captures are the durable record for replay — the broker is

@@ -2,7 +2,7 @@
 //
 // Every rule the committed tests need and nothing else: the rules the official
 // checkPublicSuffix vectors turn on, the rules that decide the names in
-// data/ingest/flow-sample.jsonl, and github.io / workers.dev / trafficmanager.net
+// data/connections/maintainer-host/flow-sample.jsonl, and github.io / workers.dev / trafficmanager.net
 // for the shared-infrastructure case. Trimmed from the snapshot fetched on
 // 2026-09-03; the section markers are the list's own, and the parser reads them.
 //

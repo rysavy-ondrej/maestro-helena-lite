@@ -13,7 +13,7 @@ source is an escalation — this record *is* that escalation, resolved).
 
 `concept/05-threat-intelligence.md` said application-identification data is
 **commercial-only** and listed it among sources that are "simply not available",
-while `data/netify/` has been in the tree the whole time holding 965,967 address
+while `data/enrichment/netify/` has been in the tree the whole time holding 965,967 address
 rows, 11,144 domain rows and 1,500 application definitions. `prds/CONTEXT.md` §3
 named the contradiction and correctly refused to resolve it inside a session.
 
@@ -67,11 +67,11 @@ the first Netify key that matches. Registrable-domain normalization remains what
 is for, scope correctness, and does not sit in front of this join.
 
 The measured consequence of getting the order right is total: **every one of the 42
-real domains in `data/ingest/flow-sample.jsonl` matches** (3 exactly, 39 by suffix).
+real domains in `data/connections/maintainer-host/flow-sample.jsonl` matches** (3 exactly, 39 by suffix).
 
 ## What was measured
 
-Joined against `data/ingest/flow-sample.jsonl` (62 records, one host, 130.8 s) on
+Joined against `data/connections/maintainer-host/flow-sample.jsonl` (62 records, one host, 130.8 s) on
 2026-09-03. A count beats an adjective.
 
 | | Result |
@@ -155,7 +155,7 @@ Netify is a **static local snapshot with no version of its own** and no upstream
 fetch: the files were placed in the tree, not downloaded by this project. So the
 loader writes a snapshot version at load time like any other feed, and a load
 failure or an empty parse **leaves the previous snapshot in place and records the
-failure** — `stale` or `missing`, never a silent empty opinion. `data/netify/` is
+failure** — `stale` or `missing`, never a silent empty opinion. `data/enrichment/netify/` is
 already in `.gitignore`, so the dataset stays out of the repository as
 `concept/05` requires; the small extract committed as a test fixture must stay
 small.

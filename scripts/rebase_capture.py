@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Move a capture's records in time, so a corpus and a feed snapshot can overlap.
 
-    uv run scripts/rebase_capture.py --source data/demo/20250920 --out .corpus/day --ending-now
-    uv run scripts/rebase_capture.py --source data/demo/20250920 --out .corpus/day --starting 2026-09-13T00:00:00Z
+    uv run scripts/rebase_capture.py --source data/connections/network-day/20250920 --out .corpus/day --ending-now
+    uv run scripts/rebase_capture.py --source data/connections/network-day/20250920 --out .corpus/day --starting 2026-09-13T00:00:00Z
     uv run scripts/rebase_capture.py --source one.ndjson.gz --out .corpus/x --by 31536000
     uv run scripts/rebase_capture.py --source .corpus/day --out /tmp/check --by 0 --verify-only
 
@@ -32,8 +32,8 @@ and this script produces none of those properties. It makes the pipeline
 
 ## The four fields that move, and the rule that finds a fifth
 
-Measured against `data/demo/20250920` rather than assumed from the sample: the
-day capture carries **four** absolute epochs and `data/ingest/flow-sample.jsonl`
+Measured against `data/connections/network-day/20250920` rather than assumed from the sample: the
+day capture carries **four** absolute epochs and `data/connections/maintainer-host/flow-sample.jsonl`
 carries **one**. Shifting only `ts`, which is all the sample would have taught,
 leaves every TCP segment and UDP datagram a year behind its own flow.
 
@@ -74,7 +74,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from helena.normalizer import CAPTURE_SUFFIX, describe_capture  # noqa: E402
 
 #: Absolute epochs, as `(container, key)` walked from the record root. Measured
-#: over `data/demo/20250920` and `data/ingest/flow-sample.jsonl`.
+#: over `data/connections/network-day/20250920` and `data/connections/maintainer-host/flow-sample.jsonl`.
 EPOCH_FIELDS = ("ts", "tx")
 EPOCH_LISTS = (("tcp", "segs", "ts"), ("udp", "dgms", "ts"))
 

@@ -3,7 +3,7 @@
 
     uv run scripts/corpus_sizing.py --daily-quota self-imposed
     uv run scripts/corpus_sizing.py --daily-quota 500
-    uv run scripts/corpus_sizing.py --daily-quota self-imposed --snapshot data/threatfox
+    uv run scripts/corpus_sizing.py --daily-quota self-imposed --snapshot data/enrichment/threatfox
     make corpus-sizing
 
 `concept/08-open-questions.md` states the constraint this instrument exists for:
@@ -59,7 +59,7 @@ from helena import budgets, taxonomy
 from helena.budgets import BudgetError, BudgetPolicy
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_SNAPSHOT = PROJECT_ROOT / "data" / "threatfox"
+DEFAULT_SNAPSHOT = PROJECT_ROOT / "data" / "enrichment" / "threatfox"
 
 #: Minutes in a day. The rate limit is per minute and the quota is per day, so
 #: this is the only unit conversion between them.

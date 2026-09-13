@@ -2,7 +2,7 @@
 """What the pipeline's own numbers say, read out of the engine as plain SQL.
 
     uv run scripts/status.py
-    uv run scripts/status.py --captures data/ingest
+    uv run scripts/status.py --captures data/connections/maintainer-host
 
 This is `helena status`. It prints, for the configured tenant and sensor:
 

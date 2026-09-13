@@ -34,7 +34,7 @@ from helena.hosts import v1
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = PROJECT_ROOT / "src" / "helena" / "hosts"
 
-# The host in `data/ingest/flow-sample.jsonl` — the 62 real flow records the
+# The host in `data/connections/maintainer-host/flow-sample.jsonl` — the 62 real flow records the
 # ingest path is built against, and the one entry the committed configuration
 # carries.
 FIXTURE_HOST = "10.127.0.100"
@@ -229,7 +229,7 @@ def test_a_file_that_is_not_toml_is_refused(tmp_path: Path):
 def test_the_committed_configuration_loads_and_covers_the_ingest_fixture_host():
     """The default path is real, and the entry in it is the fixture's own host.
 
-    Not a placeholder address: `data/ingest/flow-sample.jsonl` is one host and
+    Not a placeholder address: `data/connections/maintainer-host/flow-sample.jsonl` is one host and
     this is it, so the rendering path has a real address with a recorded
     attribute behind it.
     """
@@ -247,7 +247,7 @@ def test_the_configured_host_is_the_host_the_ingest_fixture_carries():
 
     sources = {
         json.loads(line)["ip"]["src"]
-        for line in (PROJECT_ROOT / "data" / "ingest" / "flow-sample.jsonl")
+        for line in (PROJECT_ROOT / "data" / "connections" / "maintainer-host" / "flow-sample.jsonl")
         .read_text()
         .splitlines()
         if line.strip()

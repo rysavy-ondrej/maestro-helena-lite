@@ -74,7 +74,7 @@ over a materialized copy of it:
 | Input | Aggregate over the plain view | Materialized intermediate + its aggregate | Cost |
 | --- | --- | --- | --- |
 | the ten-record layer capture | 142 064 bytes | 159 194 bytes | **+12 %** |
-| the fixture captures plus `data/ingest/flow-sample.jsonl` — 73 flow rows → 2 contexts | 119 154 bytes | 186 236 bytes | **+56 %** |
+| the fixture captures plus `data/connections/maintainer-host/flow-sample.jsonl` — 73 flow rows → 2 contexts | 119 154 bytes | 186 236 bytes | **+56 %** |
 
 `concept/03-architecture.md`'s **42 %** is a third workload's number and this
 repository does not reproduce it — **the size of the penalty is the aggregation

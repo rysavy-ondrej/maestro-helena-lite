@@ -128,7 +128,7 @@ CHECKLIST = PROJECT_ROOT / "docs" / "acceptance.md"
 NOTE = PROJECT_ROOT / "concept" / "01-goal-and-scope.md"
 
 #: The ten-record layer-coverage capture. Every record is a byte-for-byte copy of
-#: a line of `data/ingest/flow-sample.jsonl`; `tests/fixtures/captures/README.md`
+#: a line of `data/connections/maintainer-host/flow-sample.jsonl`; `tests/fixtures/captures/README.md`
 #: says what each offset is for.
 LAYERS_CAPTURE = "ace6ca33f7bf8aa949f79124abf33fc115cfd0909e9dea798f4762cf87af8318"
 THREATFOX_EXTRACT = (FIXTURES / "threatfox" / "export.json").read_bytes()

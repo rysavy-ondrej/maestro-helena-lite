@@ -4,7 +4,7 @@
 data was **not fetched by this project**: the files were placed in the tree, not
 downloaded. But they are the artifact, they were counted, and they were joined
 against a real capture before anything was decided from them. **978 611 rows**
-sit in `data/netify/` and every number below is from them, on 2026-09-03. No
+sit in `data/enrichment/netify/` and every number below is from them, on 2026-09-03. No
 sentence here comes from a documentation page.
 
 | | |
@@ -22,9 +22,9 @@ sentence here comes from a documentation page.
 
 | File | Rows | Shape |
 | --- | --- | --- |
-| `data/netify/ips.csv` | **965 967** | `ip,app_id,tag,category` |
-| `data/netify/domains.csv` | **11 144** | `domain,app_id,tag,category` |
-| `data/netify/applications.csv` | **1 500** | `;`-delimited: `id;tag;short_name;full_name;description;url;category` |
+| `data/enrichment/netify/ips.csv` | **965 967** | `ip,app_id,tag,category` |
+| `data/enrichment/netify/domains.csv` | **11 144** | `domain,app_id,tag,category` |
+| `data/enrichment/netify/applications.csv` | **1 500** | `;`-delimited: `id;tag;short_name;full_name;description;url;category` |
 
 Gitignored, and they stay out of the repository. Only a small extract is
 committed as a test fixture.
@@ -42,7 +42,7 @@ Netify was never asked. A hit saying `app.windows-update` is context an analyst
 may weigh; **it is not an affirmative `normal`, and code may not treat it as
 one.**
 
-## The measurement, joined against `data/ingest/flow-sample.jsonl`
+## The measurement, joined against `data/connections/maintainer-host/flow-sample.jsonl`
 
 62 records, one host, 130.8 s, on 2026-09-03. A count beats an adjective.
 

@@ -10,7 +10,7 @@
 `demo/ingest_and_context.py` walks the pipeline end to end on 62 records of one
 host, where every number is small enough to check by eye. This one asks a
 different question — *what does a context look like when there is enough traffic
-for the answer to be interesting* — against `data/demo/20250920`: 143 captures,
+for the answer to be interesting* — against `data/connections/network-day/20250920`: 143 captures,
 239 850 records, 3 199 source addresses, 23.97 hours.
 
 The stages are the same real code paths, and nothing is reimplemented to show it:
@@ -23,8 +23,8 @@ a topic of its own — so it is safe against an engine that already holds data.
 
 **The capture is not in the repository and this script does not put it there.**
 It carries a whole network's traffic and no recorded clearance of the kind
-`data/ingest/README.md` gives the 62-record sample, so `.gitignore` keeps
-`data/demo/` out and this reads it where it lies.
+`data/connections/maintainer-host/README.md` gives the 62-record sample, so `.gitignore` keeps
+`data/connections/network-day/` out and this reads it where it lies.
 
 ## What it does not show
 
@@ -70,7 +70,7 @@ from helena.normalizer import (  # noqa: E402
     scan_captures,
 )
 
-DEFAULT_CAPTURES = ROOT / "data" / "demo" / "20250920"
+DEFAULT_CAPTURES = ROOT / "data" / "connections" / "network-day" / "20250920"
 
 # The same URL `scripts/load_public_suffix_list.py` holds, and for the reason it
 # gives: a source URL in configuration would make swapping the list a deployment

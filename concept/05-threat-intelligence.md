@@ -64,7 +64,7 @@ else is **deferred**, and kept because it is where the next feed comes from.
 | Feed | Indicators | Access | Maps to | Tier |
 | --- | --- | --- | --- | --- |
 | **ThreatFox** | address (`ip:port`), domain, URL | Bulk export **open, no credential**; API needs an `Auth-Key` **header** | C2 and malware delivery, by threat type | B |
-| **Netify** | address, domain | Local snapshot in `data/netify/` (gitignored) | **Application identity and category — never a threat classification.** Context only; never escalates ([ADR-0009](../docs/decisions/0009-netify-application-identification.md)) | **D** |
+| **Netify** | address, domain | Local snapshot in `data/enrichment/netify/` (gitignored) | **Application identity and category — never a threat classification.** Context only; never escalates ([ADR-0009](../docs/decisions/0009-netify-application-identification.md)) | **D** |
 | National CERT warning list | domain | Free, no auth | Phishing, often credential theft | A–B (manually verified) |
 | URLhaus | URL; host / RPZ | Auth key | Malware delivery at exact-URL scope; the host inherits **only with host-level evidence** | A / B |
 | Feodo Tracker | address | Auth key | Botnet C2 | A–B |
@@ -78,7 +78,7 @@ else is **deferred**, and kept because it is where the next feed comes from.
 
 Some sources are simply **not available**: several commercial-grade blocklists
 need a datafeed or subscription agreement. Application-identification data is
-commercial-only for production use, but a sample is on disk at `data/netify/` and
+commercial-only for production use, but a sample is on disk at `data/enrichment/netify/` and
 **the prototype may use it locally** — the decision, its measured coverage and the
 two hazards it carries are in
 [ADR-0009](../docs/decisions/0009-netify-application-identification.md).

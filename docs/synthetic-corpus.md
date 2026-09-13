@@ -98,10 +98,10 @@ column inviting someone to fill one in is how a test fixture becomes a
 
 ```bash
 # 1. move the traffic so a loadable snapshot can cover its windows
-uv run scripts/rebase_capture.py --source data/demo/20250920 --out .corpus/day --ending-now
+uv run scripts/rebase_capture.py --source data/connections/network-day/20250920 --out .corpus/day --ending-now
 
 # 2. plant indicators from the feed the deployment actually loads
-uv run scripts/plant_indicators.py --captures .corpus/day --export data/threatfox \
+uv run scripts/plant_indicators.py --captures .corpus/day --export data/enrichment/threatfox \
     --out .corpus/planted --per-scenario 2
 
 # 3. load a snapshot dated before the traffic, then replay

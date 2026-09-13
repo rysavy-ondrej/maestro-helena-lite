@@ -551,11 +551,11 @@ record is accounted for in the store.
 
 `<sha256>.jsonl`, and the digest is checked against the bytes on every scan, so a
 capture that changed under its name is refused rather than replayed under a
-reference that addresses different records. `data/ingest/` is **not** such a
+reference that addresses different records. `data/connections/maintainer-host/` is **not** such a
 directory — `flow-sample.jsonl` is a sample, not a retained capture, and the
 command says so:
 
-    FAILED: data/ingest/flow-sample.jsonl: a capture file is named <sha256>.jsonl
+    FAILED: data/connections/maintainer-host/flow-sample.jsonl: a capture file is named <sha256>.jsonl
 
 `tests/fixtures/captures/` is one.
 
@@ -868,7 +868,7 @@ two variables first.
 
 ```bash
 uv run scripts/status.py
-uv run scripts/status.py --captures data/ingest
+uv run scripts/status.py --captures data/connections/maintainer-host
 ```
 
 This is `helena status`. It prints, for `HELENA_TENANT` / `HELENA_SENSOR`, the

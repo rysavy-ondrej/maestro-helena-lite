@@ -65,7 +65,7 @@ takes the second half of that seriously: it names the field and what was wrong
 with it and does not copy the value, because the raw record is already kept
 exactly as read and a second copy of refused input is a second place it leaks
 from. The datasheet in
-`data/ingest/README.md` records what a flow record does carry (device
+`data/connections/maintainer-host/README.md` records what a flow record does carry (device
 identifiers, GUIDs, user-agent strings) and confirms what it does not (no
 credentials, tokens, cookies or authorization headers).
 
@@ -86,8 +86,8 @@ Two captures have been measured:
 
 | Capture | Records | Sources | Span |
 | --- | --- | --- | --- |
-| `data/ingest/flow-sample.jsonl` | 62 | 1 host | 130.8 s |
-| `data/demo/20250920/` (143 files) | 239 850 | 3 199 addresses | 23.97 h |
+| `data/connections/maintainer-host/flow-sample.jsonl` | 62 | 1 host | 130.8 s |
+| `data/connections/network-day/20250920/` (143 files) | 239 850 | 3 199 addresses | 23.97 h |
 
 **The second refused 100 % of its records against the contract measured from the
 first**, which is the outcome the first measurement predicted in as many words.
@@ -1015,7 +1015,7 @@ class InputAdapter(Protocol):
 class FlowJsonAdapter:
     """`flow-json`: one flat JSON object per line, as `FlowRecord` describes it.
 
-    The format every capture in `data/ingest/` and `tests/fixtures/captures/` is
+    The format every capture in `data/connections/maintainer-host/` and `tests/fixtures/captures/` is
     in, and the only one a producer actually sends today.
     """
 

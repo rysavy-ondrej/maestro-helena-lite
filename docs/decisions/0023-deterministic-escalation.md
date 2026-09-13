@@ -122,7 +122,7 @@ Tier B must not have one, because a threshold nothing reads is a decision
 somebody recorded and nothing applies. Tier A takes no entry at all: `concept/02`
 conditions it on scope and freshness and not on a number.
 
-**Where 0.80 came from.** Measured over `data/threatfox/` on 2026-09-09, 4 095
+**Where 0.80 came from.** Measured over `data/enrichment/threatfox/` on 2026-09-09, 4 095
 entries, `confidence_level ÷ 100`:
 
 | | `>= 0.75` | `>= 0.80` | `= 1.00` |

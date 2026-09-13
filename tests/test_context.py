@@ -52,7 +52,7 @@ from helena.context import (
 from helena.versions import AGGREGATION_VERSION, AGGREGATION_VERSION_VIEW
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SAMPLE = PROJECT_ROOT / "data" / "ingest" / "flow-sample.jsonl"
+SAMPLE = PROJECT_ROOT / "data" / "connections" / "maintainer-host" / "flow-sample.jsonl"
 FIXTURE_CAPTURES = Path(__file__).resolve().parent / "fixtures" / "captures"
 
 # The layer-coverage capture: ten real records holding every layer combination
@@ -855,7 +855,7 @@ def test_the_http_request_and_response_counts_are_two_different_columns(
 ):
     """The one thing no real HTTP/1 record in the sample can demonstrate.
 
-    Every HTTP/1 observation in `data/ingest/flow-sample.jsonl` holds as many
+    Every HTTP/1 observation in `data/connections/maintainer-host/flow-sample.jsonl` holds as many
     responses as requests — measured, all eleven of them — so a
     `request_count` reading the response array is invisible to every test over
     real HTTP/1 data. HTTP/2 does separate them (`tcp.0` observed one request
@@ -1186,7 +1186,7 @@ def test_a_host_seen_only_as_a_destination_gets_no_context(
 ):
     """The host key is the source address, and the sample makes the cost visible.
 
-    Seventeen addresses are observed in `data/ingest/flow-sample.jsonl`. One is
+    Seventeen addresses are observed in `data/connections/maintainer-host/flow-sample.jsonl`. One is
     a source; the other sixteen are only ever destinations and get no context at
     all — `concept/08-open-questions.md` records that as an assumption in force,
     and this is what it looks like in rows.

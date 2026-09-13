@@ -121,7 +121,7 @@ gets no context at all, and lateral movement — one host reaching another insid
 the same capture — is only visible if both are sources in the same corpus. A
 single-host capture can measure rendering and cost; it cannot measure detection.
 
-**What one real network day is, measured.** `data/demo/20250920`, 2026-09-05: 143
+**What one real network day is, measured.** `data/connections/network-day/20250920`, 2026-09-05: 143
 captures, 239 850 records, **3 199 source addresses**, 23.97 hours, producing
 **12 089 contexts** across 287 five-minute windows — 1.3 % of that grid, because a
 context exists only where a host sent something. Entity rows per context are a
@@ -202,7 +202,7 @@ independently cannot express it.
 A corpus is a set of records *and* the state of the world when they were captured.
 The second half is the one that is missing, and it is not recoverable later.
 
-**Measured, 2026-09-12, over the snapshot in `data/threatfox/`
+**Measured, 2026-09-12, over the snapshot in `data/enrichment/threatfox/`
 (`uv run scripts/corpus_sizing.py --daily-quota self-imposed --snapshot`):** the
 export holds **4 095 entries whose last activity falls between 2026-08-31 and
 2026-09-02** — a **two-day span**. **3 104 of them were first seen before that

@@ -61,7 +61,7 @@ from helena.normalizer import (  # noqa: E402
     publish_capture,
 )
 
-SAMPLE = ROOT / "data" / "ingest" / "flow-sample.jsonl"
+SAMPLE = ROOT / "data" / "connections" / "maintainer-host" / "flow-sample.jsonl"
 
 BOLD, DIM, CYAN, GREEN, RESET = "\033[1m", "\033[2m", "\033[36m", "\033[32m", "\033[0m"
 if not sys.stdout.isatty():

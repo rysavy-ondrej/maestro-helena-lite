@@ -37,7 +37,7 @@
 #
 # ## Where 0.80 came from, and what would change it
 #
-# Measured over the snapshot in `data/threatfox/` on 2026-09-09 — 4 095 entries,
+# Measured over the snapshot in `data/enrichment/threatfox/` on 2026-09-09 — 4 095 entries,
 # `confidence_level` divided by 100 by `sql/migrations/0014_feed_mapping_views.sql`:
 #
 # | | `>= 0.75` | `>= 0.80` | `= 1.00` |

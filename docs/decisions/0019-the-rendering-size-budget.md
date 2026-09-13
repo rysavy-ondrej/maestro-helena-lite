@@ -30,7 +30,7 @@ per section. Shifting by a **multiple of the window** rather than into one windo
 is deliberate: the flow sample crosses a boundary and produces two contexts, and
 collapsing them would measure a host that does not exist.
 
-`data/ingest/flow-sample.jsonl` — 62 real flow records, one managed Windows 10
+`data/connections/maintainer-host/flow-sample.jsonl` — 62 real flow records, one managed Windows 10
 endpoint, 130.8 seconds, no feed loaded:
 
 | Window | Entity rows | domain | address | fingerprint | url | TLS tuples | Characters |

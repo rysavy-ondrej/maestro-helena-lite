@@ -28,7 +28,7 @@ new checksum, never an update to this one.
 
 | Property | Value |
 | --- | --- |
-| Path | `data/ingest/flow-sample.jsonl` |
+| Path | `data/connections/maintainer-host/flow-sample.jsonl` |
 | SHA-256 | `6c2f903e2e12117cfcc5ba5b1c3afa3a201e055a64d617db58f0ea4e19d7c39b` |
 | Git blob | `0b6387c55db18b9bbe4900bad1ad1b9aec8ff199` |
 | Size | 80 516 bytes |

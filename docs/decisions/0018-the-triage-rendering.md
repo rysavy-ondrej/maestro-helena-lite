@@ -322,6 +322,6 @@ costs a store that has already migrated.
   `truncated` line. Everything else in this note still holds — the record order
   is still neutral and it is what the budget selects a prefix of. The measurement
   above also turned out to be the small case: over the whole of
-  `data/ingest/flow-sample.jsonl` the busier window holds **122 entity rows** and
+  `data/connections/maintainer-host/flow-sample.jsonl` the busier window holds **122 entity rows** and
   renders to **12 115 characters**, which is where `config/rendering.toml`'s
   number comes from.

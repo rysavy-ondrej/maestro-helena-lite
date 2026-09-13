@@ -50,7 +50,7 @@ FIXTURE_CAPTURES = PROJECT_ROOT / "tests" / "fixtures" / "captures"
 LAYERS_CAPTURE = "ace6ca33f7bf8aa949f79124abf33fc115cfd0909e9dea798f4762cf87af8318"
 THREATFOX_FIXTURE = PROJECT_ROOT / "tests" / "fixtures" / "threatfox" / "export.json"
 #: The whole 62-record sample, for the one test that measures a host's own size.
-SAMPLE = PROJECT_ROOT / "data" / "ingest" / "flow-sample.jsonl"
+SAMPLE = PROJECT_ROOT / "data" / "connections" / "maintainer-host" / "flow-sample.jsonl"
 RAW = THREATFOX_FIXTURE.read_bytes()
 
 TENANT, SENSOR = "tenant-under-test", "sensor-under-test"

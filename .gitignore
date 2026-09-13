@@ -19,17 +19,17 @@ bin/lib
 .rwdata/
 .run/
 
-# Intelligence snapshots stay out of the repository - fair-use terms bind them.
-# A small extract committed as a test fixture is fine; the full files are not.
-data/threatfox
-data/netify
+# Enrichment lists stay out of the repository - fair-use terms bind them. A small
+# extract committed as a test fixture is fine; the full files are not.
+data/enrichment/threatfox
+data/enrichment/netify
 
-# Flow captures held for demonstration and measurement. Unlike
-# data/ingest/flow-sample.jsonl - 62 records of the maintainer's own host, with a
-# recorded clearance and a datasheet - these carry whole networks of traffic and
-# no such clearance is recorded for them. Measure against them in place; commit
-# an extract only once one is.
-data/demo
+# Connection records held for demonstration and measurement. Unlike
+# data/connections/maintainer-host/ - 62 records of the maintainer's own host,
+# with a recorded clearance and a datasheet - these carry whole networks of
+# traffic and no such clearance is recorded for them. Measure against them in
+# place; commit an extract only once one is.
+data/connections/network-day
 
 # The runner budget cache: transient state, rewritten on every run.
 # Tracking it makes the linear-history gate fire on its own churn.

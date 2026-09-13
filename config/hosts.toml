@@ -26,10 +26,10 @@
 #
 # ## What is in here now
 #
-# One entry, and it is the host in `data/ingest/flow-sample.jsonl` — the 62 real
+# One entry, and it is the host in `data/connections/maintainer-host/flow-sample.jsonl` — the 62 real
 # flow records the ingest path is built and tested against, from the
 # maintainer's own network. Its `device_type` is not invented for the file: the
-# fixture's datasheet (`data/ingest/README.md`, *Traffic profile*) describes the
+# fixture's datasheet (`data/connections/maintainer-host/README.md`, *Traffic profile*) describes the
 # capture as "one Windows 10 endpoint" and "a managed enterprise endpoint", and
 # that is what is recorded here. A fleet's worth of entries belongs to a
 # deployment, not to this repository.

@@ -355,7 +355,7 @@ def _tls_draft(projection: ContextProjection) -> _Draft:
     keeps parameters and drops fingerprints. It is safe rather than merely
     consistent because the parameter tuples are an aggregate over the window and
     there are very few of them — three over the whole of
-    `data/ingest/flow-sample.jsonl`, two over the layer-coverage capture — so they
+    `data/connections/maintainer-host/flow-sample.jsonl`, two over the layer-coverage capture — so they
     cannot crowd the fingerprints out. `scripts/measure_rendering.py` is what says
     so, and would say so again on a capture where it stopped being true.
     """
