@@ -185,6 +185,10 @@ NOT_CLAIMABLE: tuple[str, ...] = (
     "accuracy, recall, false-positive rate, escalation rate, latency or cost",
     "that triage reduces caseload without suppressing high-confidence detections",
     "that identical inputs replay identically",
+    # Arrived with the pre-triage gate, 2026-09-13. A gated context is cleared
+    # without a model reading it, so its `normal` establishes the absence of
+    # nothing -- docs/hazards.md §11.
+    "that a `normal` verdict on a gated context means anything was assessed",
 )
 
 

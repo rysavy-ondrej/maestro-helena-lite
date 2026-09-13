@@ -160,6 +160,45 @@ on real traffic. `concept/08`'s assumptions table is where a real bound would
 start: over a measured day a context holds a median of **1** entity row, p90 3,
 p99 441 and a **maximum of 1 822** — so the volume is not the mean.
 
+## 11. The pre-triage gate clears what nothing read
+
+**A context holding fewer than the configured number of suspicious indicators is
+emitted as `normal` without any model having read it.** The verdict therefore
+asserts a safety that no run established.
+
+Added 2026-09-13, with the gate, at the operator's decision and over a recorded
+objection — this entry is that objection, kept rather than rewritten, because
+`concept/instruction.md` §5 says a negative result is a result.
+
+**This is the ordinary path, not an edge case, and that is the whole problem.**
+Feed coverage is a two-day sighting window of a few thousand indicators
+([`evaluation-corpus.md`](evaluation-corpus.md) §4), so ordinary traffic matches
+nothing: `demo/assess_a_slice.py` pass A is 131 entities and **every one is
+`no_match`**. At the smallest threshold the gate admits, essentially every
+context in a normal deployment is cleared without inference. The detection
+surface that remains is the feed join — the beaconing, the odd TLS parameters
+and the never-listed domain are exactly what the gate skips, and they are what
+the triage stage existed to read.
+
+It compounds hazard §6, the base rate: *"a classifier that always answers
+`normal` will score well on accuracy and be worthless."* The gate makes that
+classifier the default path rather than a failure mode.
+
+*What is done:* the gate is **subordinate to deterministic escalation**, so a
+Tier A or high-confidence Tier B match is never gated —
+`07-principles.md`'s *"Triage returning `normal` suppresses a Tier A match"* row
+still holds, and the gate is refused before it can break it. The threshold is
+policy rather than a constant, recorded on every row that was gated, and a gated
+assessment stores **no model version, because nothing answered**. `concept/01`
+puts *"that a `normal` verdict on a gated context means anything was assessed"*
+on the not-claimable list.
+
+*What is not done:* nothing measures what the gate misses, and nothing can until
+the corpus exists — the measurement that would price this decision is the same
+one hazard §1 is about. *What would change it:* a measured false-negative rate
+for gated contexts. Until then the saving is known (roughly every context) and
+the cost is unknown, which is the asymmetry to keep in view.
+
 ## 10. Deferred records outnumber code
 
 **Every deferred component must stay labelled `deferred`, or the maturity labels

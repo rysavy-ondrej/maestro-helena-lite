@@ -19,14 +19,19 @@ Two commitments follow, and they are the project's reason for existing:
 
 1. **Every verdict remains traceable to stored evidence.** Facts stay separate
    from inference; assessments cite stable evidence identifiers.
-2. **Expensive reasoning is spent selectively.** Cheap triage decides what is
-   worth analysing; deeper analysis runs only on what triage escalates.
+2. **Expensive reasoning is spent selectively.** A deterministic gate decides
+   what is worth triaging, cheap triage decides what is worth analysing, and
+   deeper analysis runs only on what triage escalates. **Amended 2026-09-13**:
+   until then triage ran on every context, and the gate is a cost decision whose
+   cost to detection is recorded in `08-open-questions.md` and
+   [`../docs/hazards.md`](../docs/hazards.md) §11 rather than argued away.
 
 ## The desired outcome
 
 A staged pipeline that turns connection records into evidence-backed host
-contexts, enriches the entities in them, triages every context cheaply, analyses
-the ones that warrant it, and emits the result — with the provenance, versioning
+contexts, enriches the entities in them, triages cheaply every context a
+deterministic gate does not clear, analyses the ones that warrant it, and emits
+the result — with the provenance, versioning
 and honest gap-reporting that make each verdict inspectable and each run
 reproducible.
 
@@ -87,6 +92,7 @@ feedback, evaluation and replay.
 | 1 ingest | Flow records over the Kafka wire protocol into the streaming engine |
 | 2 context | One host context per host per 5-minute window, with entity rows beside it |
 | 3 enrich | A join against snapshot-versioned reference tables producing enrichment evidence |
+| 3a gate | Deterministic, no model: a context holding fewer than the configured number of suspicious indicators is cleared here and never reaches triage. **Subordinate to deterministic escalation** — a context that escalates on its own is never gated |
 | 4 triage | A cheap rendering, one model call, no tools: `normal` or `suspicious` |
 | 5 analyse | `suspicious` reaches the Analyst Agent, which retrieves live and returns a verdict |
 | 6 emit | The enriched context, the verdict and the evidence leave through a sink topic |
@@ -131,7 +137,16 @@ identity, provenance or assessment contracts; no autonomous remediation occurs.
 
 **Not claimable:** accuracy, recall, false-positive rate, escalation rate,
 latency or cost; that triage reduces caseload without suppressing high-confidence
-detections; that identical inputs replay identically.
+detections; that identical inputs replay identically; that a `normal` verdict on
+a gated context means anything was assessed.
+
+The fourth clause arrived with the gate on 2026-09-13. A gated clear is the
+deterministic statement *"fewer than N suspicious indicators were found in this
+context"* and nothing more — no model read the traffic, so it **establishes the
+absence of nothing**, which is the reason `07-principles.md` forbids a
+budget-truncated analyst run returning `normal`. Because feed coverage is a
+sparse sighting window, this is the ordinary path rather than the edge case;
+[`../docs/hazards.md`](../docs/hazards.md) §11 is the accepted risk.
 
 > **The risk this accepts, stated plainly.** A pipeline built without an
 > evaluation harness can be demonstrably *running* and undemonstrably *correct*.

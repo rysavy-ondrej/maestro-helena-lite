@@ -124,6 +124,7 @@ against.
 | accuracy, recall, false-positive rate, escalation rate, latency or cost | No labelled corpus, and no evaluation harness. The model in this run is scripted, so even its answers are an input rather than evidence |
 | that triage reduces caseload without suppressing high-confidence detections | The second half is enforced structurally — deterministic escalation is evaluated before triage runs and cannot be suppressed by it (`tests/test_conformance.py`, MNH-04) — but the first half is a rate, and a rate needs a corpus |
 | that identical inputs replay identically | The model is not deterministic. `helena.orchestration.compare` reports which of six dimensions moved, and a difference is a measurement rather than a failure; `concept/08` also still carries the silent-record-loss hazard at a catch-up boundary |
+| that a `normal` verdict on a gated context means anything was assessed | Added with the pre-triage gate, 2026-09-13. Below the configured indicator count a context is cleared **without a model reading it**, so the verdict is the deterministic statement *"fewer than N suspicious indicators were found"* and establishes the absence of nothing. A gated assessment stores **no model version, because nothing answered** — that NULL is how a consumer tells the two apart. Feed coverage is a sparse sighting window, so this is the ordinary path: [`hazards.md`](hazards.md) §11 |
 
 Nothing committed to this repository may claim one of these anyway: MNH-20 in
 `tests/test_conformance.py` scans every markdown file and every module of the

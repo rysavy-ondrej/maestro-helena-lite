@@ -67,6 +67,7 @@ records are in [`../sources/`](../sources/).
 | [0044](0044-the-snapshot-scheme.md) | The snapshot scheme: one ledger, intervals, and history that is not deleted |
 | [0045](0045-who-decides-the-analyst-is-unsure.md) | What "the analyst is unsure" means, and who decides it |
 | [0046](0046-negative-results-are-kept.md) | Failed and inconclusive experiments are results, and they are kept where they happened |
+| [0047](0047-the-pre-triage-gate.md) | A context below the configured indicator count is cleared without a model. Taken by the operator over a recorded objection, which the record keeps in full |
 
 ---
 
