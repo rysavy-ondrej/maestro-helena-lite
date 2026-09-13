@@ -81,8 +81,11 @@ supply is the last two rows, and those are not a demo problem — they are
 measurement, not demonstration. Candidate public datasets that *do* carry
 genuine multi-stage activity are listed in
 [`evaluation-corpus.md`](evaluation-corpus.md) §10, with what adopting one would
-cost: they are PCAP and this pipeline ingests flow records, and their age makes
-contemporaneous enrichment impossible. A planted indicator makes the escalation path
+cost. Converting them is **not** among the costs: they are PCAP, and
+[`shark-tools`](https://github.com/rysavy-ondrej/shark-tools)'s Enjoy emits
+exactly this pipeline's input contract. What remains is that their age makes
+contemporaneous enrichment impossible, and that they label flows where this
+pipeline's unit is a host in a window. A planted indicator makes the escalation path
 *run*; it does not make the verdict *right*, and
 [`synthetic-corpus.md`](synthetic-corpus.md) §5 is the list of what it cannot
 measure.

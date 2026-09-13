@@ -546,9 +546,11 @@ claimable**, and the pipeline is demonstrably running and undemonstrably correct
 
 ## 10. Candidate public datasets
 
-> **Provenance: recorded as supplied by the operator on 2026-09-13, and NOT
-> fetched.** Nothing below has been downloaded, opened, counted or measured by
-> this project. Every property named — payload completeness, labelling, the
+> **Provenance: the dataset list was supplied by the operator on 2026-09-13 and
+> is NOT fetched.** Nothing in the table below has been downloaded, opened,
+> counted or measured by this project. The **converter** in cost 1 is the
+> exception and is marked as such: its documentation was fetched and its field
+> list compared against this repository's own model. Every property named — payload completeness, labelling, the
 > attack scenarios, the sizes — is the operator's account of it and carries the
 > standing `concept/instruction.md` §0 gives such a thing: *check the artifact,
 > not the page.* The first increment that uses one of these fetches it and
@@ -584,17 +586,46 @@ about which is best:
 ### What adopting one would cost, against this pipeline's own requirements
 
 None of this argues against them. It is what the first increment has to budget
-for, and three of the four are not small.
+for. **The first cost is closed** — the converter exists and its output is
+already this pipeline's input format — and the remaining three are not small.
 
-**1. They are PCAP and this pipeline does not ingest PCAP.** `INPUT_ADAPTERS`
-holds exactly two formats, `flow-json` and `flow-envelope`, and both are flow
-records. A converter is required, and it is not a plain NetFlow export: the
-context layer reads **DNS queries and answers, TLS parameters and HTTP requests**
-off each flow (`helena.normalizer.FlowRecord`), so an exporter that emits only
-five-tuples and counters throws away the half the pipeline is built on. Zeek's
-`conn`/`dns`/`ssl`/`http` logs hold the material, but joining them into
-HELENA's one-record-per-flow shape is a real increment with its own contract
-tests — not a script.
+**1. They are PCAP, and the converter already exists. This cost is closed.**
+
+[`shark-tools`](https://github.com/rysavy-ondrej/shark-tools)'s **Enjoy** takes
+PCAP and emits NDJSON flow records:
+
+```bash
+python py/enjoy.py --mode batch --input-file capture.pcapng \
+    --protocols dns,tls,http --stdout-file out.ndjson
+```
+
+**Its output schema is this pipeline's input contract, field for field.**
+Compared 2026-09-13 against `lua/enjoy/README.md` and
+`helena.normalizer.FlowRecord`:
+
+| | Enjoy | `FlowRecord` |
+| --- | --- | --- |
+| top level | `id`, `ts`, `td`, `tx`, `ip`, `tcp`, `udp`, `dns`, `tls`, `http` | the same ten |
+| `ip` | `proto`, `src`, `dst`, `bsent`, `brecv`, `psent`, `precv` | the same seven |
+| `tcp` | `srcport`, `dstport`, `segs[]` of `ts`/`dir`/`len`/`flags` | `TcpSegment` is `ts`, `dir`, `len`, `flags` |
+| `udp` | `srcport`, `dstport`, `dgms[]` of `ts`/`dir`/`len` | `UdpDatagram` is `ts`, `dir`, `len` |
+| `id` | `"udp.9"` | the committed sample's first record is `"udp.0"` |
+
+`--protocols dns,tls,http` is exactly the three optional layers `FlowRecord`
+carries, which is the part a generic flow exporter would have lost: the context
+layer reads DNS answers, TLS parameters and HTTP requests off each flow, and a
+five-tuples-and-counters export discards the half the pipeline is built on.
+
+So there is no converter to write and no contract to extend. What `concept/07`
+calls the input contract is Enjoy's output format, which is also why
+`helena.normalizer` documents `tx` as *"a third time the day capture's producer
+sends"* — it is Enjoy's export timestamp.
+
+**Verified by comparison, not by running it.** The two READMEs were fetched and
+the field lists compared against the model and against the committed captures;
+Enjoy has not been run in this repository, and no PCAP has been converted here.
+The first increment that converts one measures the throughput and records what a
+day of a public dataset costs to process.
 
 **2. Enrichment cannot be contemporaneous, and §4 says why that is fatal to one
 half.** A 2012 or 2017 capture cannot be joined against a feed snapshot that

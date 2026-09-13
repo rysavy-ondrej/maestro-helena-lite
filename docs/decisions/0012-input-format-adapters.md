@@ -144,6 +144,44 @@ adapter interface and then have nowhere to put what it carries. That is the
 honest limit of this evidence, and the first real second format is what tests
 it.
 
+## Where `flow-json` comes from
+
+**Added 2026-09-13.** The record does not say, and it should: `flow-json` is not
+a shape this project designed. It is the output of
+[`shark-tools`](https://github.com/rysavy-ondrej/shark-tools)'s **Enjoy**, which
+extracts bidirectional flow records from PCAP:
+
+    python py/enjoy.py --mode batch --input-file capture.pcapng \
+        --protocols dns,tls,http --stdout-file out.ndjson
+
+Compared field for field on 2026-09-13 against `lua/enjoy/README.md`: the ten
+top-level keys, `ip`'s seven, `tcp.segs[]` as `ts`/`dir`/`len`/`flags`,
+`udp.dgms[]` as `ts`/`dir`/`len`, and the `"udp.N"` identifier convention are
+Enjoy's and are `helena.normalizer.FlowRecord`'s.
+
+Two things follow that are worth having written down where the adapter lives.
+
+**`--protocols dns,tls,http` is why the contract has those three optional
+layers**, and why they are optional rather than required: they are a flag on the
+producer. An `extra="forbid"` model against a producer that was run without one
+of them sees the layer absent, which is *unobserved* and not *empty* — the
+distinction `concept/instruction.md` §2 turns on.
+
+**It is also why `tx` exists.** This record's sibling note in
+`helena.normalizer` reasons `tx` out from the data — a 60-second grid, ten values
+per ten-minute file, never earlier than `ts + td` — and concludes it is an export
+time. That conclusion stands, and it now has a name: it is Enjoy's.
+
+**What this makes possible** is in `docs/evaluation-corpus.md` §10: a public PCAP
+dataset needs no converter written for it, because the converter exists and its
+output is already this contract. The remaining costs of adopting one are
+enrichment that cannot be contemporaneous, labels at the wrong granularity and an
+inflated base rate — none of which is a format problem.
+
+**Verified by comparison, not by running it.** Enjoy's documentation was fetched
+and its field list compared against the model and the committed captures. The
+tool has not been run in this repository and no PCAP has been converted here.
+
 ## What the event does not record
 
 The event contract has no field naming a format, an adapter or a parse failure,
