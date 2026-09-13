@@ -71,6 +71,44 @@ send_policy_version = "2026-09-09"
 # the same reason `send_policy_version` is: TOML puts a bare key in the last table
 # that was opened.
 model_prices_version = "2026-09-10"
+# The pre-triage gate's own version, recorded on every assessment the gate
+# decided. Move it whenever `[triage_gate]` below moves -- an assessment that
+# recorded only `policy_version` could not be replayed against the number that
+# actually cleared it, which is the reason `thresholds_version` exists.
+triage_gate_version = "2026-09-13"
+
+# --- The pre-triage gate ------------------------------------------------------
+#
+# How many suspicious indicators a context must hold before a MODEL reads it.
+# Below this count the context is cleared deterministically, emitted as `normal`,
+# and triage is never called. `docs/decisions/0047-the-pre-triage-gate.md` is the
+# decision, taken by the operator over a recorded objection, and
+# `docs/hazards.md` §11 is what it costs.
+#
+# **Read ADR-0047 before moving this number.** What the gate buys is measured --
+# one network day is 12 089 triage calls (`docs/evaluation-corpus.md`) and at
+# `min_suspicious_indicators = 1` almost all of them stop here. What it costs is
+# NOT measured and cannot be until the evaluation corpus exists: nothing knows
+# what fraction of real incidents live in the contexts this clears. Feed coverage
+# is a two-day sighting window of a few thousand indicators, so ordinary traffic
+# holds zero claims and the gate is the ordinary path rather than the edge case.
+#
+# A claim is what `helena.policy.supports_in` reads: an enrichment row a source
+# actually made a statement on. `no_match`, `missing`, `stale` and a failed
+# lookup carry no evidence identifier and are therefore NOT claims -- which is
+# the honest reading, because none of those four is a statement that anything is
+# fine.
+#
+# `0` disables the gate: no context can hold fewer than zero claims, so every
+# context reaches triage, which is the behaviour before 2026-09-13.
+#
+# THE GATE IS SUBORDINATE TO DETERMINISTIC ESCALATION and the code enforces it:
+# a context whose evidence escalates on its own is never gated, whatever this
+# number says. `concept/07-principles.md` -- "Triage returning `normal`
+# suppresses a Tier A match" is a must-never-happen row, and a gate that could
+# suppress one would break it without even a model to blame.
+[triage_gate]
+min_suspicious_indicators = 1
 
 [thresholds]
 # ThreatFox. Tier B in `concept/05-threat-intelligence.md`'s catalogue: "explicit

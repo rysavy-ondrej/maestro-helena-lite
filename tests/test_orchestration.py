@@ -50,6 +50,8 @@ from typing import Any
 import psycopg
 import pytest
 
+from helena.policy import v1 as policy_v1
+
 from helena import (
     agents,
     analyst,
@@ -402,6 +404,7 @@ def assess(
     asked: AgentRequest | None = None,
     stream: io.StringIO | None = None,
     provider_tools: Any = (),
+    gate_minimum: int = 0,
 ) -> orchestration.Assessment:
     stream = io.StringIO() if stream is None else stream
     asked = request() if asked is None else asked
@@ -419,6 +422,14 @@ def assess(
         send_policy=SEND_POLICY,
         inherit=OFF,
         logger=logger(stream, component="orchestration"),
+        # Disabled by default: this module predates the pre-triage gate
+        # (ADR-0047) and measures what triage does, so it must keep reaching
+        # triage. The gate's own tests pass a `gate_minimum`.
+        triage_gate=policy.TriageGate(
+            policy_version=policy_v1.POLICY_VERSION,
+            triage_gate_version="test-gate",
+            min_suspicious_indicators=gate_minimum,
+        ),
     )
 
 
@@ -1539,3 +1550,156 @@ def test_a_real_hit_below_the_threshold_leaves_the_route_to_triage(
         escalated = assess(endpoint, projection=projection, asked=asked)
     assert escalated.trigger == TRIAGE_SUSPICIOUS
     assert escalated.escalation.escalates is False
+
+
+# --- The pre-triage gate ------------------------------------------------------
+#
+# `docs/decisions/0047-the-pre-triage-gate.md`. Below the configured claim count
+# a context is cleared without a model reading it. What these measure is the one
+# thing that keeps that from being the suppression `concept/07` forbids: the gate
+# is subordinate to the deterministic escalation, and a gated row is honest about
+# having no model behind it.
+
+
+def no_claims() -> ContextProjection:
+    """A context whose one entity was looked up and matched nothing.
+
+    `no_match` rather than an empty `enrichment` tuple, because that is the case
+    the gate actually meets: `demo/assess_a_slice.py` pass A against the real
+    feed is 131 entities and every one of them is this row. A `no_match` carries
+    no evidence identifier, so `helena.policy.supports_in` reads no claim from
+    it — and that is the honest reading, because a lookup that said nothing is
+    not a statement that anything is fine.
+    """
+    entity = a_projection().entities[0]
+    return a_projection(
+        entities=(
+            entity.model_copy(
+                update={
+                    "enrichment": (
+                        EntityEnrichment(
+                            source_id="threatfox",
+                            source_tier="B",
+                            status="ok",
+                            classification="no_match",
+                        ),
+                    )
+                }
+            ),
+        )
+    )
+
+
+def test_a_context_with_no_claims_is_cleared_without_calling_a_model():
+    """The gate's whole purpose, and the assertion is that the endpoint is untouched.
+
+    `_Endpoint` pops its script per call, so a script that is still full is proof
+    that nothing was asked rather than a claim that nothing was. The scripted
+    answer is `suspicious` deliberately: if the gate leaked and triage ran, this
+    would escalate and the test would fail loudly rather than pass for the wrong
+    reason.
+    """
+    projection = no_claims()
+    assert escalation_of(projection).claims_read == 0
+    with _Endpoint([answered(TRIAGE_SUSPICIOUS_ANSWER)]) as e:
+        assessment = assess(e, projection=projection, gate_minimum=1)
+        assert len(e.script) == 1, "the gate cleared the context and still called a model"
+    assert isinstance(assessment.triage, policy.GateDecision)
+    assert assessment.triage.cleared
+    assert assessment.triage.reason is None
+    assert assessment.trigger is None, "a gated context never reaches the analyst"
+
+
+def test_a_gated_context_records_the_number_that_cleared_it():
+    projection = no_claims()
+    with _Endpoint([answered(TRIAGE_NORMAL)]) as e:
+        gated = assess(e, projection=projection, gate_minimum=3).triage
+    assert gated.min_suspicious_indicators == 3
+    assert gated.triage_gate_version == "test-gate"
+    assert gated.policy_version == rule.POLICY_VERSION
+    assert gated.claims_read == escalation_of(projection).claims_read
+
+
+def test_an_escalating_context_is_never_gated_whatever_the_threshold():
+    """`concept/07`: "Triage returning `normal` suppresses a Tier A match".
+
+    A gate able to clear an escalating context would break that row in a worse
+    way than it describes -- with no model output to blame afterwards. The
+    threshold here is far above the claim count, so the only thing that can send
+    this to triage is the escalation winning.
+    """
+    projection = a_projection(confidence=1.0)
+    assert escalation_of(projection).escalates
+    with _Endpoint([answered(TRIAGE_NORMAL), answered(ANALYST_ANSWER)]) as e:
+        assessment = assess(e, projection=projection, gate_minimum=99)
+        assert e.script == [], "the escalating context was gated instead of triaged"
+    assert not isinstance(assessment.triage, policy.GateDecision)
+    assert assessment.trigger == DETERMINISTIC_SIGNAL
+
+
+def test_a_context_at_the_threshold_reaches_triage():
+    """The boundary is `fewer than`, so a count equal to the minimum is not gated."""
+    projection = a_projection(confidence=0.0)
+    claims = escalation_of(projection).claims_read
+    assert claims, "this projection holds no claim, so the boundary is untestable here"
+    with _Endpoint([answered(TRIAGE_NORMAL)]) as e:
+        assessment = assess(e, projection=projection, gate_minimum=claims)
+        assert e.script == []
+    assert not isinstance(assessment.triage, policy.GateDecision)
+
+
+def test_a_minimum_of_zero_disables_the_gate():
+    """No context holds fewer than zero claims, so every context reaches triage."""
+    with _Endpoint([answered(TRIAGE_NORMAL)]) as e:
+        assessment = assess(e, projection=a_projection(confidence=0.0), gate_minimum=0)
+        assert e.script == []
+    assert not isinstance(assessment.triage, policy.GateDecision)
+
+
+def test_the_gate_is_evaluated_and_logged_for_every_context():
+    """Gated or not, so "how many contexts did a model read" is countable.
+
+    A gate whose skips were only visible as an absence would make the escalation
+    rate and the model-call count unreconcilable, which is the failure
+    `sql/migrations/0021_pipeline_observability.sql` exists to prevent.
+    """
+    stream = io.StringIO()
+    with _Endpoint([answered(TRIAGE_NORMAL)]) as e:
+        assess(e, projection=a_projection(confidence=0.0), stream=stream, gate_minimum=0)
+    record = one(stream, orchestration.GATE_EVALUATED)
+    assert record["cleared"] is False
+    assert record["reason"] == policy.GATE_DISABLED
+
+
+def test_a_gated_assessment_stores_with_no_model_version(
+    migrated_engine: psycopg.Connection,
+):
+    """The store writes it, and the NULL model version is the fact.
+
+    This test exists because the demo found what the ones above missed: they
+    assert what `assess` RETURNS and never stored it, so
+    `contract.check_exchange` -- which asks an agent's answer whether it answers
+    this request -- was reached with a decision no agent produced and raised
+    `AttributeError: no attribute 'emitter'`. A gated outcome has to survive the
+    whole write path, not just the routing.
+    """
+    connection = migrated_engine
+    projection = no_claims()
+    with _Endpoint([answered(TRIAGE_SUSPICIOUS_ANSWER)]) as e:
+        assessment = assess(e, projection=projection, gate_minimum=1)
+        assert len(e.script) == 1, "the gate cleared the context and still called a model"
+    store = orchestration.AssessmentStore(connection=connection, prices=budgets.model_prices())
+    store.store(assessment, at=datetime.now(timezone.utc))
+    connection.execute("FLUSH")
+    row = connection.execute(
+        "SELECT classification, confidence, model_version, model_requested "
+        "FROM helena_analytical_assessment WHERE context_id = %s",
+        (assessment.request.context_id,),
+    ).fetchone()
+    classification, confidence, model_version, model_requested = row
+    assert classification == "normal", "the operator's decision is that a gate CLEARS"
+    assert model_version is None, (
+        "a gated row names a model that answered; nothing answered (ADR-0047 §3)"
+    )
+    assert confidence is None, "nothing estimated a confidence for a context nobody read"
+    assert model_requested, "the model the deployment would have asked is still recorded"

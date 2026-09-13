@@ -358,6 +358,8 @@ class PassResult:
     failures: tuple[str, ...]
     citations: int
     emitted: int
+    #: Contexts cleared without a model. NOT a failure and never counted as one.
+    gated: int = 0
 
 
 def run_pass(
@@ -387,6 +389,7 @@ def run_pass(
     analyst_prompt = analyst.version("v1")
     budget_policy = budgets.load()
     render_budget = rendering.budget()
+    gate = policy.triage_gate()
 
     connection = psycopg.connect(
         settings.infrastructure.risingwave_dsn, autocommit=True, connect_timeout=10
@@ -542,6 +545,10 @@ def run_pass(
         store_out = orchestration.AssessmentStore(
             connection=connection, prices=budgets.model_prices()
         )
+        print(f"  {DIM}pre-triage gate: min_suspicious_indicators="
+              f"{gate.min_suspicious_indicators} "
+              f"({'on' if gate.enabled else 'off'}), "
+              f"version {gate.triage_gate_version}{RESET}")
         triage_client = ModelClient.for_agent(settings, "triage", stream=log)
         analyst_client = ModelClient.for_agent(settings, "analyst", stream=log)
         for projection, asked in zip(projections, requests, strict=True):
@@ -560,6 +567,12 @@ def run_pass(
                 send_policy=disclosure.send_policy(),
                 inherit=analyst.Inheritance(inherit_triage_rationale=False),
                 logger=logger,
+                # The real configured gate, so the demo shows what a deployment
+                # actually does. At the shipped `min_suspicious_indicators = 1`
+                # pass A is cleared without a model and pass B is not, which is
+                # the same contrast this demo was already built around --
+                # docs/decisions/0047-the-pre-triage-gate.md.
+                triage_gate=gate,
             )
             store_out.store(assessment, at=datetime.now(timezone.utc))
             assessments.append(assessment)
@@ -572,10 +585,19 @@ def run_pass(
         # because a failure that printed as "no verdict" would be the collapse
         # `concept/instruction.md` §2 forbids.
         failures: list[str] = []
+        gated_count = 0
         escalated = 0
         for assessment in assessments:
             outcome = assessment.triage
-            if isinstance(outcome, contract_failure):
+            if isinstance(outcome, policy.GateDecision):
+                gated_count += 1
+                print(f"  triage       {YELLOW}NOT RUN{RESET} — the gate cleared "
+                      f"this context on {outcome.claims_read} claim(s), below "
+                      f"the configured {outcome.min_suspicious_indicators}")
+                print(f"  {DIM}emitted as `normal` with NO model version, because "
+                      f"nothing answered. docs/hazards.md §11 is what that "
+                      f"verdict does not establish.{RESET}")
+            elif isinstance(outcome, contract_failure):
                 failures.append(outcome.reason)
                 print(f"  triage       {YELLOW}typed failure: {outcome.reason}{RESET}")
                 print(f"  {DIM}stored with no verdict, and emitted anyway{RESET}")
@@ -677,6 +699,7 @@ def run_pass(
             failures=tuple(failures),
             citations=citations,
             emitted=len(messages),
+            gated=gated_count,
         )
     finally:
         if keep:
@@ -754,6 +777,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  claims stored  {result.claims}")
         print(f"  contexts       {result.contexts}")
         print(f"  verdicts       {', '.join(result.verdicts) or '—'}")
+        print(f"  gated          {result.gated}"
+              f"{'  ← cleared without a model' if result.gated else ''}")
         print(f"  typed failures {', '.join(result.failures) or 'none'}")
         print(f"  escalated      {result.escalated}")
         print(f"  cited rows     {result.citations}")

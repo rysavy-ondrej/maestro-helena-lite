@@ -80,6 +80,7 @@ from helena.contracts import v1 as contract
 from helena.policy import (
     BUDGET_KEYS,
     DISCLOSURE_KEYS,
+    GATE_KEYS,
     POLICY_FILE,
     PRICE_KEYS,
     THRESHOLD_KEYS,
@@ -647,14 +648,20 @@ def load(path: Path | str = POLICY_FILE) -> BudgetPolicy:
         raise BudgetError(f"{path} is not readable TOML: {malformed}") from malformed
 
     unexpected = sorted(
-        set(document) - BUDGET_KEYS - THRESHOLD_KEYS - DISCLOSURE_KEYS - PRICE_KEYS
+        set(document)
+        - BUDGET_KEYS
+        - THRESHOLD_KEYS
+        - DISCLOSURE_KEYS
+        - PRICE_KEYS
+        - GATE_KEYS
     )
     if unexpected:
         raise BudgetError(
             f"{path} has top-level keys {unexpected}; the budget tables are "
             f"{sorted(BUDGET_KEYS)}, the price table is {sorted(PRICE_KEYS)}, the "
             f"threshold half of the file is {sorted(THRESHOLD_KEYS)} and the send "
-            f"policy is {sorted(DISCLOSURE_KEYS)}. A key nothing reads is a policy "
+            f"policy is {sorted(DISCLOSURE_KEYS)} and the pre-triage gate is "
+            f"{sorted(GATE_KEYS)}. A key nothing reads is a policy "
             f"somebody set and nothing applies."
         )
 

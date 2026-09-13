@@ -595,6 +595,13 @@ def run_pipeline(
                     send_policy=SEND_POLICY,
                     inherit=INHERIT,
                     logger=logger,
+                    # Disabled: this module predates the pre-triage gate (ADR-0047) and
+                    # measures what triage does, so it must keep reaching triage.
+                    triage_gate=policy.TriageGate(
+                        policy_version=policy_v1.POLICY_VERSION,
+                        triage_gate_version="test-disabled",
+                        min_suspicious_indicators=0,
+                    ),
                 )
                 store.store(assessment, at=datetime.now(timezone.utc))
                 assessments.append(assessment)

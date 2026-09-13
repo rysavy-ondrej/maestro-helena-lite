@@ -122,7 +122,12 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from typing import TYPE_CHECKING
+
 from pydantic import BaseModel, ConfigDict, NonNegativeInt
+
+if TYPE_CHECKING:  # a version module imports THIS one, so the cycle is real
+    from helena.policy.v1 import Escalation
 
 from helena.contracts import v1 as contract
 from helena.enrichment import (
@@ -143,7 +148,16 @@ __all__ = [
     "PolicyError",
     "PolicyVersion",
     "Support",
+    "ABOVE_THRESHOLD",
+    "ESCALATES",
+    "GATE_DISABLED",
+    "GATE_KEYS",
+    "GATE_REASONS",
+    "GateDecision",
     "THRESHOLD_KEYS",
+    "TriageGate",
+    "gate",
+    "triage_gate",
     "THRESHOLD_TIER",
     "Thresholds",
     "UnknownVersion",
@@ -175,6 +189,11 @@ POLICY_FILE = PROJECT_ROOT / "config" / "policy.toml"
 #: **nothing** reads and none refuses a key another reads. `helena.budgets` and
 #: `helena.disclosure` import them rather than keeping a second copy.
 THRESHOLD_KEYS = frozenset({"policy_version", "thresholds_version", "thresholds"})
+#: The pre-triage gate's own keys. Separate from `THRESHOLD_KEYS` because it is
+#: not a threshold: a confidence threshold decides whether a claim escalates, and
+#: this decides whether a model reads the context at all.
+#: `docs/decisions/0047-the-pre-triage-gate.md`.
+GATE_KEYS = frozenset({"triage_gate", "triage_gate_version"})
 BUDGET_KEYS = frozenset({"budgets", "rate_limits"})
 DISCLOSURE_KEYS = frozenset({"send_policy", "send_policy_version"})
 #: The fourth table, read by `helena.budgets.model_prices`. It is separate from
@@ -540,6 +559,226 @@ class Thresholds(BaseModel):
             ) from None
 
 
+#: The gate's own model config, matching the version modules': strict, frozen and
+#: extra-forbidding, because a decision record that could carry an unexpected
+#: field is one a reader cannot trust.
+_GATE_MODEL_CONFIG = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+
+class GateDecision(BaseModel):
+    """Whether a context was cleared without a model reading it, and on what number.
+
+    **This lives beside the frozen rules rather than inside `v1.py`, and that is
+    deliberate.** `docs/decisions/0008-version-registry.md` forbids editing a
+    frozen version module in place, including for something innocent, and
+    `helena.contracts.rules` set the precedent for the same situation in task 45:
+    a new rule goes next to the version, not into it. A `v1` assessment stored
+    before 2026-09-13 therefore replays against exactly the `v1` that decided it.
+
+    A **terminal outcome that no agent produced**, which is why it is in this
+    module and not in `helena.contracts`: nothing crossed an agent boundary, no
+    prompt was built and nothing answered. `helena.orchestration.Assessment`
+    accepts it in the place a triage outcome would go, and the store writes it
+    with `model_version` NULL — the NULL is not an omission, it is the fact.
+
+    `docs/decisions/0047-the-pre-triage-gate.md` is the decision this implements
+    and `docs/hazards.md` §11 is what it costs. Read both before changing this:
+    a gated clear establishes the absence of nothing, and the honesty of the
+    stored row is the only thing that keeps that legible to a consumer.
+    """
+
+    model_config = _GATE_MODEL_CONFIG
+
+    #: The rules that decided. `POLICY_VERSION`, always.
+    policy_version: str
+    #: The revision of `config/policy.toml` whose number decided, recorded for
+    #: the reason `Escalation.thresholds_version` is: this module is frozen and
+    #: the file is not.
+    triage_gate_version: str
+    #: The configured number this context was measured against.
+    min_suspicious_indicators: NonNegativeInt
+    #: How many claims the context held. The same count `Escalation.claims_read`
+    #: carries, and read from it rather than recomputed.
+    claims_read: NonNegativeInt
+    #: True where triage was skipped. False means the context goes to triage and
+    #: this record says why it was not gated.
+    cleared: bool
+    #: Why it was not gated, where it was not. `None` exactly where `cleared`.
+    reason: str | None = None
+
+    def __init__(self, **data: Any) -> None:
+        super().__init__(**data)
+        if not self.policy_version.strip():
+            raise ValueError(
+                "a gate decision records the policy version of the escalation "
+                "it gated on; an empty one could not be replayed"
+            )
+        if self.cleared != (self.reason is None):
+            raise ValueError(
+                "a gated clear carries no reason and a refusal to gate carries "
+                "one; this decision has both or neither"
+            )
+
+
+#: Why a context reached triage rather than being gated. `ESCALATES` is the one
+#: that is an invariant rather than a number: see `gate`.
+ESCALATES = "escalates"
+ABOVE_THRESHOLD = "above_threshold"
+GATE_DISABLED = "gate_disabled"
+GATE_REASONS = (ESCALATES, ABOVE_THRESHOLD, GATE_DISABLED)
+
+
+def gate(
+    escalation: Escalation, *, minimum: int, triage_gate_version: str
+) -> GateDecision:
+    """Whether this context may be cleared without calling a model.
+
+    `docs/decisions/0047-the-pre-triage-gate.md`. A context holding fewer than
+    `minimum` claims is cleared here and never reaches triage, which is a cost
+    decision whose cost to detection is unmeasured and recorded as
+    `docs/hazards.md` §11 rather than argued away.
+
+    **The escalation is checked first and it is not a tie-break.** A context
+    whose evidence escalates on its own is never gated, whatever its claim count
+    and whatever `minimum` says. `concept/07-principles.md` makes *"Triage
+    returning `normal` suppresses a Tier A match"* a must-never-happen row, and a
+    gate able to clear an escalating context would break it in a worse way than
+    the row describes — with no model output to point at afterwards. The order
+    below is therefore the invariant, and a refactor that evaluates the count
+    first and the escalation second is wrong even though it returns the same
+    answer for every input anyone has tried.
+
+    Takes the `Escalation` rather than the supports, because the count it reads is
+    `claims_read` — already computed, already recorded, and already the number
+    that distinguishes *"nothing escalated"* from *"there was nothing to read"*.
+    Recomputing it here would be a second definition of a claim.
+
+    `minimum` of `0` disables the gate: no context holds fewer than zero claims.
+
+    The decision records **the escalation's own `policy_version`** rather than a
+    constant from this module: the gate is not itself versioned rules, it is a
+    decision taken on top of whichever version produced the escalation, and that
+    is the version a replay has to validate against.
+    """
+    common = {
+        "policy_version": escalation.policy_version,
+        "triage_gate_version": triage_gate_version,
+        "min_suspicious_indicators": minimum,
+        "claims_read": escalation.claims_read,
+    }
+    if escalation.escalates:
+        return GateDecision(**common, cleared=False, reason=ESCALATES)
+    if minimum <= 0:
+        return GateDecision(**common, cleared=False, reason=GATE_DISABLED)
+    if escalation.claims_read >= minimum:
+        return GateDecision(**common, cleared=False, reason=ABOVE_THRESHOLD)
+    return GateDecision(**common, cleared=True)
+
+
+class TriageGate(BaseModel):
+    """How many claims a context must hold before a model reads it, and on what revision.
+
+    Frozen, and it carries both versions for the reason `Thresholds` does: `v1.py`
+    is frozen and `config/policy.toml` is not, so a gated assessment recording
+    only `policy_version` could not be replayed against the number that actually
+    cleared it.
+
+    `docs/decisions/0047-the-pre-triage-gate.md` is the decision and
+    `docs/hazards.md` §11 is what it costs.
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    policy_version: str
+    triage_gate_version: str
+    #: Fewer claims than this and the context is cleared without triage. `0`
+    #: disables the gate, because no context holds fewer than zero claims.
+    min_suspicious_indicators: int
+
+    @property
+    def enabled(self) -> bool:
+        return self.min_suspicious_indicators > 0
+
+
+def triage_gate(path: Path | str = POLICY_FILE) -> TriageGate:
+    """Read the pre-triage gate, or fail naming what is wrong with the file.
+
+        policy_version = "v1"
+        triage_gate_version = "2026-09-13"
+
+        [triage_gate]
+        min_suspicious_indicators = 1
+
+    Loud and with no fallback, for the reason `thresholds` gives: a gate that
+    defaulted would be the silent configuration default `concept/instruction.md`
+    §6 lists by name — and this one defaulting would decide, invisibly, that a
+    deployment stops reading its own traffic.
+
+    **An absent `[triage_gate]` is not an error, and is the only soft spot here.**
+    It means the gate is off and every context reaches triage, which is the
+    behaviour before 2026-09-13 and the one that reads more traffic rather than
+    less. A missing section that silently *enabled* skipping would be the
+    dangerous direction; this is the safe one, and it is what lets an older
+    `config/policy.toml` keep working.
+    """
+    path = Path(path)
+    try:
+        document = tomllib.loads(path.read_bytes().decode())
+    except FileNotFoundError as absent:
+        raise PolicyError(
+            f"no policy at {path}. The pre-triage gate is policy and not a "
+            f"constant in this package, so an absent file is a startup failure."
+        ) from absent
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as malformed:
+        raise PolicyError(f"{path} is not readable TOML: {malformed}") from malformed
+
+    policy_version = document.get("policy_version")
+    if not isinstance(policy_version, str) or not policy_version.strip():
+        raise PolicyError(f"{path} declares no policy_version")
+
+    table = document.get("triage_gate")
+    if table is None:
+        return TriageGate(
+            policy_version=policy_version,
+            triage_gate_version=document.get("triage_gate_version") or "absent",
+            min_suspicious_indicators=0,
+        )
+    if not isinstance(table, dict):
+        raise PolicyError(
+            f"{path}: [triage_gate] is {type(table).__name__}, and it is a table"
+        )
+    unexpected = sorted(set(table) - {"min_suspicious_indicators"})
+    if unexpected:
+        raise PolicyError(
+            f"{path}: [triage_gate] has {unexpected}, and reads only "
+            f"min_suspicious_indicators"
+        )
+    version = document.get("triage_gate_version")
+    if not isinstance(version, str) or not version.strip():
+        raise PolicyError(
+            f"{path} sets [triage_gate] and declares no triage_gate_version. A "
+            f"gated assessment records which revision of this file cleared it, "
+            f"so a gate without one could not be replayed against its own number."
+        )
+    minimum = table.get("min_suspicious_indicators")
+    if not isinstance(minimum, int) or isinstance(minimum, bool):
+        raise PolicyError(
+            f"{path}: triage_gate.min_suspicious_indicators is "
+            f"{type(minimum).__name__}, and it is a count of claims"
+        )
+    if minimum < 0:
+        raise PolicyError(
+            f"{path}: triage_gate.min_suspicious_indicators is {minimum}. A "
+            f"negative count gates nothing and reads as a disabled gate that "
+            f"somebody meant to set; 0 is how the gate is turned off."
+        )
+    return TriageGate(
+        policy_version=policy_version,
+        triage_gate_version=version,
+        min_suspicious_indicators=minimum,
+    )
+
+
 def thresholds(path: Path | str = POLICY_FILE) -> Thresholds:
     """Read the escalation thresholds, or fail naming what is wrong with the file.
 
@@ -578,14 +817,20 @@ def thresholds(path: Path | str = POLICY_FILE) -> Thresholds:
         raise PolicyError(f"{path} is not readable TOML: {malformed}") from malformed
 
     unexpected = sorted(
-        set(document) - THRESHOLD_KEYS - BUDGET_KEYS - DISCLOSURE_KEYS - PRICE_KEYS
+        set(document)
+        - THRESHOLD_KEYS
+        - BUDGET_KEYS
+        - DISCLOSURE_KEYS
+        - PRICE_KEYS
+        - GATE_KEYS
     )
     if unexpected:
         raise PolicyError(
             f"{path} has top-level keys {unexpected}; this loader reads "
             f"{sorted(THRESHOLD_KEYS)}, `helena.budgets.load` reads "
             f"{sorted(BUDGET_KEYS)} and {sorted(PRICE_KEYS)}, and "
-            f"`helena.disclosure.send_policy` reads {sorted(DISCLOSURE_KEYS)}. A "
+            f"`helena.disclosure.send_policy` reads {sorted(DISCLOSURE_KEYS)}, "
+            f"and `helena.policy.triage_gate` reads {sorted(GATE_KEYS)}. A "
             f"key nothing reads is a policy somebody set and nothing applies."
         )
     declared = {

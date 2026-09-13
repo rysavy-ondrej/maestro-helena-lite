@@ -113,6 +113,7 @@ from helena.contracts import v1 as contract
 from helena.policy import (
     BUDGET_KEYS,
     DISCLOSURE_KEYS,
+    GATE_KEYS,
     POLICY_FILE,
     PRICE_KEYS,
     THRESHOLD_KEYS,
@@ -286,14 +287,21 @@ def send_policy(path: Path | str = POLICY_FILE) -> SendPolicy:
         raise DisclosureError(f"{path} is not readable TOML: {malformed}") from malformed
 
     unexpected = sorted(
-        set(document) - DISCLOSURE_KEYS - THRESHOLD_KEYS - BUDGET_KEYS - PRICE_KEYS
+        set(document)
+        - DISCLOSURE_KEYS
+        - THRESHOLD_KEYS
+        - BUDGET_KEYS
+        - PRICE_KEYS
+        - GATE_KEYS
     )
     if unexpected:
         raise DisclosureError(
             f"{path} has top-level keys {unexpected}; this loader reads "
             f"{sorted(DISCLOSURE_KEYS)}, `helena.policy.thresholds` reads "
             f"{sorted(THRESHOLD_KEYS)} and `helena.budgets.load` reads "
-            f"{sorted(BUDGET_KEYS | PRICE_KEYS)}. A key nothing reads is a policy "
+            f"{sorted(BUDGET_KEYS | PRICE_KEYS)} and "
+            f"`helena.policy.triage_gate` reads {sorted(GATE_KEYS)}. A key "
+            f"nothing reads is a policy "
             f"somebody set "
             f"and nothing applies."
         )

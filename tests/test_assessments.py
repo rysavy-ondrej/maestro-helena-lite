@@ -43,6 +43,8 @@ from typing import Any
 import psycopg
 import pytest
 
+from helena.policy import v1 as policy_v1
+
 from helena import (
     agents,
     analyst,
@@ -1598,6 +1600,13 @@ def test_a_routed_pass_is_stored_as_the_rows_the_router_produced(
                 sensor=SENSOR,
                 redactor=observability.Redactor(["token-under-test"]),
                 stream=stream,
+            ),
+            # Disabled: this module predates the pre-triage gate (ADR-0047) and
+            # measures what triage does, so it must keep reaching triage.
+            triage_gate=policy.TriageGate(
+                policy_version=policy_v1.POLICY_VERSION,
+                triage_gate_version="test-disabled",
+                min_suspicious_indicators=0,
             ),
         )
         assert assessment.trigger == "deterministic_signal"

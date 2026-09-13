@@ -249,6 +249,38 @@ __all__ = [
 #: "escalated and triage said normal" — which is the case the whole input exists
 #: for.
 ESCALATION_EVALUATED = "orchestration.escalation_evaluated"
+#: Emitted for every context, gated or not, so that "how many contexts did a
+#: model actually read" is countable rather than inferred from an absence.
+GATE_EVALUATED = "orchestration.gate_evaluated"
+
+#: What a gated context is classified as. `concept/02`'s `normal` root, by
+#: ADR-0047 §4 -- the operator's decision was that a gated context is CLEARED,
+#: and a third outcome kind would be a different decision wearing this one's
+#: name. `concept/01` puts what this does not establish on the not-claimable
+#: list and docs/hazards.md §11 is the accepted risk.
+_GATED_CLASSIFICATION = "normal"
+
+#: A gated run spent nothing, because it did nothing. Zero rather than NULL:
+#: the run happened and cost nothing, which is a different fact from a cost
+#: nobody recorded, and `helena_analytical_run_metrics` sums this column.
+def _no_cost() -> contract.Cost:
+    """A fresh zero cost per call.
+
+    A function rather than a module-level constant because
+    `test_the_router_holds_no_state_between_assessments` forbids a constructed
+    object at module scope, and it is right to: the guard cannot tell a frozen
+    model from a mutable one, and the rule it protects — no state shared between
+    two assessments — is worth more than one saved allocation.
+    """
+    return contract.Cost(
+        prompt_tokens=0,
+        completion_tokens=0,
+        steps=0,
+        live_queries=0,
+        cache_hits=0,
+        retries=0,
+        wall_clock_seconds=0.0,
+    )
 ROUTED = "orchestration.routed"
 
 #: What `ROUTED` records where `concept/03`'s `else: finish()` applies. The
@@ -293,7 +325,10 @@ class Assessment:
 
     request: contract.AgentRequest
     escalation: Any
-    triage: contract.AgentResult | contract.AgentFailure
+    #: What triage produced, or -- where the pre-triage gate cleared the context
+    #: -- the gate decision that stood in for it. `policy.v1.GateDecision` is a
+    #: terminal outcome no agent produced: ADR-0047.
+    triage: contract.AgentResult | contract.AgentFailure | policy.GateDecision
     triage_disclosures: disclosure.Disclosures
     trigger: str | None
     analyst_request: contract.AgentRequest | None
@@ -440,6 +475,7 @@ def assess(
     send_policy: disclosure.SendPolicy,
     inherit: analyst.Inheritance,
     logger: observability.StructuredLogger,
+    triage_gate: policy.TriageGate,
 ) -> Assessment:
     """One context, from the triage request to the terminal outcome. Never raises for a model.
 
@@ -490,6 +526,48 @@ def assess(
         policy_version=escalation.policy_version,
         thresholds_version=escalation.thresholds_version,
     )
+
+    # Step 1a -- the pre-triage gate, and it is AFTER the escalation on purpose.
+    # `docs/decisions/0047-the-pre-triage-gate.md`: a context whose evidence
+    # escalates on its own is never gated, so the escalation has to exist before
+    # anything may decide to skip the model. `rules.gate` enforces that order
+    # again on its own inputs; this is the caller keeping it too.
+    # `policy.gate` and not `rules.gate`: the gate is a deployment decision taken
+    # on top of whichever version produced the escalation, not a member of the
+    # frozen rules. `docs/decisions/0008-version-registry.md` forbids editing a
+    # frozen version module in place, and task 45 set the precedent for putting a
+    # new rule beside a version rather than into it.
+    gated = policy.gate(
+        escalation,
+        minimum=triage_gate.min_suspicious_indicators,
+        triage_gate_version=triage_gate.triage_gate_version,
+    )
+    logger.info(
+        GATE_EVALUATED,
+        context_id=request.context_id,
+        context_version=request.context_version,
+        host=request.host,
+        cleared=gated.cleared,
+        reason=gated.reason,
+        claims_read=gated.claims_read,
+        min_suspicious_indicators=gated.min_suspicious_indicators,
+        triage_gate_version=gated.triage_gate_version,
+    )
+    if gated.cleared:
+        # No prompt was built, no model was called and nothing answered. The
+        # assessment is stored with `model_version` NULL, which is the fact
+        # rather than an omission -- ADR-0047 §3, and docs/hazards.md §11 is what
+        # this verdict does NOT establish.
+        return Assessment(
+            request=request,
+            escalation=escalation,
+            triage=gated,
+            triage_disclosures=disclosure.Disclosures.of(request, policy=send_policy),
+            trigger=None,
+            analyst_request=None,
+            analysis=None,
+            analyst_disclosures=None,
+        )
 
     triage_disclosures = disclosure.Disclosures.of(request, policy=send_policy)
     outcome = triage.run(
@@ -838,7 +916,7 @@ class AssessmentStore:
     def _one(
         self,
         request: contract.AgentRequest,
-        outcome: contract.AgentResult | contract.AgentFailure,
+        outcome: contract.AgentResult | contract.AgentFailure | policy.GateDecision,
         disclosures: disclosure.Disclosures,
         *,
         at: datetime,
@@ -856,8 +934,18 @@ class AssessmentStore:
         # validated themselves at construction; what only this pair can check is
         # that the outcome answers *this* request — the emitter, the echoed
         # versions, and every citation resolving to evidence the run was given.
+        # A gated context is exempt, and the exemption is the honest one rather
+        # than a convenience: `check_exchange` validates that an AGENT'S ANSWER
+        # answers this request -- the emitter matches, the versions are echoed
+        # back, every citation resolves to evidence the run was shown. A
+        # `GateDecision` is none of those things because no agent answered, so
+        # asking the contract to check it is a category error and not a check
+        # being skipped. What replaces it is that the gate decided on the
+        # escalation computed from THIS request's own projection, and
+        # `policy.gate` refuses an escalation from another policy version.
         try:
-            contract.check_exchange(request, outcome)
+            if not isinstance(outcome, policy.GateDecision):
+                contract.check_exchange(request, outcome)
         except ContractError as invalid:
             raise AssessmentError(
                 f"the outcome does not answer the request it is stored against: "
@@ -879,6 +967,9 @@ class AssessmentStore:
         )
         result = outcome if isinstance(outcome, contract.AgentResult) else None
         failure = outcome if isinstance(outcome, contract.AgentFailure) else None
+        # The third kind, and it is neither of the other two: no agent produced
+        # it, so it carries no evidence package, no gaps and no cost. ADR-0047.
+        gated = outcome if isinstance(outcome, policy.GateDecision) else None
         package = None if result is None else result.evidence_package
 
         for table in CHILD_TABLES:
@@ -890,22 +981,36 @@ class AssessmentStore:
             self._retrievals(identifier, result)
             if package is not None:
                 self._patterns(identifier, package)
-        self._gaps(identifier, outcome)
+        if gated is None:
+            self._gaps(identifier, outcome)
         self._disclosures(identifier, disclosures)
 
         # The nine dimensions under `helena.versions.VersionSet`'s own field
         # names. A result carries the completed set; a failure carries the eight
         # known before the call plus an optional reported identity, and
         # `model_version` stays NULL exactly where nothing answered.
+        # A gated context has no outcome of its own to read versions off, so the
+        # eight are the request's -- which is where the other two got them too.
+        versions = request.versions if gated is not None else outcome.versions
         recorded = {
-            dimension: getattr(outcome.versions, dimension)
+            dimension: getattr(versions, dimension)
             for dimension in contract.REQUEST_VERSION_DIMENSIONS
         }
-        model_version = (
-            result.versions.model_version if result is not None else failure.model_version
-        )
+        # NULL exactly where nothing answered, and for a gated context nothing
+        # did: no prompt was built and no model was called. Inventing a version
+        # here is the fabricated provenance `docs/decisions/0008-version-registry.md`
+        # exists to prevent, and this NULL beside a classification is how a
+        # consumer tells a gated clear from a triaged one (ADR-0047 §3).
+        if gated is not None:
+            model_version = None
+        else:
+            model_version = (
+                result.versions.model_version
+                if result is not None
+                else failure.model_version
+            )
         price = self._prices.for_model(request.versions.model_requested)
-        cost = outcome.cost
+        cost = _no_cost() if gated is not None else outcome.cost
         self._connection.execute(
             f"INSERT INTO {ASSESSMENT_TABLE} ({', '.join(ASSESSMENT_COLUMNS)}) "
             f"VALUES ({', '.join(['%s'] * len(ASSESSMENT_COLUMNS))})",
@@ -921,7 +1026,13 @@ class AssessmentStore:
                 request.emitter,
                 request.trigger,
                 at,
-                None if result is None else result.classification,
+                # `concept/02`'s `normal` root. A gated clear is a verdict by
+                # the operator's decision (ADR-0047 §4), and what it does NOT
+                # establish is docs/hazards.md §11.
+                _GATED_CLASSIFICATION if gated is not None
+                else (None if result is None else result.classification),
+                # No confidence: nothing estimated one. A number here would be
+                # this code inventing certainty about a context it never read.
                 None if result is None else result.confidence,
                 None if package is None or not package.narrative else package.narrative,
                 None if failure is None else failure.reason,
