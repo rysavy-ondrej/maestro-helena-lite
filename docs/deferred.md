@@ -165,6 +165,14 @@ single external artifact, and it is the blocker `concept/08` puts above every
 other: *"it does not block building the pipeline. What it blocks is the claim
 that the pipeline is right."*
 
+**Candidates exist and are named** — [`evaluation-corpus.md`](evaluation-corpus.md)
+§10, recorded 2026-09-13 and **not fetched**. That does not satisfy the re-entry
+test: a dataset that would have to be converted from PCAP to flow records, whose
+age makes contemporaneous enrichment impossible, and whose labels are per flow
+rather than per host context is a candidate to evaluate, not a corpus in hand.
+§10 states the cost of each of those three so the first increment budgets for
+them rather than discovering them.
+
 **Executable half:** `tests/test_evaluation_corpus.py::test_the_harness_is_still_deferred`
 fails if `concept/01` stops deferring it, if the document stops saying so, or if a
 module named for one appears inside `helena/`.

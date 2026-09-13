@@ -541,3 +541,88 @@ Calling it the beginning of the harness would be the maturity-label drift
 Until then, `concept/01-goal-and-scope.md`'s refusal stands unchanged: accuracy,
 recall, false-positive rate, escalation rate, latency and cost are **not
 claimable**, and the pipeline is demonstrably running and undemonstrably correct.
+
+---
+
+## 10. Candidate public datasets
+
+> **Provenance: recorded as supplied by the operator on 2026-09-13, and NOT
+> fetched.** Nothing below has been downloaded, opened, counted or measured by
+> this project. Every property named — payload completeness, labelling, the
+> attack scenarios, the sizes — is the operator's account of it and carries the
+> standing `concept/instruction.md` §0 gives such a thing: *check the artifact,
+> not the page.* The first increment that uses one of these fetches it and
+> replaces this section's adjectives with counts.
+
+### Safety, first, because it governs how any of them may be handled
+
+**Treat these PCAPs as hazardous.** They may contain recoverable malicious
+payloads. Analyse or replay them only in an isolated lab with outbound traffic
+blocked — **never onto a production network**, and never onto the network a
+HELENA deployment is monitoring, which would write attacker-controlled traffic
+into the store as though it had been observed.
+
+### The candidates
+
+| Dataset | What it is said to hold |
+| --- | --- |
+| [ISCX IDS 2012](https://www.unb.ca/cic/datasets/ids.html) | Full-payload PCAPs, labelled benign/malicious, with **explicitly documented multi-stage attack scenarios**: infiltration, HTTP DoS, IRC botnet DDoS and SSH brute force mixed with realistic background traffic |
+| [CIC-IDS 2017](https://www.unb.ca/cic/datasets/ids-2017.html) | Labelled PCAPs — exploitation, internal infiltration, pivoting and port scanning, botnets, web attacks, DDoS. Roughly **8–13 GB per day** |
+| [Malware-Traffic-Analysis.net exercises](https://www.malware-traffic-analysis.net/training-exercises.html) | Smaller, realistic **infection-chain** PCAPs with scenarios and answer keys |
+| [Stratosphere Malware Capture Facility](https://www.stratosphereips.org/datasets-malware) | Real malware and botnet captures, original PCAPs with supporting metadata |
+| [UNSW-NB15](https://research.unsw.edu.au/projects/unsw-nb15-dataset) | ~100 GB of PCAP — reconnaissance, exploits, backdoors, shellcode, worms, benign activity. Broad benchmark, **more synthetic** than the others |
+
+**The suggested order**, which is the operator's and is about effort rather than
+about which is best:
+
+1. A recent **Malware-Traffic-Analysis** exercise, for one manageable end-to-end
+   infection.
+2. **ISCX IDS 2012**, for labelled multi-stage testing.
+3. **CIC-IDS 2017**, for scale and background noise.
+4. **Stratosphere**, when genuine malware-family traffic is what is needed.
+
+### What adopting one would cost, against this pipeline's own requirements
+
+None of this argues against them. It is what the first increment has to budget
+for, and three of the four are not small.
+
+**1. They are PCAP and this pipeline does not ingest PCAP.** `INPUT_ADAPTERS`
+holds exactly two formats, `flow-json` and `flow-envelope`, and both are flow
+records. A converter is required, and it is not a plain NetFlow export: the
+context layer reads **DNS queries and answers, TLS parameters and HTTP requests**
+off each flow (`helena.normalizer.FlowRecord`), so an exporter that emits only
+five-tuples and counters throws away the half the pipeline is built on. Zeek's
+`conn`/`dns`/`ssl`/`http` logs hold the material, but joining them into
+HELENA's one-record-per-flow shape is a real increment with its own contract
+tests — not a script.
+
+**2. Enrichment cannot be contemporaneous, and §4 says why that is fatal to one
+half.** A 2012 or 2017 capture cannot be joined against a feed snapshot that
+exists today: the recent export is a rolling two-day sighting window, no archive
+of past exports exists, and a snapshot's validity interval begins when it was
+fetched. So these datasets can exercise **ingest, context, rendering and the
+agents**, and they cannot exercise **real enrichment** at all. Evidence for them
+would have to be synthetic — `scripts/plant_indicators.py` — which means the
+enrichment arm of any measurement over them is measuring the planting.
+
+**3. The labels are the wrong unit.** These label flows or packets; this
+pipeline's unit is **one host in one five-minute window** (§1). Mapping a flow
+label onto a context label is a definition somebody has to make and defend — a
+window holding one malicious flow among four hundred benign ones is not
+self-evidently a malicious context, and whichever way that is decided determines
+every number computed afterwards.
+
+**4. The base rate is inflated, which §6 is the standing warning about.** A
+dataset built to contain attacks has an attack proportion far above a monitored
+network's. Accuracy measured on it will look good and will not transfer. What
+these datasets can honestly support is **recall on the attacks they contain** and
+the multi-stage question of §3; a false-positive rate computed on them is a
+number about the dataset.
+
+### What this changes about §9
+
+Nothing yet. This section is a list of candidates, not a decision, and the
+evaluation harness stays `deferred` with its re-entry test unchanged. What it
+does is make the first two lines of §9's checklist actionable: a corpus exists to
+go and fetch, and the cost of adopting one is now written down rather than
+discovered.

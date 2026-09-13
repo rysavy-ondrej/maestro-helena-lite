@@ -78,7 +78,11 @@ and they are small on purpose: a demo that shows two things shows neither.
 So: **no new *traffic* is needed for demos 1–8.** What the existing capture cannot
 supply is the last two rows, and those are not a demo problem — they are
 [`evaluation-corpus.md`](evaluation-corpus.md)'s subject and they gate
-measurement, not demonstration. A planted indicator makes the escalation path
+measurement, not demonstration. Candidate public datasets that *do* carry
+genuine multi-stage activity are listed in
+[`evaluation-corpus.md`](evaluation-corpus.md) §10, with what adopting one would
+cost: they are PCAP and this pipeline ingests flow records, and their age makes
+contemporaneous enrichment impossible. A planted indicator makes the escalation path
 *run*; it does not make the verdict *right*, and
 [`synthetic-corpus.md`](synthetic-corpus.md) §5 is the list of what it cannot
 measure.
