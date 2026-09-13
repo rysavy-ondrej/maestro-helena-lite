@@ -123,6 +123,33 @@ have seen.
 with a second copy of a fact. The filename carries its UTC timestamp and
 `ls`/`sort` answers the only question anyone asks of a backup directory.
 
+## A float aggregate does not come back bit-identical
+
+Measured 2026-09-13, and recorded because it is a limit on what *"the pipeline
+state came back"* means rather than a defect in the backup.
+
+One context's `duration_seconds` reads **70.73012423515294** in the schema that
+computed it incrementally as records arrived, and **70.73012423515293** in the
+schema that recomputed it from the restored rows. One unit in the last place.
+
+The cause is not the backup, the restore or the engine: **floating-point addition
+is not associative**, the two schemas summed the same durations in different
+orders, and the results differ in the last bit. Nothing here can or should fix
+that — a restore that produced a bit-identical double would only mean the rebuild
+happened to sum in the same order, which is not a property to rely on.
+
+What it costs: a comparison across a restore has to compare floats to a
+tolerance. `tests/test_durability.py` uses twelve significant digits, which is
+far tighter than any claim this project makes about a duration and far looser
+than one ULP. It surfaced as an intermittent failure of
+`test_the_restored_schema_holds_the_rows_the_backup_came_from` — intermittent
+because the orders sometimes agree — and it was mistaken for a catch-up race
+twice before it was measured.
+
+It also bears on replay: `concept/01` already puts *"identical inputs replay
+identically"* on the not-claimable list for the model's sake, and this is a
+second, smaller reason the same sentence is right.
+
 ## Consequences
 
 - Durability is now a suite (`tests/test_durability.py`, 25 tests) rather than a

@@ -45,3 +45,8 @@ prds/.usage-cache.json
 # the one store, taken by an operator; not a second store, and not source.
 # docs/decisions/0040-durability-and-backup.md is the model.
 .backups/
+
+# Rebased and planted corpora (scripts/rebase_capture.py, plant_indicators.py).
+# Derived from a capture that is not in this repository, and a planted capture in
+# source control is a file that looks like evidence of an intrusion.
+.corpus/

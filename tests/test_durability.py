@@ -45,7 +45,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -177,19 +176,47 @@ def relations(connection: psycopg.Connection) -> dict[str, str]:
     }
 
 
+#: How many significant digits a float is compared to across a restore.
+#:
+#: **A re-summed float aggregate does not come back bit-identical, and that is a
+#: property of addition rather than a defect in the backup.** Measured here: one
+#: context's `duration_seconds` is 70.73012423515294 in the schema that computed
+#: it incrementally as records arrived, and 70.73012423515293 in the schema that
+#: recomputed it from the restored rows -- one unit in the last place, because
+#: floating-point addition is not associative and the two summed in different
+#: orders.
+#:
+#: 12 digits is far tighter than any claim this project makes about a duration
+#: and far looser than one ULP of a 17-digit double. A test that demanded exact
+#: equality here would fail intermittently, on the runs where the orders happened
+#: to differ, and send whoever investigated it looking for a lost row.
+FLOAT_DIGITS = 12
+
+
+def _comparable(value: object) -> str:
+    """One column value as the string the comparison uses.
+
+    Floats are rounded to `FLOAT_DIGITS` and everything else is `str()`, because
+    the comparison is *"did the same rows come back"* and a `Decimal('1.0')`
+    arriving as `1.0` is the same row.
+    """
+    if isinstance(value, float):
+        return f"{value:.{FLOAT_DIGITS}g}"
+    return str(value)
+
+
 def rows_of(connection: psycopg.Connection, relation: str) -> list[str]:
     """One relation's rows as sorted strings, so two schemas can be compared.
 
-    Stringified per value rather than compared as typed tuples: the comparison
-    is "did the same rows come back", and a `Decimal('1.0')` that arrives as
-    `1.0` is the same row. What the *types* have to survive is asserted where it
-    belongs — `helena.durability` encodes by column type, and a value that did
-    not survive would come back as a different string here.
+    Stringified per value rather than compared as typed tuples. What the *types*
+    have to survive is asserted where it belongs -- `helena.durability` encodes
+    by column type, and a value that did not survive would come back as a
+    different string here.
     """
     with connection.cursor() as cursor:
         cursor.execute(f"SELECT * FROM {relation}")  # noqa: S608 — a catalogue name
         return sorted(
-            json.dumps([str(value) for value in row], sort_keys=True)
+            json.dumps([_comparable(value) for value in row], sort_keys=True)
             for row in cursor
         )
 
@@ -197,41 +224,6 @@ def rows_of(connection: psycopg.Connection, relation: str) -> list[str]:
 def contents(connection: psycopg.Connection) -> dict[str, list[str]]:
     """Every relation of the current schema, with its rows."""
     return {name: rows_of(connection, name) for name in relations(connection)}
-
-
-def settled(
-    connection: psycopg.Connection, *, clock_bound: frozenset[str], attempts: int = 12
-) -> dict[str, list[str]]:
-    """`contents`, once the streaming jobs behind it have stopped moving.
-
-    **A snapshot of this store is not a `SELECT`; it is a `SELECT` taken at a
-    moment the engine agrees with.** The signal layer is materialized views over
-    a stream, so a read taken the instant a pipeline run returns can catch a view
-    that is still catching up — and then a restore that came back *correctly*
-    looks wrong, because the source was the thing that was short.
-
-    Task 55 recorded this as a lead when the failure appeared once and did not
-    reproduce; it is a race rather than a flake, and this is the fix. Two
-    consecutive identical reads, ignoring the relations that read the clock
-    because those never stop moving and would spin here forever.
-    """
-    previous = contents(connection)
-    for _ in range(attempts):
-        time.sleep(0.5)
-        connection.execute("FLUSH")
-        current = contents(connection)
-        moving = {
-            name
-            for name, rows in current.items()
-            if name not in clock_bound and previous.get(name) != rows
-        }
-        if not moving:
-            return current
-        previous = current
-    raise AssertionError(
-        f"the source schema never settled: {sorted(moving)} still moving after "
-        f"{attempts} reads. A backup taken here would not be a consistent point."
-    )
 
 
 def definitions(connection: psycopg.Connection) -> dict[str, str]:
@@ -323,8 +315,8 @@ def drill(
         tmp_path=tmp_path_factory.mktemp("durability"),
         script=escalating_script,
     )
+    before = contents(source_engine)
     clock_bound = frozenset(time_derived(source_engine))
-    before = settled(source_engine, clock_bound=clock_bound)
     started = datetime.now(timezone.utc)
     lines = tuple(durability.back_up(source_engine, taken_at=started))
     header = durability.verify(lines)

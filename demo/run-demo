@@ -14,8 +14,12 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-# In the order demo/README.md numbers them.
-DEMOS=(ingest_and_context context_over_a_day assess_a_slice)
+# The shipped demos, in the order docs/demos.md numbers them. That table is the
+# index and this list is held equal to it by tests/test_demos.py, so a demo added
+# to one and not the other is a test failure rather than a thing a reader finds
+# by running --list and being surprised.
+DEMOS=(ingest_and_context context_over_a_day assess_a_slice enrichment_states
+       escalation_and_scope failure_paths replay_an_assessment backup_and_restore)
 
 # The comment block at the top of this file, minus the leading '#', is the help.
 usage() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"; }
@@ -25,6 +29,8 @@ list() {
     for i in "${!DEMOS[@]}"; do
         printf '  %d  demo/%s.py\n' "$((i + 1))" "${DEMOS[i]}"
     done
+    printf '\n  %s\n' "docs/demos.md is the index: what each shows, what data it"
+    printf '  %s\n' "needs, and which situation each one is for."
 }
 
 # A selector is a 1-based number or a script name, with or without the .py.

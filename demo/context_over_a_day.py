@@ -26,6 +26,14 @@ It carries a whole network's traffic and no recorded clearance of the kind
 `data/ingest/README.md` gives the 62-record sample, so `.gitignore` keeps
 `data/demo/` out and this reads it where it lies.
 
+## What it does not show
+
+**No enrichment and no assessment**, the same two demo 1 omits, and **nothing
+about verdict quality**. There is still no labelled corpus, and a day of
+unlabelled traffic is not one — it is a great deal more input, which is a
+different thing from evidence about output. `docs/demos.md` is which demo shows
+what.
+
 Maturity: experimental — a demonstration, not a tested component. The paths it
 drives are covered by tests/test_normalizer.py and tests/test_context.py.
 """

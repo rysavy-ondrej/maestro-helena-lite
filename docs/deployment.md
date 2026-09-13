@@ -294,4 +294,5 @@ it, and each is recorded elsewhere with its reasoning.
 | Accepted risks | [`hazards.md`](hazards.md) |
 | The architecture and each component | [`../README.md`](../README.md) |
 | What the system is *for* | [`../concept/`](../concept/) — the authority |
-| Seeing it work | `demo/run-demo 3`, and [`../demo/README.md`](../demo/README.md) |
+| Seeing it work | `demo/run-demo 3`; [`demos.md`](demos.md) is which demo shows what |
+| Building a corpus to run it over | [`synthetic-corpus.md`](synthetic-corpus.md), `scripts/rebase_capture.py`, `scripts/plant_indicators.py` |

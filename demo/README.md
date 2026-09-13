@@ -3,6 +3,12 @@
 Three scripts, all running the pipeline as it exists today rather than narrating
 it. They answer different questions and none is a bigger version of another.
 
+**[`../docs/demos.md`](../docs/demos.md) is the index** — what each demo shows,
+what data it needs, the naming convention, and six more that are proposed rather
+than shipped. `tests/test_demos.py` keeps that table, this directory and
+`run-demo` in agreement, so a demo added to one and not the others is a test
+failure rather than a surprise at `--list`.
+
 | | Script | Input | The question it answers |
 | --- | --- | --- | --- |
 | 1 | `ingest_and_context.py` | `data/ingest/flow-sample.jsonl` — 62 records, one host, 130.8 s | *what happens to a record*, at a size where every number can be checked by eye |

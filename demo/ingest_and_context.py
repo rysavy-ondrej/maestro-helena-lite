@@ -17,6 +17,17 @@ this can be run against a live deployment's engine without touching its data,
 and it does not care what the store already holds -- including a store whose
 migration ledger predates the declaration retrofit of task 17.
 
+## What it does not show
+
+**No enrichment and no assessment.** Nothing is matched against a feed, no agent
+is called and no verdict exists -- those are demos 3 and up (`docs/demos.md`).
+The entity rows printed below are the join target enrichment will use, not
+enrichment itself.
+
+**Nothing about verdict quality.** There is no labelled corpus, so no claim about
+whether any of this produces good answers is available from this or any other
+script in the repository.
+
 Maturity: experimental -- a demonstration, not a tested component. The paths it
 drives are covered by tests/test_normalizer.py and tests/test_context.py; this
 script is exercised by running it.
