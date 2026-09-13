@@ -342,6 +342,67 @@ would arrive through, and that isolation is built and tested
 
 ---
 
+## 14. The Profiler Agent and the host profile
+
+Key: `profiler-agent`
+Recorded in: **nowhere in `concept/` yet** — proposed 2026-09-13 and recorded
+here as future work so that it is written down rather than carried in a
+conversation (`concept/instruction.md` §5). Maturity: `hypothesis` — *proposed,
+not validated, and never to be read as accepted architecture.* Adding it to the
+concept is a separate decision nobody has taken.
+
+**What it is.** A third agent that takes a **wider context for one host** than a
+single five-minute window — history across windows, what this host habitually
+talks to, when it is usually active — and produces a **host profile** the Analyst
+Agent can read later. The proposal as stated records the profile as a markdown
+file per host.
+
+**Why it is attractive, stated fairly.** Every agent today sees one host in one
+five-minute window, so nothing in the pipeline can answer *"is this normal **for
+this host**?"*. That question is what turns an unremarkable connection into a
+signal and a noisy-but-habitual one into background, and no amount of feed
+coverage substitutes for it. It is also the most plausible route to a *deterministic*
+reason to skip inference — the gate this repository added on 2026-09-13 uses
+indicator counts, which ordinary traffic never has (`hazards.md` §11), whereas a
+baseline could say *"this host did something it has never done"*.
+
+**What it collides with, and these are not style objections.** The proposal as
+stated is refused three times over by rules that exist for recorded reasons, so
+an implementation has to solve all three rather than route around them:
+
+1. **A markdown file per host is a second store**, and specifically the one
+   `concept/instruction.md` §2 names: *"no file-backed agent memory"*.
+   `tests/test_architecture_boundary.py` asserts the package writes **no file**
+   and `tests/test_dependency_boundary.py` asserts the only persistence targets
+   are the engine and the two topics.
+2. **`concept/07`: "An agent writes a fact, a claim or a memory entry directly"**
+   is a must-never-happen row. Agents propose; code validates and writes.
+3. **`concept/07`: "A free-text agent note is persisted as a record"** — *"that
+   is the channel by which attacker-influenced text reaches a future session"*.
+   This is the sharpest one: a profile is free text, derived partly from traffic
+   and provider text an adversary can influence, persisted, and then read by a
+   later agent. That is the prompt-injection persistence channel the rule exists
+   to close, and a markdown file is its most convenient form.
+
+**What a compliant design would look like**, so the next session starts from a
+shape rather than from the objection: the profile is **typed rows in the single
+store** and not a document; **code writes it** from what the agent proposes,
+validated field by field; anything free-text that survives is carried as **data
+and never placed in an instruction position**, with the isolation tested the way
+`tests/test_isolation.py` already tests it for retrieved provider text; and the
+profile is **versioned** like every other citable input, so an assessment that
+used one records which one it read. A profile that cannot be cited is a profile
+that cannot be replayed.
+
+**Re-entry test.** A measured demonstration that baseline context changes a
+verdict — analyst verdicts over the same contexts, with and without a host
+profile, scored against labelled outcomes. That needs the evaluation corpus
+(`evaluation-corpus.md`), which does not exist, so this is blocked on the same
+thing as most of this register. *"A profile would be useful"* is not a re-entry
+test and is refused here on purpose.
+
+---
+
 ## What is *not* deferred, and must not be listed as if it were
 
 `concept/01`'s *out of scope for the system entirely*, plus two rejections:
