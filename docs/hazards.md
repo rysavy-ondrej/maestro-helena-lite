@@ -102,10 +102,17 @@ name with no traffic behind it and `*.workers.dev`-style shared infrastructure.
 name to connection, which the input supports and nothing builds yet.
 
 **Measured 2026-09-14, and it is worse in practice than this entry read.**
-`demo/assess_an_infection.py` put a real Malware-Traffic-Analysis infection
-through the pipeline — one genuinely compromised Windows client, its real C2
-chain, five claims at **confidence 1.0** — and **the deterministic escalation did
-not fire on a single one of the host's five windows.** Every claim was on a
+`demo/assess_an_infection.py --domains-only` puts a real
+Malware-Traffic-Analysis infection through the pipeline — one genuinely
+compromised Windows client, its real C2 chain, five claims at **confidence
+1.0** — and **the deterministic escalation does not fire on a single one of the
+host's five windows.**
+
+The flag is what reproduces it, and the contrast is the rest of the finding: the
+same demo's default plants the **addresses and the URL the same traffic
+carried**, and then every one of those windows escalates. Nothing about the
+host, the traffic or the confidence changed — only which entity type the claim
+was attached to. Every claim was on a
 `domain` entity and every one was held back by the same rule, which the demo
 names on each run:
 

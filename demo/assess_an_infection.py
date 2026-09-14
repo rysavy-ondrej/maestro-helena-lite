@@ -120,19 +120,40 @@ from helena.taxonomy import TRIAGE  # noqa: E402
 CORPUS = ROOT.parent / "data" / "connections" / "malware-traffic"
 DEFAULT_EXERCISE = "2026-09-11"
 
-#: The infection chains this demo knows how to name, per exercise. Read off the
-#: capture's own DNS and TLS -- these are the domains the host actually reached,
-#: not a guess about which were malicious. The upstream answer keys are not in
-#: this tree, so this is *"the chain the traffic shows"* and deliberately not
-#: *"the indicators of compromise"*: nothing here has been checked against an
-#: answer page, and `soft.xos-aploq.com` and its siblings may be a CDN.
+#: What each exercise's traffic really reached, by the entity type the enrichment
+#: join matches on. Read off the capture's own DNS, HTTP and flows -- these are
+#: things the host actually contacted, not a guess about which were malicious.
+#: The upstream answer keys are not in this tree, so this is *"the chain the
+#: traffic shows"* and deliberately not *"the indicators of compromise"*.
+#:
+#: **All three types ThreatFox covers are here on purpose.** A domain-only chain
+#: is what the first version of this demo planted, and it produced five claims
+#: and no deterministic escalation at all -- because the composition rule's scope
+#: test does not reach domain entities (`docs/hazards.md` §5). Adding the
+#: addresses and the URL the same traffic carried is what makes the enrichment
+#: join, and the rules on top of it, visible as more than one outcome.
 CHAINS = {
     "2026-09-11": (
-        "know.mom-nower.com",
-        "winrun2915.com",
-        "logincrypt8338.com",
-        "opscast3707.net",
-        "aatthews.cfd",
+        # --- domains: queried, and three of them offered as a TLS server name
+        ("know.mom-nower.com", "domain"),
+        ("winrun2915.com", "domain"),
+        ("logincrypt8338.com", "domain"),
+        ("opscast3707.net", "domain"),
+        ("aatthews.cfd", "domain"),
+        # --- an address on its own infrastructure. The host sent it 4.77 MB
+        # over 73 flows of plain HTTP and got 107 KB back: contacted, heavily,
+        # both ways, on the port the indicator names.
+        ("86.106.87.134:80", "ip:port"),
+        # --- an address behind a CDN, reached for winrun2915.com. Contacted
+        # just as really, and the rules should treat it differently: one
+        # address shared by everything is not evidence about this host.
+        ("104.21.91.138:443", "ip:port"),
+        # --- a URL the host actually requested, from the same C2
+        (
+            "http://know.mom-nower.com/zgzly/e2fkf6&"
+            "4a0fd955c05d43841a9a8d921ceec63b0dc5b431a9fb54b33ad7848707bc16e9/o3m8xrq0rab",
+            "url",
+        ),
     ),
 }
 
@@ -163,20 +184,26 @@ def infected_host(records: list[dict]) -> str:
     return max(counts, key=counts.get)
 
 
-def listed(export: bytes, domains: tuple[str, ...]) -> bytes:
+def listed(export: bytes, chain: tuple[tuple[str, str], ...]) -> bytes:
     """The live export with the chain added, as entries the loader will map.
 
     Added rather than substituted: everything ThreatFox really published is still
     there, so the `no_match` rows in the output are real answers about real
     indicators and only the chain is this demo's doing.
+
+    `ioc_type` is carried per entry rather than assumed, because the whole point
+    of planting three types is that the join and the rules treat them
+    differently -- an `ip:port` is split into address and port by
+    `sql/migrations/0014_feed_mapping_views.sql`, and the port then qualifies
+    the match instead of filtering it.
     """
     document = json.loads(export)
     base = max((int(key) for key in document if key.isdigit()), default=0) + 1
-    for offset, domain in enumerate(domains):
+    for offset, (value, kind) in enumerate(chain):
         document[str(base + offset)] = [
             {
-                "ioc_value": domain,
-                "ioc_type": "domain",
+                "ioc_value": value,
+                "ioc_type": kind,
                 "threat_type": "botnet_cc",
                 "malware": "win.unknown",
                 "malware_alias": None,
@@ -276,6 +303,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--exercise", default=DEFAULT_EXERCISE)
     parser.add_argument(
+        "--domains-only",
+        action="store_true",
+        help="plant only the domain indicators, which is what docs/hazards.md §5 "
+             "was measured with: the scope test does not reach domain entities, so "
+             "nothing escalates deterministically however high the confidence.",
+    )
+    parser.add_argument(
         "--windows",
         type=int,
         default=3,
@@ -315,6 +349,10 @@ def main(argv: list[str] | None = None) -> int:
         note("specific intrusion is not in it. THAT IS THIS DEMO'S REAL RESULT:")
         note("a pipeline that only knew what a feed lists would call this normal.")
 
+    if arguments.domains_only:
+        chain = tuple((value, kind) for value, kind in chain if kind == "domain")
+        print(f"\n  {YELLOW}--domains-only{RESET}: planting the domains and nothing else,")
+        note("which is how docs/hazards.md §5 was measured")
     if not chain:
         raise SystemExit(
             f"no chain is recorded for {arguments.exercise!r}, so this demo has "
@@ -322,9 +360,15 @@ def main(argv: list[str] | None = None) -> int:
             f"each capture's own DNS and TLS; add the exercise there first."
         )
     print(f"\n  {YELLOW}ADDED to the snapshot{RESET}, because the feed does not list them:")
-    for domain in chain:
-        print(f"    {YELLOW}{domain}{RESET}")
-    note("these are domains the host really contacted; the LISTING is the demo's")
+    for value, kind in chain:
+        print(f"    {YELLOW}{kind:<8}{RESET} {value[:64]}")
+    if arguments.domains_only:
+        note("domains only — the scope test does not reach a domain entity, so")
+        note("this is the run where nothing escalates however high the confidence")
+    else:
+        note("all three types the source covers, so the join can be seen matching")
+        note("more than one")
+    note("these are things the host really reached; the LISTING is the demo's")
 
     # The capture ends now, so every window has closed and can be assessed. A
     # capture rebased to START now spans into the future and its windows never
@@ -367,7 +411,39 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  snapshot     {snapshot[:16]}…  "
               f"{(load.counts or {}).get('claims_stored', 0)} claims")
 
-        stage(4, "The contexts the engine computed, and what was claimed about them")
+        stage(4, "What the enrichment join matched, by entity type")
+        matched = connection.execute(
+            "SELECT entity_type, status, "
+            "       coalesce(classification, '(no snapshot consulted)'), "
+            "       count(*), count(DISTINCT entity_value) "
+            "FROM helena_analytical_enriched_context "
+            "GROUP BY 1, 2, 3 ORDER BY 1, 3 DESC, 2"
+        ).fetchall()
+        print(f"  {'entity type':<13} {'status':<8} {'what the snapshot said':<26} "
+              f"{'rows':>5} {'distinct':>9}")
+        rule()
+        for entity_type, status, classification, rows, distinct in matched:
+            hit = classification not in ("no_match", "(no snapshot consulted)")
+            colour = (GREEN + BOLD) if hit else DIM
+            print(f"  {entity_type:<13} {status:<8} {colour}{classification:<26}{RESET}"
+                  f" {rows:>5} {distinct:>9}")
+        note("`no_match` is a snapshot consulted and saying nothing about that entity —")
+        note("a real answer about a real indicator, and not a statement of safety")
+        hits = connection.execute(
+            "SELECT entity_type, entity_value, source_id, confidence, port_matched "
+            "FROM helena_analytical_enriched_context "
+            "WHERE classification NOT IN ('no_match') AND classification IS NOT NULL "
+            "GROUP BY 1,2,3,4,5 ORDER BY 1, 2"
+        ).fetchall()
+        if hits:
+            print(f"\n  {GREEN}the entities a claim was made about{RESET}:")
+            for entity_type, value, source, confidence, port_matched in hits:
+                port = "" if port_matched is None else f"  port_matched={port_matched}"
+                print(f"    {entity_type:<9} {value[:46]:<46} {source} "
+                      f"{confidence}{port}")
+            note("port_matched qualifies an address match, it does not filter it (ADR-0042)")
+
+        stage(5, "The contexts the engine computed, and what was claimed about them")
         contexts = live_contexts(connection)
         store = rendering.RenderingStore(connection=connection, identity=settings.identity)
         projections = [store.project(context_id) for context_id in contexts]
@@ -399,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"    {DIM}{candidate.entity_type} {candidate.entity_value[:30]}"
                           f"  supports={candidate.supports}  held by {list(candidate.rules)}{RESET}")
 
-        stage(5, "Assess the contexts against the configured model")
+        stage(6, "Assess the contexts against the configured model")
         print(f"  {DIM}triage {settings.triage.model} / analyst {settings.analyst.model}; "
               f"gate min_suspicious_indicators={gate.min_suspicious_indicators}{RESET}")
         budget_policy = budgets.load()
@@ -458,7 +534,7 @@ def main(argv: list[str] | None = None) -> int:
                   flush=True)
         connection.execute("FLUSH")
 
-        stage(6, "What a consumer reads off the output topic")
+        stage(7, "What a consumer reads off the output topic")
         sink_store = sink.SinkStore(connection=connection, identity=settings.identity)
         print(f"  pending      {sink_store.pending()} message(s)")
         cited = 0
