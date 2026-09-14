@@ -16,6 +16,24 @@ topic was empty would hide the one failure this is useful for catching: an
 assessment that exists and was never emitted. `uv run scripts/emit.py --count`
 is the other half of that question and asks the engine instead.
 
+## Reading it consumes it, and that is the broker
+
+**The broker is consume-once: a record read once is gone, and a topic is never
+re-readable** (`docs/runbook.md` §3, measured there and re-measured here on
+2026-09-14 — one message, first reader 1, second reader 0, with no delay
+between them). Three consequences, and the first is the one that wastes an
+afternoon:
+
+- **Start this before you emit.** `--follow` from another terminal, then run
+  `scripts/emit.py`. A reader started afterwards finds nothing, because the
+  emission has already been read by whatever read it first.
+- **Two readers cannot both have the messages.** If something else is already
+  consuming the output topic, this takes messages away from it.
+- **Nothing is recoverable from the topic**, which is `concept/03`'s *"the
+  output topic is egress, not storage"* as an operational fact rather than a
+  design preference. `scripts/emit.py` re-emits from the store; the topic itself
+  remembers nothing.
+
 ## What you are looking at, and what you inherit by forwarding it
 
 `docs/runbook.md` §11: the output topic carries **internal addresses, hostnames
@@ -193,10 +211,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{DIM}{seen} message(s){RESET}")
         if seen == 0:
             print(
-                "nothing on the topic. `uv run scripts/emit.py --count` asks the\n"
-                "engine how many assessments are waiting — a store with pending\n"
-                "rows and an empty topic is an emission that has not run, which is\n"
-                "a different fault from nothing having been assessed."
+                "nothing on the topic, and there are three reasons for that.\n"
+                "\n"
+                "  1. SOMETHING ALREADY READ IT. The broker is consume-once — a\n"
+                "     record read once is gone and a topic is never re-readable\n"
+                "     (runbook §3). Start this with --follow BEFORE emitting.\n"
+                "  2. Nothing was emitted. `uv run scripts/emit.py --count` asks\n"
+                "     the engine how many assessments are waiting; pending rows\n"
+                "     with an empty topic is an emission that has not run.\n"
+                "  3. Nothing was assessed. A different fault from either, and\n"
+                "     the likely one here: nothing in src/helena builds an agent\n"
+                "     request from a live context (docs/deployment.md §1)."
             )
     return 0
 
