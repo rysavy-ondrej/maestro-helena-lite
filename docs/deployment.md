@@ -77,6 +77,21 @@ the only thing that tells you the tree you are deploying is the tree that works.
 
 ## 3. First deployment, in order
 
+**`scripts/setup` is all of this as one command**, and it is idempotent — run it
+again after a reboot. `scripts/setup --check` says what is up and what is
+missing without changing anything. The steps below are what it does, and are
+worth reading once because the ordering in step 4 is the one that bites
+silently.
+
+    scripts/setup            # engine, broker, schema, reference data, topics
+    scripts/setup --check    # report only
+    scripts/setup --no-feed  # skip the network fetches
+
+If it stops at the schema saying a migration **changed since it was applied**,
+that is the ledger working: the engine holds a schema built from a different
+version of that file. `setup` prints the three ways out, and only the first is
+non-destructive.
+
 The order matters in one place and it is step 4 — read its note before skipping
 ahead.
 
@@ -182,6 +197,24 @@ is a topic that can differ between two runs of the same deployment.
 **The output topic is egress, not storage.** Nothing is recoverable only from it,
 and anything forwarding it off-site inherits the disclosure obligations —
 [runbook §11](runbook.md#11-egress-what-the-output-topic-carries-and-what-you-inherit-by-forwarding-it).
+
+### 9. Read the far end
+
+```bash
+uv run scripts/consume_output.py            # what is on the topic now
+uv run scripts/consume_output.py --follow   # ... and keep waiting
+uv run scripts/consume_output.py --json     # the bytes, for anything downstream
+```
+
+The consumer side of step 8, and the shape `concept/03` means by *"the analyst
+workflow / SIEM: a consumer of the output topic"*. **It reads the topic and never
+the store** — a reader that fell back to SQL would hide the fault worth catching,
+an assessment that exists and was never emitted. `scripts/emit.py --count` asks
+the engine instead, and the two disagreeing is the interesting case.
+
+A `normal` verdict carrying **no model version** is the pre-triage gate's
+signature: that context was cleared without a model reading it, and the reader
+says so on sight.
 
 ---
 

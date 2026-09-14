@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# Bring a deployment up: engine, broker, schema, reference data, both topics.
+#
+#   scripts/setup             start everything and load what the pipeline needs
+#   scripts/setup --check     say what is up and what is missing, change nothing
+#   scripts/setup --no-feed   skip the network fetches (offline, or rate-limited)
+#
+# This is `docs/deployment.md` §3 as a script. It sequences the tools that
+# already exist rather than reimplementing any of them, and it is **idempotent**:
+# migrations are a no-op when applied, a feed load inside its refresh floor is a
+# no-op, and a topic that exists is not recreated. Run it again after a reboot.
+#
+# What it does NOT do is assess anything, and the reason is in `--check`'s
+# output: nothing in `src/helena` turns a live context into an agent request.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+bold=$'\033[1m'; dim=$'\033[2m'; red=$'\033[31m'; grn=$'\033[32m'; ylw=$'\033[33m'; rst=$'\033[0m'
+[ -t 1 ] || { bold=""; dim=""; red=""; grn=""; ylw=""; rst=""; }
+
+step() { printf '\n%s==>%s %s\n' "$bold" "$rst" "$*"; }
+ok()   { printf '  %sok%s   %s\n' "$grn" "$rst" "$*"; }
+warn() { printf '  %swarn%s %s\n' "$ylw" "$rst" "$*"; }
+bad()  { printf '  %sFAIL%s %s\n' "$red" "$rst" "$*"; }
+note() { printf '  %s%s%s\n' "$dim" "$*" "$rst"; }
+
+CHECK_ONLY=0
+LOAD_FEED=1
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --check)    CHECK_ONLY=1 ;;
+        --no-feed)  LOAD_FEED=0 ;;
+        -h|--help)  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "setup: unknown option $1  (try --help)" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+# --- 1. configuration -------------------------------------------------------
+# Before anything is started, because every address below comes from it and a
+# missing variable is a startup failure naming the variable rather than a
+# connection refused twenty seconds later.
+step "Configuration"
+if [ ! -f .env ]; then
+    bad ".env is not here. cp .env.example .env and fill it in."
+    note "every variable is required and none has a default; an empty value counts"
+    note "as missing, so a copied-but-unfilled file fails naming what is unset."
+    exit 1
+fi
+if ! uv run python -c "
+import sys; sys.path.insert(0, 'src')
+from helena.config import Settings
+s = Settings.load()
+print(f'  tenant {s.identity.tenant}  sensor {s.identity.sensor}')
+print(f'  engine {s.infrastructure.risingwave_dsn}')
+print(f'  broker {s.infrastructure.kafka_bootstrap_servers}')
+print(f'  topics in={s.infrastructure.ingest_topic} out={s.infrastructure.output_topic}')
+" 2>/tmp/helena-setup-config.$$; then
+    bad "configuration did not resolve:"
+    sed 's/^/    /' /tmp/helena-setup-config.$$ >&2
+    rm -f /tmp/helena-setup-config.$$
+    exit 1
+fi
+rm -f /tmp/helena-setup-config.$$
+ok "every variable resolved"
+
+# --- 2. the two processes ---------------------------------------------------
+step "Engine and broker"
+if [ "$CHECK_ONLY" -eq 1 ]; then
+    uv run scripts/dev_check.py || true
+else
+    if [ -f .run/risingwave.pid ] && kill -0 "$(cat .run/risingwave.pid)" 2>/dev/null \
+       && [ -f .run/blink.pid ] && kill -0 "$(cat .run/blink.pid)" 2>/dev/null; then
+        ok "both already running"
+    else
+        # dev-up refuses to start when one of the two is already up, so a
+        # half-running pair is cycled rather than nudged. The engine is
+        # in-memory: nothing durable is lost, and everything below reloads.
+        if [ -f .run/risingwave.pid ] || [ -f .run/blink.pid ]; then
+            warn "one of the two was running; cycling both"
+            scripts/dev-down || true
+        fi
+        scripts/dev-up
+    fi
+fi
+
+# --- 3. the schema ----------------------------------------------------------
+# Before anything is ingested, and this is the one ordering that bites silently:
+# the broker is consume-once, so a view created later starts empty rather than
+# backfilling from records that already went past.
+step "Schema"
+if [ "$CHECK_ONLY" -eq 1 ]; then
+    uv run python -c "
+import sys; sys.path.insert(0, 'src')
+import psycopg
+from helena import migrations
+from helena.config import Settings
+s = Settings.load()
+with psycopg.connect(s.infrastructure.risingwave_dsn, autocommit=True, connect_timeout=8) as c:
+    applied = migrations.recorded(c)
+    print(f'  {len(applied)} migration(s) recorded of {len(migrations.discover())} on disk')
+" || bad "could not read the migration ledger"
+elif ! uv run scripts/migrate.py; then
+    # The ledger refusing is the ledger working. It is checked here rather than
+    # left as a stack trace because the remedy is an operator decision and the
+    # message alone does not say which one.
+    printf '\n  %sThe engine holds a schema applied from a different version of that file.%s\n' "$ylw" "$rst"
+    note "An applied migration is addressed by its checksum, so editing one --"
+    note "even a comment -- makes the engine and the repository disagree about"
+    note "what is there. That is what this is, and it is usually a long-lived"
+    note "engine: the state lives in .rwdata/ and survives dev-down/dev-up, so a"
+    note "schema applied weeks ago outlives edits to the files that built it."
+    note ""
+    note "Three ways out, and the first is the only one that is not destructive:"
+    note "  1. point this deployment at a fresh schema (SET search_path), which"
+    note "     is what every test and demo does -- they migrate into their own"
+    note "  2. back up first, then start from a clean store:"
+    note "       uv run scripts/backup.py --out .backups"
+    note "       scripts/dev-down && rm -rf .rwdata && scripts/setup"
+    note "     THIS DESTROYS THE ENGINE'S STATE, which is the single store --"
+    note "     findings and evidence live nowhere else (ADR-0040)"
+    note "  3. write a new migration that supersedes the old one, if the schema"
+    note "     in the engine is one you need to keep and evolve"
+    exit 1
+fi
+
+# --- 4. reference data ------------------------------------------------------
+# The suffix list first: a registrable domain is derived against it, and an
+# entity extracted without one is an entity the enrichment join cannot match.
+step "Reference data"
+if [ "$CHECK_ONLY" -eq 1 ] || [ "$LOAD_FEED" -eq 0 ]; then
+    # Quietly, because on an engine whose schema has not been applied the status
+    # query asks for a relation that does not exist yet. That is the schema step
+    # above reporting 0 migrations, not a fault worth a traceback here.
+    if uv run scripts/load_threatfox.py --status 2>/dev/null; then
+        :
+    else
+        warn "no feed status — apply the schema first (scripts/setup without --check)"
+    fi
+    [ "$LOAD_FEED" -eq 0 ] && note "--no-feed: nothing was fetched"
+else
+    uv run scripts/load_public_suffix_list.py
+    uv run scripts/load_threatfox.py
+fi
+
+# --- 5. the topics ----------------------------------------------------------
+# Created here rather than on first use: a producer publishing to a topic that
+# does not exist loses the message with no error, which task 0 recorded.
+step "Topics"
+uv run python -c "
+import sys; sys.path.insert(0, 'src')
+from helena.broker import BrokerProducer
+from helena.config import Settings
+s = Settings.load()
+check_only = ${CHECK_ONLY}
+with BrokerProducer.from_settings(s) as p:
+    for topic in (s.infrastructure.ingest_topic, s.infrastructure.output_topic):
+        if check_only:
+            print(f'  {topic}')
+        else:
+            created = p.create_topic(topic)
+            print(f'  {topic}  {\"created\" if created else \"already there\"}')
+"
+
+# --- 6. what is still missing ----------------------------------------------
+step "What this deployment can and cannot do"
+cat <<'END'
+  ingest    uv run scripts/replay_capture.py --captures DIR SHA256 --ingest
+            ... or publish to the ingest topic in the same wire form
+  context   the engine, continuously, from the migrations
+  enrich    uv run scripts/load_threatfox.py          (hourly at most)
+  assess    -- NOTHING. See below.
+  emit      uv run scripts/emit.py                    (--count to look first)
+  read      uv run scripts/consume_output.py          (--follow to stay)
+  watch     uv run scripts/status.py
+  back up   uv run scripts/backup.py --out .backups
+END
+printf '\n  %sThere is no assessment runner, and that is not a bug in this script.%s\n' "$ylw" "$rst"
+note "helena.orchestration.assess is ENTERED with a request; nothing in"
+note "src/helena builds one from a live context, because the scheduler that"
+note "would is not part of the first version. So this deployment ingests,"
+note "contextualises, enriches, emits and is observable -- and produces no"
+note "assessment until something calls assess()."
+note ""
+note "demo/run-demo 9 is the worked example: a real capture through all six"
+note "stages, ending in a message on the output topic. docs/deployment.md"
+note "section 1 is the same fact written down."
+
+if [ "$CHECK_ONLY" -eq 0 ]; then
+    printf '\n%s==>%s ready. %sscripts/consume_output.py --follow%s reads the far end.\n' \
+        "$bold" "$rst" "$bold" "$rst"
+fi
