@@ -26,6 +26,15 @@ It carries a whole network's traffic and no recorded clearance of the kind
 `data/connections/maintainer-host/README.md` gives the 62-record sample, so `.gitignore` keeps
 `data/connections/network-day/` out and this reads it where it lies.
 
+## Cost, measured rather than estimated
+
+The full day is 239 850 records and they arrive **one INSERT each**. Run on
+2026-09-14 it had not finished that stage after thirty minutes, and the engine
+went down during it — `--in-memory` on an 8 GB host, and no OOM record was
+reachable to confirm the cause. `--files 12` is the first two hours, completes
+in about ten minutes, and gives 1 135 contexts over 526 hosts: enough for
+everything below. Reach for the whole day only when the whole day is the point.
+
 ## What it does not show
 
 **No enrichment and no assessment**, the same two demo 1 omits, and **nothing

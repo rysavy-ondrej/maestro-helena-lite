@@ -42,7 +42,7 @@ agreement.
 | # | Script | Tier | What it shows | Data it needs | Runtime |
 | --- | --- | --- | --- | --- | --- |
 | 1 | `ingest_and_context.py` | foundations | one record's whole journey, at a size where every number checks by eye | `data/connections/maintainer-host/` (committed) | ~1 min |
-| 2 | `context_over_a_day.py` | scale | what a context looks like when there is enough traffic for the answer to be interesting | `data/connections/network-day/` (**not committed**) | ~20 min |
+| 2 | `context_over_a_day.py` | scale | what a context looks like when there is enough traffic for the answer to be interesting | `data/connections/network-day/` (**not committed**) | **`--files 12` ~10 min; the full day is heavier than it looks — see below** |
 | 3 | `assess_a_slice.py` | assessment | all six stages, ending in the message a consumer reads, twice — feed as published vs one entry repointed | `data/connections/maintainer-host/` + live feed + model | ~4 min |
 | 4 | `enrichment_states.py` | situations | `ok` / `stale` / `missing` / `failed` / `no_match` side by side, and why none of them means "safe" | committed; snapshot timing only | ~2 min |
 | 5 | `escalation_and_scope.py` | situations | the same indicator contacted vs only resolved — scope before severity, and the gate's subordination to escalation | committed + `plant_indicators.py` | ~3 min |
@@ -51,6 +51,16 @@ agreement.
 | 8 | `backup_and_restore.py` | situations | what survives, what rebuilds, and what a capture replay alone does *not* bring back | any prior run's store | ~3 min |
 | 9 | `assess_an_infection.py` | assessment | **a real malware infection end to end** — one MTA exercise, one genuinely compromised host, its real C2 chain, escalation and verdict | `data/connections/malware-traffic/` (**not committed**) + live feed + model | ~8 min, 3 windows |
 | 10 | `assess_a_day.py` | **proposed**, scale | the long run: a rebased day, planted, assessed, with cost and gate counts | `data/connections/network-day/` + both generators | hours |
+
+**Demo 2's full day costs more than the table can hold.** Run on 2026-09-14 it
+had not finished ingesting after **30 minutes**, and the engine went down during
+that stage: 239 850 records arrive as one INSERT each into an engine started
+`--in-memory` on an 8 GB host. No OOM record was reachable to confirm the cause,
+so that is the observation and not a diagnosis. `--files 12` — the first two
+hours — completes in about ten minutes and produced 1 135 contexts over 526
+hosts from 18 831 records, which is enough for everything the demo is about.
+Use the bounded form unless the whole day is the point, and expect to run
+`scripts/dev-down && scripts/dev-up` if it is.
 
 ### The tiers
 
