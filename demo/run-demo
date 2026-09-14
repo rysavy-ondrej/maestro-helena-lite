@@ -19,7 +19,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # to one and not the other is a test failure rather than a thing a reader finds
 # by running --list and being surprised.
 DEMOS=(ingest_and_context context_over_a_day assess_a_slice enrichment_states
-       escalation_and_scope failure_paths replay_an_assessment backup_and_restore)
+       escalation_and_scope failure_paths replay_an_assessment backup_and_restore
+       assess_an_infection)
 
 # The comment block at the top of this file, minus the leading '#', is the help.
 usage() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"; }

@@ -1,6 +1,6 @@
 # The demos: what each one shows, and why there is more than one
 
-Maturity: `experimental` as a set. Eight demos are shipped and one is proposed;
+Maturity: `experimental` as a set. Nine demos are shipped and one is proposed;
 the index below marks which is which, and `tests/test_demos.py` fails if the
 index and `demo/` disagree about what exists.
 
@@ -49,15 +49,17 @@ agreement.
 | 6 | `failure_paths.py` | situations | quarantine, a schema-invalid model answer, a budget-truncated run, a source outage — four failures that are never a verdict | committed; scripted model | ~3 min |
 | 7 | `replay_an_assessment.py` | situations | a stored assessment replayed against the versions **it recorded**, and what a replay refuses | any prior run's store | ~2 min |
 | 8 | `backup_and_restore.py` | situations | what survives, what rebuilds, and what a capture replay alone does *not* bring back | any prior run's store | ~3 min |
-| 9 | `assess_a_day.py` | **proposed**, scale | the long run: a rebased day, planted, assessed, with cost and gate counts | `data/connections/network-day/` + both generators | hours |
+| 9 | `assess_an_infection.py` | assessment | **a real malware infection end to end** — one MTA exercise, one genuinely compromised host, its real C2 chain, escalation and verdict | `data/connections/malware-traffic/` (**not committed**) + live feed + model | ~8 min, 3 windows |
+| 10 | `assess_a_day.py` | **proposed**, scale | the long run: a rebased day, planted, assessed, with cost and gate counts | `data/connections/network-day/` + both generators | hours |
 
 ### The tiers
 
 **foundations** (1) — one record, every number checkable.
-**assessment** (3) — the six stages and the message.
-**situations** (4–8) — one distinction each. These are the ones that are missing,
-and they are small on purpose: a demo that shows two things shows neither.
-**scale** (2, 9) — volume, cost, and what breaks at size.
+**assessment** (3, 9) — the six stages and the message; 9 is the same path over
+traffic that was really malicious rather than really benign.
+**situations** (4–8) — one distinction each, small on purpose: a demo that shows
+two things shows neither.
+**scale** (2, 10) — volume, cost, and what breaks at size.
 
 ## 4. Is the data we have enough?
 
@@ -72,7 +74,7 @@ and they are small on purpose: a demo that shows two things shows neither.
 | Quarantine | malformed records | **yes, trivially synthesised** — the input contract is `extra="forbid"`, so one unknown key does it |
 | A second enrichment source | a second mapping migration | **yes** — `tests/test_end_to_end.py::second_source_migrations` already builds one; a demo would reuse it rather than invent a second |
 | Time-correct enrichment over the day | the capture moved to meet a loadable snapshot | **yes, generated** — `scripts/rebase_capture.py` |
-| **Genuine malicious or multi-stage activity** | a real incident | **no, and no generator fixes it** |
+| **Genuine malicious or multi-stage activity** | a real incident | **yes, since 2026-09-14** — `data/connections/malware-traffic/`, ten MTA exercises, one infected Windows-AD client each. Demo 9 runs one |
 | **Ground truth for any verdict** | analyst labelling | **no** |
 
 So: **no new *traffic* is needed for demos 1–8.** What the existing capture cannot

@@ -101,6 +101,29 @@ name with no traffic behind it and `*.workers.dev`-style shared infrastructure.
 *What would change it:* a domain-side traffic test would need the flow join from
 name to connection, which the input supports and nothing builds yet.
 
+**Measured 2026-09-14, and it is worse in practice than this entry read.**
+`demo/assess_an_infection.py` put a real Malware-Traffic-Analysis infection
+through the pipeline — one genuinely compromised Windows client, its real C2
+chain, five claims at **confidence 1.0** — and **the deterministic escalation did
+not fire on a single one of the host's five windows.** Every claim was on a
+`domain` entity and every one was held back by the same rule, which the demo
+names on each run:
+
+    domain  know.mom-nower.com   supports=suspicious  held by
+                                 ['a_name_carries_no_traffic_of_its_own']
+
+The consequence is sharper than "the rule is weaker on domains". `concept/07`
+makes deterministic escalation independent *so that a model returning `normal`
+cannot bury a high-confidence match* — and **for a domain-only match there is no
+such backstop to be independent.** In that run the analyst was reached because
+triage said `suspicious`; had it said `normal`, nothing would have escalated the
+context, and nothing in the pipeline would have disagreed. The verdict was
+`malicious` with five citations, and it rested entirely on the model.
+
+This does not change the disposition — a domain-side traffic test is still what
+would close it — but it moves the entry from a limit somebody reasoned about to
+one that has been watched happening on real malware traffic.
+
 ## 6. The base rate
 
 **Coverage is sparse; most contexts have no hit on anything. A classifier that

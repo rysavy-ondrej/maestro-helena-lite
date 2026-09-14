@@ -26,10 +26,17 @@ data/enrichment/netify
 
 # Connection records held for demonstration and measurement. Unlike
 # data/connections/maintainer-host/ - 62 records of the maintainer's own host,
-# with a recorded clearance and a datasheet - these carry whole networks of
-# traffic and no such clearance is recorded for them. Measure against them in
-# place; commit an extract only once one is.
+# with a recorded clearance and a datasheet - these carry traffic this project
+# did not capture and holds no redistribution clearance for. Measure against
+# them in place; commit an extract only once a clearance is recorded.
+#
+# The malware corpus is records DERIVED from third-party captures, which is a
+# narrower thing than the captures - but narrower is not cleared, and the
+# datasheet beside it is committed so the corpus is described even where it is
+# absent.
 data/connections/network-day
+data/connections/malware-traffic/conn
+data/connections/malware-traffic/manifest.csv
 
 # The runner budget cache: transient state, rewritten on every run.
 # Tracking it makes the linear-history gate fire on its own churn.
