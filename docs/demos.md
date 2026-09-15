@@ -49,7 +49,7 @@ agreement.
 | 6 | `failure_paths.py` | situations | quarantine, a schema-invalid model answer, a budget-truncated run, a source outage — four failures that are never a verdict | committed; scripted model | ~3 min |
 | 7 | `replay_an_assessment.py` | situations | a stored assessment replayed against the versions **it recorded**, and what a replay refuses | any prior run's store | ~2 min |
 | 8 | `backup_and_restore.py` | situations | what survives, what rebuilds, and what a capture replay alone does *not* bring back | any prior run's store | ~3 min |
-| 9 | `assess_an_infection.py` | assessment | **a real malware infection end to end** — one MTA exercise, one genuinely compromised host, its real C2 chain, escalation and verdict | `data/connections/malware-traffic/` (**not committed**) + live feed + model | ~8 min, 3 windows |
+| 9 | `assess_an_infection.py` | assessment | **a real malware infection end to end** — one MTA exercise, one genuinely compromised host, its real C2 chain, escalation and verdict — with every computed context and every model exchange written out as YAML | `data/connections/malware-traffic/` (**not committed**) + live feed + model | ~8 min, 3 windows |
 | 10 | `assess_a_day.py` | **proposed**, scale | the long run: a rebased day, planted, assessed, with cost and gate counts | `data/connections/network-day/` + both generators | hours |
 
 **Demo 2's full day costs more than the table can hold.** Run on 2026-09-14 it
