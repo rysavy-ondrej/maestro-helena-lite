@@ -57,3 +57,10 @@ prds/.usage-cache.json
 # Derived from a capture that is not in this repository, and a planted capture in
 # source control is a file that looks like evidence of an intrusion.
 .corpus/
+
+# What a demo run writes down (demo/assess_an_infection.py --out): the contexts
+# it computed, the prompts it sent and the answers it got. Derived from the same
+# uncommitted captures and covered by the same answer - and a file listing real
+# C2 infrastructure in source control is a file that looks like evidence of an
+# intrusion.
+.demo/
